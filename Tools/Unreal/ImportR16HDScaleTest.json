@@ -1,0 +1,19 @@
+{
+  "ImportGroups": [
+    {
+      "FileNames": [
+        "C:/Users/USER/Documents/Unreal Projects/DigitalTwin/Content/DigitalTwin/Art/R16HD/ForkLeft_UEcmTest.fbx"
+      ],
+      "DestinationPath": "/Game/DigitalTwin/Art/R16HD/ScaleTest",
+      "bReplaceExisting": true,
+      "FactoryName": "FbxFactory",
+      "ImportSettings": {
+        "bImportMesh": true,
+        "bImportAsSkeletal": false,
+        "bImportMaterials": false,
+        "bImportTextures": false,
+        "StaticMeshImportData": { "bAutoGenerateCollision": false }
+      }
+    }
+  ]
+}

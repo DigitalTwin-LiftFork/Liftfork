@@ -73,3 +73,20 @@ Plugins/**/Intermediate/*
 
 # Cache files for the editor to use
 DerivedDataCache/*
+
+# 프로젝트 루트의 생성 파일
+/Binaries/
+/Intermediate/
+/Saved/
+/DerivedDataCache/
+/.vs/
+
+# IDE 생성 파일
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+
+# Blender 자동 백업
+*.blend1
+*.blend2

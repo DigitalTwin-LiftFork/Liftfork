@@ -1,0 +1,36 @@
+{
+  "ImportGroups": [
+    {
+      "FileNames": [
+        "C:/Users/USER/Documents/Unreal Projects/DigitalTwin/Content/DigitalTwin/Art/R16HD/Body_Actual.fbx",
+        "C:/Users/USER/Documents/Unreal Projects/DigitalTwin/Content/DigitalTwin/Art/R16HD/DriveSteerWheel_Actual.fbx",
+        "C:/Users/USER/Documents/Unreal Projects/DigitalTwin/Content/DigitalTwin/Art/R16HD/LoadWheel_Actual.fbx",
+        "C:/Users/USER/Documents/Unreal Projects/DigitalTwin/Content/DigitalTwin/Art/R16HD/Underframe_Actual.fbx",
+        "C:/Users/USER/Documents/Unreal Projects/DigitalTwin/Content/DigitalTwin/Art/R16HD/MastOuter_Actual.fbx",
+        "C:/Users/USER/Documents/Unreal Projects/DigitalTwin/Content/DigitalTwin/Art/R16HD/MastInner_Actual.fbx",
+        "C:/Users/USER/Documents/Unreal Projects/DigitalTwin/Content/DigitalTwin/Art/R16HD/MastLift_Actual.fbx",
+        "C:/Users/USER/Documents/Unreal Projects/DigitalTwin/Content/DigitalTwin/Art/R16HD/ReachCarriage_Actual.fbx",
+        "C:/Users/USER/Documents/Unreal Projects/DigitalTwin/Content/DigitalTwin/Art/R16HD/ForkCarriage_Actual.fbx",
+        "C:/Users/USER/Documents/Unreal Projects/DigitalTwin/Content/DigitalTwin/Art/R16HD/ForkLeft_Actual.fbx",
+        "C:/Users/USER/Documents/Unreal Projects/DigitalTwin/Content/DigitalTwin/Art/R16HD/ForkRight_Actual.fbx"
+      ],
+      "DestinationPath": "/Game/DigitalTwin/Art/R16HD/Imported",
+      "bReplaceExisting": true,
+      "bSkipReadOnly": false,
+      "FactoryName": "FbxFactory",
+      "ImportSettings": {
+        "bImportMesh": true,
+        "bImportAsSkeletal": false,
+        "bImportMaterials": true,
+        "bImportTextures": false,
+        "bCombineMeshes": true,
+        "StaticMeshImportData": {
+          "bAutoGenerateCollision": false,
+          "bCombineMeshes": true,
+          "bGenerateLightmapUVs": true,
+          "bRemoveDegenerates": true
+        }
+      }
+    }
+  ]
+}
