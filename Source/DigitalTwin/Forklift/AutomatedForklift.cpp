@@ -162,7 +162,7 @@ void AAutomatedForklift::SpawnPallet()
 	const FVector SpawnLocation = GetActorLocation() + GetActorForwardVector() * 300.f;
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-	GetWorld()->SpawnActor<APallet>(APallet::StaticClass(), FVector(SpawnLocation.X, SpawnLocation.Y, 0.f), GetActorRotation(), Params);
+	GetWorld()->SpawnActor<APallet>(APallet::StaticClass(), FVector(SpawnLocation.X, SpawnLocation.Y, 7.f), GetActorRotation(), Params);
 }
 
 void AAutomatedForklift::InteractWithPallet()
@@ -171,6 +171,7 @@ void AAutomatedForklift::InteractWithPallet()
 	{
 		if (LiftCm > 12.f) return; // Lower the forks before setting the load down.
 		CarriedPallet->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
+		CarriedPallet->SetCarriedState(false);
 		CarriedPallet = nullptr;
 		bIsLoaded = false;
 		return;
@@ -187,6 +188,7 @@ void AAutomatedForklift::InteractWithPallet()
 		const FVector LocalPallet = GetActorTransform().InverseTransformPosition(Pallet->GetActorLocation());
 		if (LocalPallet.X < 55.f || LocalPallet.X > Dimensions.ForkLengthCm + Dimensions.ReachTravelCm + 110.f || FMath::Abs(LocalPallet.Y) > 32.f || LiftCm > 20.f) continue;
 		CarriedPallet = Pallet;
+		CarriedPallet->SetCarriedState(true);
 		CarriedPallet->AttachToComponent(ForkCarriage, FAttachmentTransformRules::KeepWorldTransform);
 		bIsLoaded = true;
 		return;
