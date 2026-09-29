@@ -41,6 +41,7 @@ AAutomatedForklift::AAutomatedForklift()
 	BodyCollision = CreateDefaultSubobject<UBoxComponent>(TEXT("BodyCollision"));
 	SetRootComponent(BodyCollision);
 	BodyCollision->SetCollisionProfileName(TEXT("Pawn"));
+	BodyCollision->SetCollisionResponseToChannel(ECC_PhysicsBody, ECR_Ignore);
 	CameraBoom = CreateDefaultSubobject<USpringArmComponent>(TEXT("ForkliftRearThreeQuarterCameraBoom"));
 	CameraBoom->SetupAttachment(BodyCollision);
 	CameraBoom->TargetArmLength = 700.f;
@@ -71,7 +72,16 @@ AAutomatedForklift::AAutomatedForklift()
 	LeftForkVisual = CreateVisual(TEXT("LeftForkVisual_ReplaceMesh"), ForkCarriage);
 	RightForkVisual = CreateVisual(TEXT("RightForkVisual_ReplaceMesh"), ForkCarriage);
 	ForkCollision = CreateDefaultSubobject<UBoxComponent>(TEXT("ForkCollision")); ForkCollision->SetupAttachment(ForkCarriage);
-	ForkCollision->SetCollisionProfileName(TEXT("BlockAll"));
+	// This is only the broad pickup-query volume; tine collision stays separated
+	// so the forks can pass through the pallet's two lower openings.
+	ForkCollision->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	LeftForkCollision = CreateDefaultSubobject<UBoxComponent>(TEXT("LeftForkCollision")); LeftForkCollision->SetupAttachment(ForkCarriage);
+	RightForkCollision = CreateDefaultSubobject<UBoxComponent>(TEXT("RightForkCollision")); RightForkCollision->SetupAttachment(ForkCarriage);
+	for (UBoxComponent* Tine : {LeftForkCollision.Get(), RightForkCollision.Get()})
+	{
+		Tine->SetCollisionProfileName(TEXT("BlockAll"));
+		Tine->SetCollisionObjectType(ECC_WorldDynamic);
+	}
 
 	BodyVisual->SetStaticMesh(Forklift::Body()); UnderframeVisual->SetStaticMesh(Forklift::Underframe());
 	DriveWheelVisual->SetStaticMesh(Forklift::DriveWheel()); LeftLoadWheelVisual->SetStaticMesh(Forklift::LoadWheel()); RightLoadWheelVisual->SetStaticMesh(Forklift::LoadWheel());
@@ -128,6 +138,11 @@ void AAutomatedForklift::ApplyDimensions()
 	LeftForkVisual->SetRelativeScale3D(FVector::OneVector); RightForkVisual->SetRelativeScale3D(FVector::OneVector);
 	ForkCollision->SetRelativeLocation(FVector(ForkMountForwardOffsetCm + Dimensions.ForkLengthCm * .5f, 0, Dimensions.ForkThicknessCm * .5f));
 	ForkCollision->SetBoxExtent(FVector(Dimensions.ForkLengthCm * .5f, 35.f, Dimensions.ForkThicknessCm * .5f));
+	for (const TPair<UBoxComponent*, float>& Tine : {TPair<UBoxComponent*, float>(LeftForkCollision, -30.f), TPair<UBoxComponent*, float>(RightForkCollision, 30.f)})
+	{
+		Tine.Key->SetRelativeLocation(FVector(ForkMountForwardOffsetCm + Dimensions.ForkLengthCm * .5f, Tine.Value, Dimensions.ForkThicknessCm * .5f));
+		Tine.Key->SetBoxExtent(FVector(Dimensions.ForkLengthCm * .5f, Dimensions.ForkWidthCm * .5f, Dimensions.ForkThicknessCm * .5f));
+	}
 }
 
 void AAutomatedForklift::SetupPlayerInputComponent(UInputComponent* Input)
@@ -162,7 +177,7 @@ void AAutomatedForklift::SpawnPallet()
 	const FVector SpawnLocation = GetActorLocation() + GetActorForwardVector() * 300.f;
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-	GetWorld()->SpawnActor<APallet>(APallet::StaticClass(), FVector(SpawnLocation.X, SpawnLocation.Y, 7.f), GetActorRotation(), Params);
+	GetWorld()->SpawnActor<APallet>(APallet::StaticClass(), FVector(SpawnLocation.X, SpawnLocation.Y, 5.f), GetActorRotation(), Params);
 }
 
 void AAutomatedForklift::InteractWithPallet()
@@ -186,7 +201,10 @@ void AAutomatedForklift::InteractWithPallet()
 		APallet* Pallet = Cast<APallet>(Overlap.GetActor());
 		if (!Pallet) continue;
 		const FVector LocalPallet = GetActorTransform().InverseTransformPosition(Pallet->GetActorLocation());
-		if (LocalPallet.X < 55.f || LocalPallet.X > Dimensions.ForkLengthCm + Dimensions.ReachTravelCm + 110.f || FMath::Abs(LocalPallet.Y) > 32.f || LiftCm > 20.f) continue;
+		const float PalletYawDelta = FMath::Abs(FMath::FindDeltaAngleDegrees(GetActorRotation().Yaw, Pallet->GetActorRotation().Yaw));
+		const FVector LeftTip = Pallet->GetActorTransform().InverseTransformPosition(LeftForkCollision->GetComponentTransform().TransformPosition(FVector(Dimensions.ForkLengthCm * .5f, 0.f, 0.f)));
+		const FVector RightTip = Pallet->GetActorTransform().InverseTransformPosition(RightForkCollision->GetComponentTransform().TransformPosition(FVector(Dimensions.ForkLengthCm * .5f, 0.f, 0.f)));
+		if (LocalPallet.X < 55.f || PalletYawDelta > 5.f || LiftCm > 2.f || LeftTip.X < -55.f || LeftTip.X > 60.f || RightTip.X < -55.f || RightTip.X > 60.f || LeftTip.Y < -36.f || LeftTip.Y > -8.f || RightTip.Y < 8.f || RightTip.Y > 36.f) continue;
 		CarriedPallet = Pallet;
 		CarriedPallet->SetCarriedState(true);
 		CarriedPallet->AttachToComponent(ForkCarriage, FAttachmentTransformRules::KeepWorldTransform);
@@ -213,7 +231,20 @@ void AAutomatedForklift::Tick(float Dt)
 	const float Speed = DriveInput >= 0.f ? Motion.ForwardSpeedCmPerSec : Motion.ReverseSpeedCmPerSec;
 	TargetForwardSpeedCmPerSec = DriveInput * Speed;
 	const FVector StartLocation = GetActorLocation(); FHitResult DriveHit;
-	AddActorWorldOffset(GetActorForwardVector() * TargetForwardSpeedCmPerSec * Dt, true, &DriveHit);
+	FVector DriveDelta = GetActorForwardVector() * TargetForwardSpeedCmPerSec * Dt;
+	float EarliestTineHit = 1.f;
+	FCollisionQueryParams ForkSweepParams(SCENE_QUERY_STAT(ForkliftTineSweep), false, this);
+	for (UBoxComponent* Tine : {LeftForkCollision.Get(), RightForkCollision.Get()})
+	{
+		FHitResult TineHit;
+		if (GetWorld()->SweepSingleByChannel(TineHit, Tine->GetComponentLocation(), Tine->GetComponentLocation() + DriveDelta,
+			Tine->GetComponentQuat(), ECC_WorldDynamic, FCollisionShape::MakeBox(Tine->GetScaledBoxExtent()), ForkSweepParams) && TineHit.bBlockingHit)
+		{
+			EarliestTineHit = FMath::Min(EarliestTineHit, TineHit.Time);
+		}
+	}
+	if (EarliestTineHit < 1.f) DriveDelta *= FMath::Max(0.f, EarliestTineHit - .01f);
+	AddActorWorldOffset(DriveDelta, true, &DriveHit);
 	const FVector EndLocation = GetActorLocation();
 	CurrentForwardSpeedCmPerSec = Dt > SMALL_NUMBER ? FVector::DotProduct((EndLocation - StartLocation) / Dt, GetActorForwardVector()) : 0.f;
 	const bool bIsDriving = !FMath::IsNearlyZero(DriveInput); if (bIsDriving && !bWasDriving) LogInitialDriveOverlaps(); if (bIsDriving) EmitDriveDiagnostic(StartLocation, EndLocation, DriveHit); bWasDriving = bIsDriving;

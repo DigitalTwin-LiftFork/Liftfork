@@ -21,4 +21,6 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Pallet") TObjectPtr<UBoxComponent> CollisionBody;
 private:
 	UStaticMeshComponent* AddBoard(const TCHAR* Name, const FVector& Location, const FVector& Scale);
+	UBoxComponent* AddCollisionShape(const TCHAR* Name, const FVector& Location, const FVector& HalfExtent);
+	UPROPERTY(Transient) TArray<TObjectPtr<UBoxComponent>> CollisionShapes;
 };
