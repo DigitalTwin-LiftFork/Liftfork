@@ -1,4 +1,5 @@
 #include "Forklift/AutomatedForklift.h"
+#include "Forklift/Pallet.h"
 #include "Components/BoxComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/SceneComponent.h"
@@ -143,6 +144,8 @@ void AAutomatedForklift::SetupPlayerInputComponent(UInputComponent* Input)
 	Input->BindAction(TEXT("ForkliftCameraOrbit"), IE_Pressed, this, &AAutomatedForklift::BeginCameraOrbit);
 	Input->BindAction(TEXT("ForkliftCameraOrbit"), IE_Released, this, &AAutomatedForklift::EndCameraOrbit);
 	Input->BindAction(TEXT("ForkliftCameraReset"), IE_Pressed, this, &AAutomatedForklift::ResetCamera);
+	Input->BindAction(TEXT("ForkliftSpawnPallet"), IE_Pressed, this, &AAutomatedForklift::SpawnPallet);
+	Input->BindAction(TEXT("ForkliftPalletInteract"), IE_Pressed, this, &AAutomatedForklift::InteractWithPallet);
 }
 void AAutomatedForklift::Drive(float V) { DriveInput = V; } void AAutomatedForklift::Steer(float V) { SteerInput = V; }
 void AAutomatedForklift::Lift(float V) { LiftInput = V; } void AAutomatedForklift::Reach(float V) { ReachInput = V; } void AAutomatedForklift::SideShift(float V) { SideShiftInput = V; }
@@ -152,6 +155,44 @@ void AAutomatedForklift::ResetCamera() { CameraPitchDeg = -24.f; CameraYawDeg = 
 void AAutomatedForklift::CameraYaw(float V) { if (bCameraOrbiting && !FMath::IsNearlyZero(V)) { CameraYawDeg += V * 2.f; CameraBoom->SetRelativeRotation(FRotator(CameraPitchDeg, CameraYawDeg, 0.f)); } }
 void AAutomatedForklift::CameraPitch(float V) { if (bCameraOrbiting && !FMath::IsNearlyZero(V)) { CameraPitchDeg = FMath::Clamp(CameraPitchDeg + V * 2.f, CameraMinPitchDeg, CameraMaxPitchDeg); CameraBoom->SetRelativeRotation(FRotator(CameraPitchDeg, CameraYawDeg, 0.f)); } }
 void AAutomatedForklift::CameraZoom(float V) { if (!FMath::IsNearlyZero(V)) { CameraDistanceCm = FMath::Clamp(CameraDistanceCm - V * CameraZoomStepCm, CameraMinDistanceCm, CameraMaxDistanceCm); CameraBoom->TargetArmLength = CameraDistanceCm; } }
+
+void AAutomatedForklift::SpawnPallet()
+{
+	if (!GetWorld()) return;
+	const FVector SpawnLocation = GetActorLocation() + GetActorForwardVector() * 300.f;
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	GetWorld()->SpawnActor<APallet>(APallet::StaticClass(), FVector(SpawnLocation.X, SpawnLocation.Y, 0.f), GetActorRotation(), Params);
+}
+
+void AAutomatedForklift::InteractWithPallet()
+{
+	if (CarriedPallet)
+	{
+		if (LiftCm > 12.f) return; // Lower the forks before setting the load down.
+		CarriedPallet->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
+		CarriedPallet = nullptr;
+		bIsLoaded = false;
+		return;
+	}
+
+	TArray<FOverlapResult> Overlaps;
+	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(ForkliftPalletPickup), false, this);
+	GetWorld()->OverlapMultiByObjectType(Overlaps, ForkCollision->GetComponentLocation(), ForkCollision->GetComponentQuat(),
+		FCollisionObjectQueryParams(FCollisionObjectQueryParams::AllObjects), FCollisionShape::MakeBox(FVector(Dimensions.ForkLengthCm * .5f + 55.f, 45.f, 30.f)), QueryParams);
+	for (const FOverlapResult& Overlap : Overlaps)
+	{
+		APallet* Pallet = Cast<APallet>(Overlap.GetActor());
+		if (!Pallet) continue;
+		const FVector LocalPallet = GetActorTransform().InverseTransformPosition(Pallet->GetActorLocation());
+		if (LocalPallet.X < 55.f || LocalPallet.X > Dimensions.ForkLengthCm + Dimensions.ReachTravelCm + 110.f || FMath::Abs(LocalPallet.Y) > 32.f || LiftCm > 20.f) continue;
+		CarriedPallet = Pallet;
+		CarriedPallet->AttachToComponent(ForkCarriage, FAttachmentTransformRules::KeepWorldTransform);
+		bIsLoaded = true;
+		return;
+	}
+}
+
 void AAutomatedForklift::LogInitialDriveOverlaps()
 {
 	TArray<FOverlapResult> Overlaps; FCollisionQueryParams Params(SCENE_QUERY_STAT(ForkliftInitialDriveOverlap), false, this);

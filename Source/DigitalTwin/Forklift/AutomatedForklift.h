@@ -11,6 +11,7 @@ class USpringArmComponent;
 class UInputComponent;
 class UStaticMeshComponent;
 class USceneComponent;
+class APallet;
 
 /** All dimensions use Unreal centimetres (the source specification is mm / m). */
 USTRUCT(BlueprintType)
@@ -131,7 +132,10 @@ private:
 	void CameraYaw(float Value); void CameraPitch(float Value); void CameraZoom(float Value);
 	void BeginCameraOrbit(); void EndCameraOrbit(); void ResetCamera();
 	void ApplyDimensions();
+	void SpawnPallet();
+	void InteractWithPallet();
 	void EmitDriveDiagnostic(const FVector& StartLocation, const FVector& EndLocation, const FHitResult& Hit);
 	void LogInitialDriveOverlaps();
 	UStaticMeshComponent* CreateVisual(const TCHAR* Name, USceneComponent* Parent);
+	UPROPERTY() TObjectPtr<APallet> CarriedPallet;
 };
