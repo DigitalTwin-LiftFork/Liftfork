@@ -105,6 +105,9 @@ public:
 	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> ForkCollision;
 	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> LeftForkCollision;
 	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> RightForkCollision;
+	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> LeftMastCollision;
+	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> RightMastCollision;
+	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> CarriageCollision;
 
 	UPROPERTY(VisibleAnywhere, Category="Kinematics") TObjectPtr<USceneComponent> MastAssembly;
 	UPROPERTY(VisibleAnywhere, Category="Kinematics") TObjectPtr<USceneComponent> LiftCarriage;

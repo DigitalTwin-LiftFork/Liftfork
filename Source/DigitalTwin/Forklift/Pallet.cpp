@@ -8,34 +8,34 @@ APallet::APallet()
 	PrimaryActorTick.bCanEverTick = false;
 	CollisionBody = CreateDefaultSubobject<UBoxComponent>(TEXT("PalletCollision"));
 	SetRootComponent(CollisionBody);
-	CollisionBody->SetBoxExtent(FVector(60.f, 4.f, 5.f));
+	CollisionBody->SetBoxExtent(FVector(55.f, 10.f, 1.f));
 	CollisionBody->SetCollisionProfileName(TEXT("PhysicsActor"));
 	CollisionBody->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	CollisionBody->SetMobility(EComponentMobility::Movable);
 	CollisionShapes.Add(CollisionBody);
-	AddCollisionShape(TEXT("LeftRunnerCollision"), FVector(0.f, -44.f, 0.f), FVector(60.f, 3.f, 5.f));
-	AddCollisionShape(TEXT("RightRunnerCollision"), FVector(0.f, 44.f, 0.f), FVector(60.f, 3.f, 5.f));
-	AddCollisionShape(TEXT("DeckSlat01Collision"), FVector(-54.f, 0.f, 7.f), FVector(5.f, 50.f, 2.f));
-	AddCollisionShape(TEXT("DeckSlat02Collision"), FVector(-36.f, 0.f, 7.f), FVector(5.f, 50.f, 2.f));
-	AddCollisionShape(TEXT("DeckSlat03Collision"), FVector(-18.f, 0.f, 7.f), FVector(5.f, 50.f, 2.f));
-	AddCollisionShape(TEXT("DeckSlat04Collision"), FVector(0.f, 0.f, 7.f), FVector(5.f, 50.f, 2.f));
-	AddCollisionShape(TEXT("DeckSlat05Collision"), FVector(18.f, 0.f, 7.f), FVector(5.f, 50.f, 2.f));
-	AddCollisionShape(TEXT("DeckSlat06Collision"), FVector(36.f, 0.f, 7.f), FVector(5.f, 50.f, 2.f));
-	AddCollisionShape(TEXT("DeckSlat07Collision"), FVector(54.f, 0.f, 7.f), FVector(5.f, 50.f, 2.f));
+	AddCollisionShape(TEXT("LeftRunnerCollision"), FVector(0.f, -47.5f, 0.f), FVector(55.f, 7.5f, 1.f));
+	AddCollisionShape(TEXT("RightRunnerCollision"), FVector(0.f, 47.5f, 0.f), FVector(55.f, 7.5f, 1.f));
+	AddCollisionShape(TEXT("DeckSlat01Collision"), FVector(-47.f, 0.f, 13.f), FVector(7.5f, 55.f, 1.f));
+	AddCollisionShape(TEXT("DeckSlat02Collision"), FVector(-31.f, 0.f, 13.f), FVector(7.5f, 55.f, 1.f));
+	AddCollisionShape(TEXT("DeckSlat03Collision"), FVector(-15.f, 0.f, 13.f), FVector(7.5f, 55.f, 1.f));
+	AddCollisionShape(TEXT("DeckSlat04Collision"), FVector(0.f, 0.f, 13.f), FVector(7.5f, 55.f, 1.f));
+	AddCollisionShape(TEXT("DeckSlat05Collision"), FVector(15.f, 0.f, 13.f), FVector(7.5f, 55.f, 1.f));
+	AddCollisionShape(TEXT("DeckSlat06Collision"), FVector(31.f, 0.f, 13.f), FVector(7.5f, 55.f, 1.f));
+	AddCollisionShape(TEXT("DeckSlat07Collision"), FVector(47.f, 0.f, 13.f), FVector(7.5f, 55.f, 1.f));
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> Cube(TEXT("/Engine/BasicShapes/Cube.Cube"));
 	if (Cube.Succeeded())
 	{
-		// 120 x 100 cm footprint. The three runners leave two 38 cm fork lanes.
-		AddBoard(TEXT("DeckSlat01"), FVector(-54.f, 0.f, 7.f), FVector(0.1f, 1.f, 0.04f));
-		AddBoard(TEXT("DeckSlat02"), FVector(-36.f, 0.f, 7.f), FVector(0.1f, 1.f, 0.04f));
-		AddBoard(TEXT("DeckSlat03"), FVector(-18.f, 0.f, 7.f), FVector(0.1f, 1.f, 0.04f));
-		AddBoard(TEXT("DeckSlat04"), FVector(0.f, 0.f, 7.f), FVector(0.1f, 1.f, 0.04f));
-		AddBoard(TEXT("DeckSlat05"), FVector(18.f, 0.f, 7.f), FVector(0.1f, 1.f, 0.04f));
-		AddBoard(TEXT("DeckSlat06"), FVector(36.f, 0.f, 7.f), FVector(0.1f, 1.f, 0.04f));
-		AddBoard(TEXT("DeckSlat07"), FVector(54.f, 0.f, 7.f), FVector(0.1f, 1.f, 0.04f));
-		AddBoard(TEXT("RunnerLeft"), FVector(0.f, -44.f, 0.f), FVector(1.2f, 0.06f, 0.1f));
-		AddBoard(TEXT("RunnerCenter"), FVector(0.f, 0.f, 0.f), FVector(1.2f, 0.08f, 0.1f));
-		AddBoard(TEXT("RunnerRight"), FVector(0.f, 44.f, 0.f), FVector(1.2f, 0.06f, 0.1f));
+		// Exact 110 x 110 x 15 cm pallet: 2 cm top/bottom, 11 cm fork openings.
+		AddBoard(TEXT("DeckSlat01"), FVector(-47.f, 0.f, 13.f), FVector(0.15f, 1.1f, 0.02f));
+		AddBoard(TEXT("DeckSlat02"), FVector(-31.f, 0.f, 13.f), FVector(0.15f, 1.1f, 0.02f));
+		AddBoard(TEXT("DeckSlat03"), FVector(-15.f, 0.f, 13.f), FVector(0.15f, 1.1f, 0.02f));
+		AddBoard(TEXT("DeckSlat04"), FVector(0.f, 0.f, 13.f), FVector(0.15f, 1.1f, 0.02f));
+		AddBoard(TEXT("DeckSlat05"), FVector(15.f, 0.f, 13.f), FVector(0.15f, 1.1f, 0.02f));
+		AddBoard(TEXT("DeckSlat06"), FVector(31.f, 0.f, 13.f), FVector(0.15f, 1.1f, 0.02f));
+		AddBoard(TEXT("DeckSlat07"), FVector(47.f, 0.f, 13.f), FVector(0.15f, 1.1f, 0.02f));
+		AddBoard(TEXT("RunnerLeft"), FVector(0.f, -47.5f, 0.f), FVector(1.1f, 0.15f, 0.02f));
+		AddBoard(TEXT("RunnerCenter"), FVector(0.f, 0.f, 0.f), FVector(1.1f, 0.2f, 0.02f));
+		AddBoard(TEXT("RunnerRight"), FVector(0.f, 47.5f, 0.f), FVector(1.1f, 0.15f, 0.02f));
 	}
 }
 

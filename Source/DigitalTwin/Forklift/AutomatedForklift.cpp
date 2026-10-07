@@ -41,7 +41,7 @@ AAutomatedForklift::AAutomatedForklift()
 	BodyCollision = CreateDefaultSubobject<UBoxComponent>(TEXT("BodyCollision"));
 	SetRootComponent(BodyCollision);
 	BodyCollision->SetCollisionProfileName(TEXT("Pawn"));
-	BodyCollision->SetCollisionResponseToChannel(ECC_PhysicsBody, ECR_Ignore);
+	BodyCollision->SetCollisionResponseToChannel(ECC_PhysicsBody, ECR_Block);
 	CameraBoom = CreateDefaultSubobject<USpringArmComponent>(TEXT("ForkliftRearThreeQuarterCameraBoom"));
 	CameraBoom->SetupAttachment(BodyCollision);
 	CameraBoom->TargetArmLength = 700.f;
@@ -61,6 +61,13 @@ AAutomatedForklift::AAutomatedForklift()
 	LeftLoadWheelVisual = CreateVisual(TEXT("LeftLoadWheelVisual_ReplaceMesh"), BodyCollision);
 	RightLoadWheelVisual = CreateVisual(TEXT("RightLoadWheelVisual_ReplaceMesh"), BodyCollision);
 	MastAssembly = CreateDefaultSubobject<USceneComponent>(TEXT("MastAssembly")); MastAssembly->SetupAttachment(BodyCollision);
+	LeftMastCollision = CreateDefaultSubobject<UBoxComponent>(TEXT("LeftMastCollision")); LeftMastCollision->SetupAttachment(MastAssembly);
+	RightMastCollision = CreateDefaultSubobject<UBoxComponent>(TEXT("RightMastCollision")); RightMastCollision->SetupAttachment(MastAssembly);
+	for (UBoxComponent* MastRail : {LeftMastCollision.Get(), RightMastCollision.Get()})
+	{
+		MastRail->SetCollisionProfileName(TEXT("BlockAll"));
+		MastRail->SetCollisionObjectType(ECC_WorldDynamic);
+	}
 	MastOuterVisual = CreateVisual(TEXT("MastOuterVisual_ReplaceMesh"), MastAssembly);
 	MastInnerVisual = CreateVisual(TEXT("MastInnerVisual_ReplaceMesh"), MastAssembly);
 	MastLiftVisual = CreateVisual(TEXT("MastLiftVisual_ReplaceMesh"), MastAssembly);
@@ -68,6 +75,9 @@ AAutomatedForklift::AAutomatedForklift()
 	ReachCarriage = CreateDefaultSubobject<USceneComponent>(TEXT("ReachCarriage")); ReachCarriage->SetupAttachment(LiftCarriage);
 	ReachVisual = CreateVisual(TEXT("ReachVisual_ReplaceMesh"), ReachCarriage);
 	ForkCarriage = CreateDefaultSubobject<USceneComponent>(TEXT("ForkCarriage")); ForkCarriage->SetupAttachment(ReachCarriage);
+	CarriageCollision = CreateDefaultSubobject<UBoxComponent>(TEXT("CarriageCollision")); CarriageCollision->SetupAttachment(ForkCarriage);
+	CarriageCollision->SetCollisionProfileName(TEXT("BlockAll"));
+	CarriageCollision->SetCollisionObjectType(ECC_WorldDynamic);
 	ForkCarriageVisual = CreateVisual(TEXT("ForkCarriageVisual_ReplaceMesh"), ForkCarriage);
 	LeftForkVisual = CreateVisual(TEXT("LeftForkVisual_ReplaceMesh"), ForkCarriage);
 	RightForkVisual = CreateVisual(TEXT("RightForkVisual_ReplaceMesh"), ForkCarriage);
@@ -121,26 +131,37 @@ void AAutomatedForklift::ApplyDimensions()
 	// Imported FBXs are already centimetre-correct. Do not reuse the BasicShapes cube scaling.
 	BodyVisual->SetRelativeScale3D(FVector::OneVector); UnderframeVisual->SetRelativeScale3D(FVector::OneVector);
 	MastAssembly->SetRelativeLocation(FVector(Dimensions.OverallLengthCm * .5f - 10.f, 0, -Dimensions.BodyHeightCm * .5f));
+	const float MastRailOffsetY = FMath::Max(6.f, Dimensions.MastWidthCm * .5f - 6.f);
+	LeftMastCollision->SetRelativeLocation(FVector(0.f, -MastRailOffsetY, Dimensions.MaximumLiftHeightCm * .5f));
+	RightMastCollision->SetRelativeLocation(FVector(0.f, MastRailOffsetY, Dimensions.MaximumLiftHeightCm * .5f));
+	LeftMastCollision->SetBoxExtent(FVector(6.f, 6.f, Dimensions.MaximumLiftHeightCm * .5f));
+	RightMastCollision->SetBoxExtent(FVector(6.f, 6.f, Dimensions.MaximumLiftHeightCm * .5f));
 	MastOuterVisual->SetRelativeLocation(FVector(0, 0, Dimensions.MaximumLiftHeightCm * .5f));
 	MastOuterVisual->SetRelativeScale3D(FVector::OneVector);
 	MastInnerVisual->SetRelativeLocation(FVector(-8.f, 0, Dimensions.MaximumLiftHeightCm * .45f));
 	MastInnerVisual->SetRelativeScale3D(FVector::OneVector);
 	MastLiftVisual->SetRelativeLocation(FVector(-14.f, 0, Dimensions.MaximumLiftHeightCm * .38f));
 	MastLiftVisual->SetRelativeScale3D(FVector::OneVector);
-	LeftForkVisual->SetRelativeLocation(FVector(ForkMountForwardOffsetCm + Dimensions.ForkLengthCm * .5f, -30.f, Dimensions.ForkThicknessCm * .5f));
-	RightForkVisual->SetRelativeLocation(FVector(ForkMountForwardOffsetCm + Dimensions.ForkLengthCm * .5f, 30.f, Dimensions.ForkThicknessCm * .5f));
+	// Lower the fork tines into the pallet's 11 cm opening at the zero-lift position.
+	// Pallet sits at world Z 0..15; with the mast base at Z 2 this puts
+	// the tine tops at the deck underside (Z 13), ready to support it at lift 0.
+	const float ForkCenterHeightCm = Dimensions.ForkThicknessCm * .5f + 6.5f;
+	LeftForkVisual->SetRelativeLocation(FVector(ForkMountForwardOffsetCm + Dimensions.ForkLengthCm * .5f, -25.f, ForkCenterHeightCm));
+	RightForkVisual->SetRelativeLocation(FVector(ForkMountForwardOffsetCm + Dimensions.ForkLengthCm * .5f, 25.f, ForkCenterHeightCm));
 	DriveWheelVisual->SetRelativeLocation(FVector(Dimensions.DriveWheelXcm, 0.f, Dimensions.DriveWheelRadiusCm - Dimensions.BodyHeightCm * .5f));
 	LeftLoadWheelVisual->SetRelativeLocation(FVector(Dimensions.DriveWheelXcm + Dimensions.WheelbaseCm, Dimensions.LoadWheelLateralOffsetCm, Dimensions.LoadWheelRadiusCm - Dimensions.BodyHeightCm * .5f));
 	RightLoadWheelVisual->SetRelativeLocation(FVector(Dimensions.DriveWheelXcm + Dimensions.WheelbaseCm, -Dimensions.LoadWheelLateralOffsetCm, Dimensions.LoadWheelRadiusCm - Dimensions.BodyHeightCm * .5f));
 	DriveWheelVisual->SetRelativeScale3D(FVector::OneVector); LeftLoadWheelVisual->SetRelativeScale3D(FVector::OneVector); RightLoadWheelVisual->SetRelativeScale3D(FVector::OneVector);
 	ReachVisual->SetRelativeLocation(FVector(0.f, 0.f, ReachVisualBaseHeightCm)); ReachVisual->SetRelativeScale3D(FVector::OneVector);
 	ForkCarriageVisual->SetRelativeLocation(FVector(ForkMountForwardOffsetCm, 0.f, ForkCarriageBaseHeightCm)); ForkCarriageVisual->SetRelativeScale3D(FVector::OneVector);
+	CarriageCollision->SetRelativeLocation(FVector(ForkMountForwardOffsetCm, 0.f, ForkCarriageBaseHeightCm));
+	CarriageCollision->SetBoxExtent(FVector(8.f, Dimensions.MastWidthCm * .5f, 8.f));
 	LeftForkVisual->SetRelativeScale3D(FVector::OneVector); RightForkVisual->SetRelativeScale3D(FVector::OneVector);
-	ForkCollision->SetRelativeLocation(FVector(ForkMountForwardOffsetCm + Dimensions.ForkLengthCm * .5f, 0, Dimensions.ForkThicknessCm * .5f));
+	ForkCollision->SetRelativeLocation(FVector(ForkMountForwardOffsetCm + Dimensions.ForkLengthCm * .5f, 0, ForkCenterHeightCm));
 	ForkCollision->SetBoxExtent(FVector(Dimensions.ForkLengthCm * .5f, 35.f, Dimensions.ForkThicknessCm * .5f));
-	for (const TPair<UBoxComponent*, float>& Tine : {TPair<UBoxComponent*, float>(LeftForkCollision, -30.f), TPair<UBoxComponent*, float>(RightForkCollision, 30.f)})
+	for (const TPair<UBoxComponent*, float>& Tine : {TPair<UBoxComponent*, float>(LeftForkCollision, -25.f), TPair<UBoxComponent*, float>(RightForkCollision, 25.f)})
 	{
-		Tine.Key->SetRelativeLocation(FVector(ForkMountForwardOffsetCm + Dimensions.ForkLengthCm * .5f, Tine.Value, Dimensions.ForkThicknessCm * .5f));
+		Tine.Key->SetRelativeLocation(FVector(ForkMountForwardOffsetCm + Dimensions.ForkLengthCm * .5f, Tine.Value, ForkCenterHeightCm));
 		Tine.Key->SetBoxExtent(FVector(Dimensions.ForkLengthCm * .5f, Dimensions.ForkWidthCm * .5f, Dimensions.ForkThicknessCm * .5f));
 	}
 }
@@ -177,7 +198,7 @@ void AAutomatedForklift::SpawnPallet()
 	const FVector SpawnLocation = GetActorLocation() + GetActorForwardVector() * 300.f;
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-	GetWorld()->SpawnActor<APallet>(APallet::StaticClass(), FVector(SpawnLocation.X, SpawnLocation.Y, 5.f), GetActorRotation(), Params);
+	GetWorld()->SpawnActor<APallet>(APallet::StaticClass(), FVector(SpawnLocation.X, SpawnLocation.Y, 1.f), GetActorRotation(), Params);
 }
 
 void AAutomatedForklift::InteractWithPallet()
@@ -204,7 +225,7 @@ void AAutomatedForklift::InteractWithPallet()
 		const float PalletYawDelta = FMath::Abs(FMath::FindDeltaAngleDegrees(GetActorRotation().Yaw, Pallet->GetActorRotation().Yaw));
 		const FVector LeftTip = Pallet->GetActorTransform().InverseTransformPosition(LeftForkCollision->GetComponentTransform().TransformPosition(FVector(Dimensions.ForkLengthCm * .5f, 0.f, 0.f)));
 		const FVector RightTip = Pallet->GetActorTransform().InverseTransformPosition(RightForkCollision->GetComponentTransform().TransformPosition(FVector(Dimensions.ForkLengthCm * .5f, 0.f, 0.f)));
-		if (LocalPallet.X < 55.f || PalletYawDelta > 5.f || LiftCm > 2.f || LeftTip.X < -55.f || LeftTip.X > 60.f || RightTip.X < -55.f || RightTip.X > 60.f || LeftTip.Y < -36.f || LeftTip.Y > -8.f || RightTip.Y < 8.f || RightTip.Y > 36.f) continue;
+		if (LocalPallet.X < 55.f || PalletYawDelta > 5.f || LiftCm > 2.f || LeftTip.X < -50.f || LeftTip.X > 55.f || RightTip.X < -50.f || RightTip.X > 55.f || LeftTip.Y < -35.f || LeftTip.Y > -15.f || RightTip.Y < 15.f || RightTip.Y > 35.f) continue;
 		CarriedPallet = Pallet;
 		CarriedPallet->SetCarriedState(true);
 		CarriedPallet->AttachToComponent(ForkCarriage, FAttachmentTransformRules::KeepWorldTransform);
@@ -234,13 +255,13 @@ void AAutomatedForklift::Tick(float Dt)
 	FVector DriveDelta = GetActorForwardVector() * TargetForwardSpeedCmPerSec * Dt;
 	float EarliestTineHit = 1.f;
 	FCollisionQueryParams ForkSweepParams(SCENE_QUERY_STAT(ForkliftTineSweep), false, this);
-	for (UBoxComponent* Tine : {LeftForkCollision.Get(), RightForkCollision.Get()})
+	for (UBoxComponent* MovingPart : {LeftForkCollision.Get(), RightForkCollision.Get(), LeftMastCollision.Get(), RightMastCollision.Get(), CarriageCollision.Get()})
 	{
-		FHitResult TineHit;
-		if (GetWorld()->SweepSingleByChannel(TineHit, Tine->GetComponentLocation(), Tine->GetComponentLocation() + DriveDelta,
-			Tine->GetComponentQuat(), ECC_WorldDynamic, FCollisionShape::MakeBox(Tine->GetScaledBoxExtent()), ForkSweepParams) && TineHit.bBlockingHit)
+		FHitResult PartHit;
+		if (GetWorld()->SweepSingleByChannel(PartHit, MovingPart->GetComponentLocation(), MovingPart->GetComponentLocation() + DriveDelta,
+			MovingPart->GetComponentQuat(), ECC_WorldDynamic, FCollisionShape::MakeBox(MovingPart->GetScaledBoxExtent()), ForkSweepParams) && PartHit.bBlockingHit)
 		{
-			EarliestTineHit = FMath::Min(EarliestTineHit, TineHit.Time);
+			EarliestTineHit = FMath::Min(EarliestTineHit, PartHit.Time);
 		}
 	}
 	if (EarliestTineHit < 1.f) DriveDelta *= FMath::Max(0.f, EarliestTineHit - .01f);
@@ -250,8 +271,24 @@ void AAutomatedForklift::Tick(float Dt)
 	const bool bIsDriving = !FMath::IsNearlyZero(DriveInput); if (bIsDriving && !bWasDriving) LogInitialDriveOverlaps(); if (bIsDriving) EmitDriveDiagnostic(StartLocation, EndLocation, DriveHit); bWasDriving = bIsDriving;
 	AddActorWorldRotation(FRotator(0.f, SteerInput * Motion.SteeringRateDegPerSec * Dt, 0.f));
 	const float LiftRate = LiftInput >= 0.f ? (bIsLoaded ? Motion.LoadedLiftSpeedCmPerSec : Motion.UnloadedLiftSpeedCmPerSec) : (bIsLoaded ? Motion.LoadedLowerSpeedCmPerSec : Motion.UnloadedLowerSpeedCmPerSec);
-	LiftCm = FMath::Clamp(LiftCm + LiftInput * LiftRate * Dt, 0.f, Dimensions.MaximumLiftHeightCm);
-	ReachCm = FMath::Clamp(ReachCm + ReachInput * Motion.ReachSpeedCmPerSec * Dt, 0.f, Dimensions.ReachTravelCm);
-	SideShiftCm = FMath::Clamp(SideShiftCm + SideShiftInput * Motion.SideShiftSpeedCmPerSec * Dt, -Dimensions.ForkSideShiftCm, Dimensions.ForkSideShiftCm);
+	const float OldLiftCm = LiftCm, OldReachCm = ReachCm, OldSideShiftCm = SideShiftCm;
+	float LiftDelta = FMath::Clamp(LiftCm + LiftInput * LiftRate * Dt, 0.f, Dimensions.MaximumLiftHeightCm) - LiftCm;
+	float ReachDelta = FMath::Clamp(ReachCm + ReachInput * Motion.ReachSpeedCmPerSec * Dt, 0.f, Dimensions.ReachTravelCm) - ReachCm;
+	float SideShiftDelta = FMath::Clamp(SideShiftCm + SideShiftInput * Motion.SideShiftSpeedCmPerSec * Dt, -Dimensions.ForkSideShiftCm, Dimensions.ForkSideShiftCm) - SideShiftCm;
+	const FVector KinematicDelta = FVector::UpVector * LiftDelta + GetActorForwardVector() * ReachDelta + GetActorRightVector() * SideShiftDelta;
+	float EarliestKinematicHit = 1.f;
+	for (UBoxComponent* MovingPart : {LeftForkCollision.Get(), RightForkCollision.Get(), CarriageCollision.Get()})
+	{
+		FHitResult PartHit;
+		if (GetWorld()->SweepSingleByChannel(PartHit, MovingPart->GetComponentLocation(), MovingPart->GetComponentLocation() + KinematicDelta,
+			MovingPart->GetComponentQuat(), ECC_WorldDynamic, FCollisionShape::MakeBox(MovingPart->GetScaledBoxExtent()), ForkSweepParams) && PartHit.bBlockingHit)
+		{
+			EarliestKinematicHit = FMath::Min(EarliestKinematicHit, PartHit.Time);
+		}
+	}
+	const float KinematicScale = EarliestKinematicHit < 1.f ? FMath::Max(0.f, EarliestKinematicHit - .01f) : 1.f;
+	LiftCm = OldLiftCm + LiftDelta * KinematicScale;
+	ReachCm = OldReachCm + ReachDelta * KinematicScale;
+	SideShiftCm = OldSideShiftCm + SideShiftDelta * KinematicScale;
 	LiftCarriage->SetRelativeLocation(FVector(0, 0, LiftCm)); ReachCarriage->SetRelativeLocation(FVector(ReachCm, 0, 0)); ForkCarriage->SetRelativeLocation(FVector(0, SideShiftCm, 0));
 }
