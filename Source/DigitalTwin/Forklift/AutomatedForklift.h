@@ -11,6 +11,7 @@ class USpringArmComponent;
 class UInputComponent;
 class UStaticMeshComponent;
 class USceneComponent;
+class UPrimitiveComponent;
 class APallet;
 
 /** All dimensions use Unreal centimetres (the source specification is mm / m). */
@@ -86,6 +87,10 @@ public:
 	UPROPERTY(EditAnywhere, Category="Drive debug") bool bEnableDriveDebug = false;
 	UPROPERTY(EditAnywhere, Category="Drive debug", meta=(ClampMin="0.05")) float DriveDebugIntervalSeconds = 0.25f;
 	UPROPERTY(EditAnywhere, Category="Drive debug") bool bDrawDriveDebug = false;
+	UPROPERTY(VisibleAnywhere, Category="Collision debug") bool bCollisionDebugVisible = false;
+	/** Contact-based automatic lift: each tine tip must enter this far into its own pallet opening. */
+	UPROPERTY(EditAnywhere, Category="Pallet support", meta=(ClampMin="1.0", ClampMax="100.0")) float MinimumPalletSupportInsertionCm = 45.f;
+	UPROPERTY(EditAnywhere, Category="Pallet support", meta=(ClampMin="0.01", ClampMax="5.0")) float PalletSupportContactToleranceCm = 1.0f;
 
 	// Replace a visual's Static Mesh without changing the collision / kinematic components below.
 	UPROPERTY(VisibleAnywhere, Category="Replaceable visual slots") TObjectPtr<UStaticMeshComponent> BodyVisual;
@@ -105,6 +110,8 @@ public:
 	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> ForkCollision;
 	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> LeftForkCollision;
 	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> RightForkCollision;
+	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> LeftSupportLegCollision;
+	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> RightSupportLegCollision;
 
 	UPROPERTY(VisibleAnywhere, Category="Kinematics") TObjectPtr<USceneComponent> MastAssembly;
 	UPROPERTY(VisibleAnywhere, Category="Kinematics") TObjectPtr<USceneComponent> LiftCarriage;
@@ -130,14 +137,36 @@ private:
 	float TargetForwardSpeedCmPerSec = 0.f, CurrentForwardSpeedCmPerSec = 0.f, DriveDebugElapsed = 0.f;
 	float CameraPitchDeg = -24.f, CameraYawDeg = -35.f, CameraDistanceCm = 700.f;
 	bool bCameraOrbiting = false, bWasDriving = false;
+	float LastCollisionLogTime = -BIG_NUMBER;
+	float LastInputLogTime = -BIG_NUMBER;
+	float LastCollisionDebugHeartbeatTime = -BIG_NUMBER;
+	float LastCollisionHitExpireTime = -BIG_NUMBER;
+	FString LastCollisionLogSignature;
+	FString CollisionDebugStatus;
+	FHitResult LastCollisionHit;
+	TWeakObjectPtr<UPrimitiveComponent> LastBlockingComponent;
 	void Drive(float Value); void Steer(float Value); void Lift(float Value); void Reach(float Value); void SideShift(float Value);
 	void CameraYaw(float Value); void CameraPitch(float Value); void CameraZoom(float Value);
 	void BeginCameraOrbit(); void EndCameraOrbit(); void ResetCamera();
+	void ToggleCollisionDebug();
+	void LogInputInvocation(const TCHAR* InputName, float Value);
 	void ApplyDimensions();
 	void SpawnPallet();
 	void InteractWithPallet();
+	bool SweepForkliftPart(UBoxComponent* Component, const FVector& WorldDelta, const TCHAR* Operation, FHitResult& OutHit, const AActor* ExtraIgnoredActor = nullptr);
+	bool SweepCarriedPallet(const FVector& WorldDelta, const TCHAR* Operation, FHitResult& OutHit);
+	bool SweepPalletAgainstExternal(APallet* Pallet, const FVector& WorldDelta, const TCHAR* Operation, FHitResult& OutHit);
+	APallet* FindPalletForAutomaticSupport(float LiftDeltaCm, FString& OutReason) const;
+	void BeginAutomaticPalletSupport(APallet* Pallet);
+	void ReleaseAutomaticPalletSupport(const TCHAR* Reason);
+	bool IsMovementDeeperIntoInitialOverlap(const FHitResult& Hit, const FVector& WorldDelta) const;
+	void RecordCollision(const TCHAR* Operation, UPrimitiveComponent* SourceComponent, const FHitResult& Hit, const FVector& WorldDelta, bool bBlocked);
+	void DrawCollisionDebug();
 	void EmitDriveDiagnostic(const FVector& StartLocation, const FVector& EndLocation, const FHitResult& Hit);
 	void LogInitialDriveOverlaps();
 	UStaticMeshComponent* CreateVisual(const TCHAR* Name, USceneComponent* Parent);
 	UPROPERTY() TObjectPtr<APallet> CarriedPallet;
+	bool bPalletSupportedAutomatically = false;
+	bool bCarriedPalletResting = false;
+	FString PalletSupportDebugStatus;
 };
