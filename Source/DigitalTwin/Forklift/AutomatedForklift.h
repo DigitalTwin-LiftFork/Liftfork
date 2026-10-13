@@ -12,6 +12,9 @@ class UInputComponent;
 class UStaticMeshComponent;
 class USceneComponent;
 class UPrimitiveComponent;
+class USceneCaptureComponent2D;
+class UTextureRenderTarget2D;
+class UPhysicsConstraintComponent;
 class APallet;
 
 /** All dimensions use Unreal centimetres (the source specification is mm / m). */
@@ -88,9 +91,23 @@ public:
 	UPROPERTY(EditAnywhere, Category="Drive debug", meta=(ClampMin="0.05")) float DriveDebugIntervalSeconds = 0.25f;
 	UPROPERTY(EditAnywhere, Category="Drive debug") bool bDrawDriveDebug = false;
 	UPROPERTY(VisibleAnywhere, Category="Collision debug") bool bCollisionDebugVisible = false;
+	UPROPERTY(EditAnywhere, Category="Collision debug") bool bEnableCollisionDebugHeartbeatLog = false;
 	/** Contact-based automatic lift: each tine tip must enter this far into its own pallet opening. */
 	UPROPERTY(EditAnywhere, Category="Pallet support", meta=(ClampMin="1.0", ClampMax="100.0")) float MinimumPalletSupportInsertionCm = 45.f;
 	UPROPERTY(EditAnywhere, Category="Pallet support", meta=(ClampMin="0.01", ClampMax="5.0")) float PalletSupportContactToleranceCm = 1.0f;
+	/** Chaos tuning values (TEMP: simulation tuning, not R16HD specifications). */
+	UPROPERTY(EditAnywhere, Category="Chaos|TEMP tuning") float ChassisMassKg = 2200.f;
+	UPROPERTY(EditAnywhere, Category="Chaos|TEMP tuning") float DriveForceNewton = 180000.f;
+	UPROPERTY(EditAnywhere, Category="Chaos|TEMP tuning") float SteeringTorque = 550000.f;
+	UPROPERTY(EditAnywhere, Category="Chaos|TEMP tuning") float ConstraintStiffness = 180000.f;
+	UPROPERTY(EditAnywhere, Category="Chaos|TEMP tuning") float ConstraintDamping = 18000.f;
+	UPROPERTY(EditAnywhere, Category="Chaos|TEMP tuning") float ConstraintForceLimit = 1000000.f;
+	/** Simulation limit for the current visual model, not an R16HD manufacturer specification. */
+	UPROPERTY(EditAnywhere, Category="Chaos|Lift reference") float MaximumForkTopHeightAboveGroundCm = 450.f;
+	/** Actor-local ground plane. It is derived from the body bottom and the existing 2cm floor clearance; never from world Z. */
+	UPROPERTY(VisibleAnywhere, Category="Chaos|Lift reference") float GroundReferenceLocalZcm = -49.5f;
+	UPROPERTY(VisibleAnywhere, Category="Chaos|Lift reference") float LowestForkTopHeightAboveGroundCm = 0.f;
+	UPROPERTY(VisibleAnywhere, Category="Chaos|Lift reference") float RequiredLiftStrokeCm = 500.f;
 
 	// Replace a visual's Static Mesh without changing the collision / kinematic components below.
 	UPROPERTY(VisibleAnywhere, Category="Replaceable visual slots") TObjectPtr<UStaticMeshComponent> BodyVisual;
@@ -112,6 +129,15 @@ public:
 	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> RightForkCollision;
 	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> LeftSupportLegCollision;
 	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> RightSupportLegCollision;
+	UPROPERTY(VisibleAnywhere, Category="Chaos") TObjectPtr<UBoxComponent> LiftPhysicsBody;
+	UPROPERTY(VisibleAnywhere, Category="Chaos") TObjectPtr<UBoxComponent> ReachPhysicsBody;
+	UPROPERTY(VisibleAnywhere, Category="Chaos") TObjectPtr<UBoxComponent> ForkPhysicsBody;
+	UPROPERTY(VisibleAnywhere, Category="Chaos") TObjectPtr<UPhysicsConstraintComponent> LiftConstraint;
+	UPROPERTY(VisibleAnywhere, Category="Chaos") TObjectPtr<UPhysicsConstraintComponent> ReachConstraint;
+	UPROPERTY(VisibleAnywhere, Category="Chaos") TObjectPtr<UPhysicsConstraintComponent> SideShiftConstraint;
+	/** Fixed physical joints which make the two actual fork contact shapes part of the Chaos chain. */
+	UPROPERTY(VisibleAnywhere, Category="Chaos") TObjectPtr<UPhysicsConstraintComponent> LeftForkFixedConstraint;
+	UPROPERTY(VisibleAnywhere, Category="Chaos") TObjectPtr<UPhysicsConstraintComponent> RightForkFixedConstraint;
 
 	UPROPERTY(VisibleAnywhere, Category="Kinematics") TObjectPtr<USceneComponent> MastAssembly;
 	UPROPERTY(VisibleAnywhere, Category="Kinematics") TObjectPtr<USceneComponent> LiftCarriage;
@@ -127,20 +153,46 @@ public:
 	UPROPERTY(EditAnywhere, Category="Forklift camera") float CameraMaxDistanceCm = 1000.f;
 	UPROPERTY(EditAnywhere, Category="Forklift camera") float CameraZoomStepCm = 75.f;
 
+	/** One carriage-mounted insertion sensor. It follows lift, reach and side shift, never the user camera. */
+	UPROPERTY(VisibleAnywhere, Category="Pallet sensor") TObjectPtr<USceneCaptureComponent2D> PalletSensorCapture;
+	UPROPERTY(VisibleAnywhere, Category="Pallet sensor") TObjectPtr<UTextureRenderTarget2D> PalletSensorRenderTarget;
+	/** Drawing-verified offsets, converted from the backrest/fork coordinate system; not raw component XYZ. */
+	UPROPERTY(EditAnywhere, Category="Pallet sensor|Drawing dimensions") float PalletSensorHeightAboveForkTopCm = 19.f;
+	UPROPERTY(EditAnywhere, Category="Pallet sensor|Drawing dimensions") float PalletSensorLateralOffsetFromCenterCm = 6.3f;
+	UPROPERTY(EditAnywhere, Category="Pallet sensor|Drawing dimensions") float PalletSensorForwardOfBackrestCm = 2.6f;
+	/** Simulation assumptions: not specified by the product drawing. */
+	UPROPERTY(EditAnywhere, Category="Pallet sensor|Simulation") FRotator PalletSensorRelativeRotation = FRotator(-10.f, 0.f, 0.f);
+	UPROPERTY(EditAnywhere, Category="Pallet sensor|Simulation", meta=(ClampMin="30.0", ClampMax="140.0")) float PalletSensorFieldOfViewDeg = 78.f;
+	UPROPERTY(EditAnywhere, Category="Pallet sensor", meta=(ClampMin="64", ClampMax="1920")) int32 PalletSensorWidthPx = 960;
+	UPROPERTY(EditAnywhere, Category="Pallet sensor", meta=(ClampMin="64", ClampMax="1080")) int32 PalletSensorHeightPx = 540;
+	UPROPERTY(EditAnywhere, Category="Pallet sensor", meta=(ClampMin="0.01", ClampMax="1.0")) float PalletSensorCaptureIntervalSeconds = 1.f / 30.f;
+	UPROPERTY(EditAnywhere, Category="Pallet sensor") bool bPalletSensorCaptureActive = true;
+
 	/** Reapplies sizes after editing Dimensions in the Details panel (safe during construction). */
 	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void BeginPlay() override;
+	UTextureRenderTarget2D* GetPalletSensorRenderTarget() const { return PalletSensorRenderTarget; }
+	int32 GetPalletSensorDisplayMode() const { return PalletSensorDisplayMode; }
 
 private:
 	float DriveInput = 0.f, SteerInput = 0.f, LiftInput = 0.f, ReachInput = 0.f, SideShiftInput = 0.f;
 	float LiftCm = 0.f, ReachCm = 0.f, SideShiftCm = 0.f;
 	float TargetForwardSpeedCmPerSec = 0.f, CurrentForwardSpeedCmPerSec = 0.f, DriveDebugElapsed = 0.f;
 	float CameraPitchDeg = -24.f, CameraYawDeg = -35.f, CameraDistanceCm = 700.f;
+	float PalletSensorCaptureElapsed = 0.f;
+	int32 PalletSensorDisplayMode = 0;
 	bool bCameraOrbiting = false, bWasDriving = false;
 	float LastCollisionLogTime = -BIG_NUMBER;
+	float LastActuatorLogTime = -BIG_NUMBER;
 	float LastInputLogTime = -BIG_NUMBER;
 	float LastCollisionDebugHeartbeatTime = -BIG_NUMBER;
 	float LastCollisionHitExpireTime = -BIG_NUMBER;
+	/** Constraint-space centres. Linear limits are symmetric, so a one-sided user stroke is centred around these values. */
+	float LiftConstraintCentreCm = 0.f;
+	float ReachConstraintCentreCm = 0.f;
+	float LiftNativeDriveTargetCm = 0.f;
+	float ReachNativeDriveTargetCm = 0.f;
+	float ReachRestRelativeXcm = 0.f;
 	FString LastCollisionLogSignature;
 	FString CollisionDebugStatus;
 	FHitResult LastCollisionHit;
@@ -149,6 +201,16 @@ private:
 	void CameraYaw(float Value); void CameraPitch(float Value); void CameraZoom(float Value);
 	void BeginCameraOrbit(); void EndCameraOrbit(); void ResetCamera();
 	void ToggleCollisionDebug();
+	void TogglePalletSensorDisplay();
+	void TogglePalletSensorCapture();
+	void UpdatePalletSensorSettings();
+	void ConfigureChaosPhysics();
+	void ApplyChaosControls(float DeltaSeconds);
+	void SetConstraintFramesAtPose(UPhysicsConstraintComponent* Constraint, UPrimitiveComponent* Body1, UPrimitiveComponent* Body2, const FTransform& JointWorld, const FVector& Frame2Offset);
+	FVector GetConstraintFrameDelta(const UPhysicsConstraintComponent* Constraint, const UPrimitiveComponent* Body1, const UPrimitiveComponent* Body2) const;
+	float GetForkTopHeightAboveGroundCm() const;
+	void ConfigureLiftHeightReference();
+	void UpdateMastVisuals(float ActualLiftCm);
 	void LogInputInvocation(const TCHAR* InputName, float Value);
 	void ApplyDimensions();
 	void SpawnPallet();
@@ -162,6 +224,7 @@ private:
 	bool IsMovementDeeperIntoInitialOverlap(const FHitResult& Hit, const FVector& WorldDelta) const;
 	void RecordCollision(const TCHAR* Operation, UPrimitiveComponent* SourceComponent, const FHitResult& Hit, const FVector& WorldDelta, bool bBlocked);
 	void DrawCollisionDebug();
+	void DrawPalletSensorDebug() const;
 	void EmitDriveDiagnostic(const FVector& StartLocation, const FVector& EndLocation, const FHitResult& Hit);
 	void LogInitialDriveOverlaps();
 	UStaticMeshComponent* CreateVisual(const TCHAR* Name, USceneComponent* Parent);
@@ -169,4 +232,7 @@ private:
 	bool bPalletSupportedAutomatically = false;
 	bool bCarriedPalletResting = false;
 	FString PalletSupportDebugStatus;
+	FString ActuatorDebugStatus;
+	bool bChaosConfigured = false;
+	bool bChaosInitialPoseLogged = false;
 };

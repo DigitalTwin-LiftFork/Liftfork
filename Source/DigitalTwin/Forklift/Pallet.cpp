@@ -109,6 +109,7 @@ void APallet::BeginPlay()
 {
 	Super::BeginPlay();
 	SetCarriedState(false);
+	UE_LOG(LogTemp, Warning, TEXT("[R16HD_PALLET_PHYSICS] pallet=%s sim=%d gravity=%d collision=%d root=%s"), *GetName(), CollisionBody->IsSimulatingPhysics(), CollisionBody->IsGravityEnabled(), static_cast<int32>(CollisionBody->GetCollisionEnabled()), *CollisionBody->GetComponentLocation().ToString());
 }
 
 void APallet::SetCarriedState(bool bIsCarried)
