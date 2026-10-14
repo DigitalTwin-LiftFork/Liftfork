@@ -15,7 +15,36 @@ class UPrimitiveComponent;
 class USceneCaptureComponent2D;
 class UTextureRenderTarget2D;
 class UPhysicsConstraintComponent;
+class UForkliftNavigationSensorComponent;
 class APallet;
+
+UENUM()
+enum class EAutoPickupState : uint8 { Idle, Detecting, Aligning, Inserting, Lifting, Complete, Stopped, Failed };
+
+/** Pixel-space result from the existing pallet sensor render target. */
+USTRUCT()
+struct FOpeningDetection
+{
+	GENERATED_BODY()
+	bool bValid = false;
+	FVector2D LeftCenter = FVector2D::ZeroVector, RightCenter = FVector2D::ZeroVector;
+	FVector2D LeftExtent = FVector2D::ZeroVector, RightExtent = FVector2D::ZeroVector;
+	float Confidence = 0.f, TimestampSeconds = -BIG_NUMBER;
+	float EstimatedDistanceCm = 0.f, EstimatedLateralCm = 0.f;
+};
+
+/** HUD-only diagnostics for a connected dark region from the real sensor image. */
+USTRUCT()
+struct FVisionCandidateDebug
+{
+	GENERATED_BODY()
+	FVector2D Center = FVector2D::ZeroVector;
+	FVector2D Extent = FVector2D::ZeroVector;
+	int32 Area = 0;
+	bool bSelected = false;
+	bool bTouchesSearchBoundary = false;
+	FString Reason;
+};
 
 /** All dimensions use Unreal centimetres (the source specification is mm / m). */
 USTRUCT(BlueprintType)
@@ -102,6 +131,10 @@ public:
 	UPROPERTY(EditAnywhere, Category="Chaos|TEMP tuning") float ConstraintStiffness = 180000.f;
 	UPROPERTY(EditAnywhere, Category="Chaos|TEMP tuning") float ConstraintDamping = 18000.f;
 	UPROPERTY(EditAnywhere, Category="Chaos|TEMP tuning") float ConstraintForceLimit = 1000000.f;
+	/** Simulation estimates, not manufacturer mass/inertia data. */
+	UPROPERTY(EditAnywhere, Category="Chaos|TEMP tuning") float LiftAssemblyMassKg = 300.f;
+	UPROPERTY(EditAnywhere, Category="Chaos|TEMP tuning") float ReachAssemblyMassKg = 140.f;
+	UPROPERTY(EditAnywhere, Category="Chaos|TEMP tuning") float ForkCarrierAssemblyMassKg = 110.f;
 	/** Simulation limit for the current visual model, not an R16HD manufacturer specification. */
 	UPROPERTY(EditAnywhere, Category="Chaos|Lift reference") float MaximumForkTopHeightAboveGroundCm = 450.f;
 	/** Actor-local ground plane. It is derived from the body bottom and the existing 2cm floor clearance; never from world Z. */
@@ -129,6 +162,9 @@ public:
 	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> RightForkCollision;
 	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> LeftSupportLegCollision;
 	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> RightSupportLegCollision;
+	/** Query-only self-occluders used by the LiDAR; they never participate in vehicle physics. */
+	UPROPERTY(VisibleAnywhere, Category="LiDAR") TObjectPtr<UBoxComponent> LidarBodyOccluder;
+	UPROPERTY(VisibleAnywhere, Category="LiDAR") TObjectPtr<UBoxComponent> LidarMastOccluder;
 	UPROPERTY(VisibleAnywhere, Category="Chaos") TObjectPtr<UBoxComponent> LiftPhysicsBody;
 	UPROPERTY(VisibleAnywhere, Category="Chaos") TObjectPtr<UBoxComponent> ReachPhysicsBody;
 	UPROPERTY(VisibleAnywhere, Category="Chaos") TObjectPtr<UBoxComponent> ForkPhysicsBody;
@@ -162,17 +198,49 @@ public:
 	UPROPERTY(EditAnywhere, Category="Pallet sensor|Drawing dimensions") float PalletSensorForwardOfBackrestCm = 2.6f;
 	/** Simulation assumptions: not specified by the product drawing. */
 	UPROPERTY(EditAnywhere, Category="Pallet sensor|Simulation") FRotator PalletSensorRelativeRotation = FRotator(-10.f, 0.f, 0.f);
+	UPROPERTY(EditAnywhere, Category="Pallet sensor|Simulation") float PalletSensorBackrestClearanceCm = 5.f;
 	UPROPERTY(EditAnywhere, Category="Pallet sensor|Simulation", meta=(ClampMin="30.0", ClampMax="140.0")) float PalletSensorFieldOfViewDeg = 78.f;
 	UPROPERTY(EditAnywhere, Category="Pallet sensor", meta=(ClampMin="64", ClampMax="1920")) int32 PalletSensorWidthPx = 960;
 	UPROPERTY(EditAnywhere, Category="Pallet sensor", meta=(ClampMin="64", ClampMax="1080")) int32 PalletSensorHeightPx = 540;
 	UPROPERTY(EditAnywhere, Category="Pallet sensor", meta=(ClampMin="0.01", ClampMax="1.0")) float PalletSensorCaptureIntervalSeconds = 1.f / 30.f;
 	UPROPERTY(EditAnywhere, Category="Pallet sensor") bool bPalletSensorCaptureActive = true;
+	UPROPERTY(EditAnywhere, Category="Auto pickup|Vision") float VisionProcessIntervalSeconds = .20f;
+	UPROPERTY(EditAnywhere, Category="Auto pickup|Vision") float VisionMaximumFrameAgeSeconds = .75f;
+	UPROPERTY(EditAnywhere, Category="Auto pickup|Vision") float MinimumOpeningConfidence = .62f;
+	/** Known test-pallet opening geometry. Used only to convert pixel spacing to range; never reads an Actor position. */
+	UPROPERTY(EditAnywhere, Category="Auto pickup|Vision|Known pallet") float VisionKnownOpeningCenterSpacingCm = 60.f;
+	UPROPERTY(EditAnywhere, Category="Auto pickup|Vision|Known pallet") float VisionKnownOpeningWidthCm = 36.f;
+	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoInsertSpeedScale = .20f;
+	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoLiftSpeedScale = .25f;
+	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoRequiredInsertionCm = 50.f;
+	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoMaximumInsertionCm = 75.f;
+	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoMaximumApproachTravelCm = 260.f;
+	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoTestLiftCm = 15.f;
+	/** Pixel target is a calibrated simulation setting for the carriage camera, not an object-coordinate lookup. */
+	UPROPERTY(EditAnywhere, Category="Auto pickup|Vision") float AutoTargetOpeningCenterYRatio = .58f;
+	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoVerticalToleranceCm = 1.5f;
+	/** One fixed rear-body LiDAR/IMU module. It is intentionally independent of the moving fork camera. */
+	UPROPERTY(VisibleAnywhere, Category="LiDAR") TObjectPtr<UForkliftNavigationSensorComponent> NavigationSensor;
+	UPROPERTY(VisibleAnywhere, Category="LiDAR") TObjectPtr<UStaticMeshComponent> NavigationSensorVisual;
 
 	/** Reapplies sizes after editing Dimensions in the Details panel (safe during construction). */
 	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void BeginPlay() override;
 	UTextureRenderTarget2D* GetPalletSensorRenderTarget() const { return PalletSensorRenderTarget; }
 	int32 GetPalletSensorDisplayMode() const { return PalletSensorDisplayMode; }
+	const FOpeningDetection& GetOpeningDetection() const { return OpeningDetection; }
+	const TArray<FVisionCandidateDebug>& GetVisionCandidates() const { return VisionCandidates; }
+	const TArray<FString>& GetVisionPairDiagnostics() const { return VisionPairDiagnostics; }
+	const TArray<uint8>& GetVisionMask() const { return VisionMask; }
+	int32 GetVisionMaskWidth() const { return VisionMaskWidth; }
+	int32 GetVisionMaskHeight() const { return VisionMaskHeight; }
+	int32 GetVisionDebugViewMode() const { return VisionDebugViewMode; }
+	EAutoPickupState GetAutoPickupState() const { return AutoPickupState; }
+	const FString& GetAutoPickupStatus() const { return AutoPickupStatus; }
+	void GetAutoPickupDiagnosticLines(TArray<FString>& OutLines) const;
+	void NotifyAutoPickupButtonClick(bool bInsideButton, const FVector2D& ScreenPosition);
+	void ToggleAutoPickup();
+	static FString AutoPickupStateToString(EAutoPickupState State);
 
 private:
 	float DriveInput = 0.f, SteerInput = 0.f, LiftInput = 0.f, ReachInput = 0.f, SideShiftInput = 0.f;
@@ -180,6 +248,32 @@ private:
 	float TargetForwardSpeedCmPerSec = 0.f, CurrentForwardSpeedCmPerSec = 0.f, DriveDebugElapsed = 0.f;
 	float CameraPitchDeg = -24.f, CameraYawDeg = -35.f, CameraDistanceCm = 700.f;
 	float PalletSensorCaptureElapsed = 0.f;
+	float VisionProcessElapsed = 0.f, AutoPickupStateElapsed = 0.f, AutoLiftStartCm = 0.f, AutoLiftPalletStartZ = 0.f, AutoRequiredForwardTravelCm = -BIG_NUMBER, AutoMaximumForwardTravelCm = -BIG_NUMBER;
+	FVector AutoInsertionStartLocation = FVector::ZeroVector;
+	int32 OpeningStableFrames = 0, AlignmentStableFrames = 0;
+	int32 LastVisionCandidateCount = -1;
+	TArray<FVisionCandidateDebug> VisionCandidates;
+	TArray<FString> VisionPairDiagnostics;
+	TArray<uint8> VisionMask;
+	int32 VisionMaskWidth = 0, VisionMaskHeight = 0, LastVisionSearchStartY = -1;
+	int32 VisionDebugViewMode = 0;
+	bool bSensorOcclusionDiagnosticHideForks = false;
+	int32 LastVisionFrameNumber = 0;
+	bool bLastVisionReadSucceeded = false;
+	bool bLastVisionHadValidPair = false;
+	float LastVisionProcessTime = -BIG_NUMBER;
+	float LastButtonClickTime = -BIG_NUMBER;
+	FString LastButtonInput = TEXT("미입력");
+	FString LastPixelReadStatus = TEXT("미처리");
+	float LastAlignmentLateralErrorCm = -BIG_NUMBER;
+	float LastAlignmentLiftCorrectionCm = -BIG_NUMBER;
+	float LastAutoInsertionTravelCm = -BIG_NUMBER;
+	bool bLastAutoDriveBlocked = false;
+	bool bLastPhysicalPalletContact = false;
+	float LastPhysicalPalletRiseCm = -BIG_NUMBER;
+	FOpeningDetection OpeningDetection, LockedOpeningDetection;
+	EAutoPickupState AutoPickupState = EAutoPickupState::Idle;
+	FString AutoPickupStatus = TEXT("Idle");
 	int32 PalletSensorDisplayMode = 0;
 	bool bCameraOrbiting = false, bWasDriving = false;
 	float LastCollisionLogTime = -BIG_NUMBER;
@@ -203,9 +297,18 @@ private:
 	void ToggleCollisionDebug();
 	void TogglePalletSensorDisplay();
 	void TogglePalletSensorCapture();
+	void ToggleVisionDebugView();
+	void ToggleSensorOcclusionDiagnostic();
+	void ToggleLidarDebug();
 	void UpdatePalletSensorSettings();
-	void ConfigureChaosPhysics();
-	void ApplyChaosControls(float DeltaSeconds);
+	void ProcessOpeningVision();
+	void UpdateAutoPickup(float DeltaSeconds);
+	void SetAutoPickupState(EAutoPickupState NewState, const FString& Status);
+	void CancelAutoPickup(const FString& Reason, bool bFailure);
+	bool HasPhysicalPalletLift(float& OutPalletRiseCm) const;
+	void ClearAutomaticCommands();
+	void ConfigureKinematicForkMechanism();
+	void ApplyKinematicForkControls(float DeltaSeconds);
 	void SetConstraintFramesAtPose(UPhysicsConstraintComponent* Constraint, UPrimitiveComponent* Body1, UPrimitiveComponent* Body2, const FTransform& JointWorld, const FVector& Frame2Offset);
 	FVector GetConstraintFrameDelta(const UPhysicsConstraintComponent* Constraint, const UPrimitiveComponent* Body1, const UPrimitiveComponent* Body2) const;
 	float GetForkTopHeightAboveGroundCm() const;
@@ -216,11 +319,11 @@ private:
 	void SpawnPallet();
 	void InteractWithPallet();
 	bool SweepForkliftPart(UBoxComponent* Component, const FVector& WorldDelta, const TCHAR* Operation, FHitResult& OutHit, const AActor* ExtraIgnoredActor = nullptr);
+	bool SweepForkPartAgainstFixedObstacle(UBoxComponent* Component, const FVector& WorldDelta, const TCHAR* Operation, FHitResult& OutHit);
+	bool IsForkAxisMotionBlockedByFixedObstacle(const FVector& WorldDelta, const TCHAR* Operation);
+	bool WouldForkRotationHitFixedObstacle(float DeltaYawDegrees) const;
 	bool SweepCarriedPallet(const FVector& WorldDelta, const TCHAR* Operation, FHitResult& OutHit);
 	bool SweepPalletAgainstExternal(APallet* Pallet, const FVector& WorldDelta, const TCHAR* Operation, FHitResult& OutHit);
-	APallet* FindPalletForAutomaticSupport(float LiftDeltaCm, FString& OutReason) const;
-	void BeginAutomaticPalletSupport(APallet* Pallet);
-	void ReleaseAutomaticPalletSupport(const TCHAR* Reason);
 	bool IsMovementDeeperIntoInitialOverlap(const FHitResult& Hit, const FVector& WorldDelta) const;
 	void RecordCollision(const TCHAR* Operation, UPrimitiveComponent* SourceComponent, const FHitResult& Hit, const FVector& WorldDelta, bool bBlocked);
 	void DrawCollisionDebug();
