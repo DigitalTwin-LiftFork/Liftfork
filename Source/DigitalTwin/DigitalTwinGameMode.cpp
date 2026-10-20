@@ -3,6 +3,7 @@
 #include "DigitalTwinGameMode.h"
 #include "Forklift/AutomatedForklift.h"
 #include "Forklift/ForkliftPlayerController.h"
+#include "Forklift/ForkliftSensorHUD.h"
 #include "EngineUtils.h"
 #include "GameFramework/PlayerStart.h"
 #include "GameFramework/PlayerController.h"
@@ -12,6 +13,7 @@ ADigitalTwinGameMode::ADigitalTwinGameMode()
 	// Prevent the top-down template pawn/controller from being created for Map1.
 	DefaultPawnClass = nullptr;
 	PlayerControllerClass = AForkliftPlayerController::StaticClass();
+	HUDClass = AForkliftSensorHUD::StaticClass();
 }
 
 void ADigitalTwinGameMode::BeginPlay()
