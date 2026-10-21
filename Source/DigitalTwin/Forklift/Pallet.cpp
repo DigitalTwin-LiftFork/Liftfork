@@ -13,7 +13,9 @@ APallet::APallet()
 	CollisionBody->SetBoxExtent(FVector(DepthCm * .5f, WidthCm * .5f, DeckThicknessCm * .5f));
 	CollisionBody->SetCollisionProfileName(TEXT("PhysicsActor"));
 	CollisionBody->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	CollisionBody->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
 	CollisionBody->SetCollisionResponseToChannel(ECC_WorldDynamic, ECR_Block);
+	CollisionBody->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
 	CollisionBody->SetNotifyRigidBodyCollision(true);
 	CollisionBody->OnComponentHit.AddDynamic(this, &APallet::HandlePalletHit);
 	CollisionBody->SetMobility(EComponentMobility::Movable);
@@ -155,7 +157,9 @@ UBoxComponent* APallet::AddCollisionShape(const TCHAR* Name, const FVector& Loca
 	Shape->SetBoxExtent(HalfExtent);
 	Shape->SetCollisionProfileName(TEXT("PhysicsActor"));
 	Shape->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	Shape->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
 	Shape->SetCollisionResponseToChannel(ECC_WorldDynamic, ECR_Block);
+	Shape->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
 	Shape->SetMobility(EComponentMobility::Movable);
 	CollisionShapes.Add(Shape);
 	return Shape;

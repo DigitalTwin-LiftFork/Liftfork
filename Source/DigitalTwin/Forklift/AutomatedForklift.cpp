@@ -2,7 +2,13 @@
 #include "Forklift/Pallet.h"
 #include "Forklift/WoodPallet.h"
 #include "Forklift/ForkliftNavigationSensorComponent.h"
+
 #include "Forklift/ForkliftSlamComponent.h"
+
+#include "Forklift/ForkliftLocalOccupancyGridComponent.h"
+#include "Forklift/ForkliftSlamComponent.h"
+#include "Forklift/ForkliftGlobalPathPlannerComponent.h"
+
 #include "Components/BoxComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/SceneComponent.h"
@@ -51,10 +57,20 @@ AAutomatedForklift::AAutomatedForklift()
 	BodyCollision = CreateDefaultSubobject<UBoxComponent>(TEXT("BodyCollision"));
 	SetRootComponent(BodyCollision);
 	BodyCollision->SetCollisionProfileName(TEXT("Pawn"));
-	BodyCollision->SetCollisionResponseToChannel(ECC_PhysicsBody, ECR_Ignore);
+	// PhysicsActor pallets use ECC_PhysicsBody. The broad chassis proxy ends
+	// 10 cm behind the tine roots (the tine roots start at x=+20 cm from the
+	// mast), so blocking pallets here stops chassis penetration while leaving
+	// the two fork insertion corridors open.
+	BodyCollision->SetCollisionResponseToChannel(ECC_PhysicsBody, ECR_Block);
 	NavigationSensor = CreateDefaultSubobject<UForkliftNavigationSensorComponent>(TEXT("RearBodyLidarImu"));
 	NavigationSensor->SetupAttachment(BodyCollision);
+
 	CreateDefaultSubobject<UForkliftSlamComponent>(TEXT("LidarSlam"));
+
+	LocalOccupancyGrid = CreateDefaultSubobject<UForkliftLocalOccupancyGridComponent>(TEXT("LocalOccupancyGrid"));
+	SlamComponent = CreateDefaultSubobject<UForkliftSlamComponent>(TEXT("IncrementalLidarSlam"));
+	GlobalPathPlanner = CreateDefaultSubobject<UForkliftGlobalPathPlannerComponent>(TEXT("GlobalPathPlanner"));
+
 	// Rear, above the fixed body deck: actor X is vehicle-forward, so negative
 	// X is rear.  This point is outside the 95cm body shell and does not follow
 	// the mast, lift, reach, fork or user camera.
@@ -124,9 +140,7 @@ AAutomatedForklift::AAutomatedForklift()
 		Tine->SetCollisionProfileName(TEXT("BlockAll"));
 		Tine->SetCollisionObjectType(ECC_WorldDynamic);
 	}
-	// Match the two fixed red support legs in Underframe_Actual.  The root body
-	// intentionally ignores physics bodies so forks can enter a pallet; these
-	// narrow shapes provide the missing lower-frame obstruction test instead.
+	// Match the two fixed red support legs in Underframe_Actual.
 	LeftSupportLegCollision = CreateDefaultSubobject<UBoxComponent>(TEXT("LeftSupportLegCollision"));
 	RightSupportLegCollision = CreateDefaultSubobject<UBoxComponent>(TEXT("RightSupportLegCollision"));
 	for (UBoxComponent* SupportLeg : {LeftSupportLegCollision.Get(), RightSupportLegCollision.Get()})
@@ -379,11 +393,15 @@ void AAutomatedForklift::SetupPlayerInputComponent(UInputComponent* Input)
 	Input->BindKey(EKeys::O, IE_Pressed, this, &AAutomatedForklift::ToggleVisionDebugView);
 	Input->BindKey(EKeys::I, IE_Pressed, this, &AAutomatedForklift::ToggleSensorOcclusionDiagnostic);
 	Input->BindKey(EKeys::L, IE_Pressed, this, &AAutomatedForklift::ToggleLidarDebug);
+
 	if (UForkliftSlamComponent* Slam = FindComponentByClass<UForkliftSlamComponent>())
 	{
 		Input->BindKey(EKeys::M, IE_Pressed, Slam, &UForkliftSlamComponent::ToggleMap);
 		Input->BindKey(EKeys::B, IE_Pressed, Slam, &UForkliftSlamComponent::ResetMap);
 	}
+
+	Input->BindKey(EKeys::M, IE_Pressed, this, &AAutomatedForklift::ToggleSlamMapDebug);
+
 }
 void AAutomatedForklift::LogInputInvocation(const TCHAR* InputName, float Value)
 {
@@ -439,6 +457,18 @@ void AAutomatedForklift::ToggleSensorOcclusionDiagnostic()
 void AAutomatedForklift::ToggleLidarDebug()
 {
 	if (NavigationSensor) NavigationSensor->ToggleDebugVisible();
+}
+void AAutomatedForklift::ToggleSlamMapDebug()
+{
+	if (!SlamComponent) return;
+	SlamComponent->bDrawMap = !SlamComponent->bDrawMap;
+	UE_LOG(LogTemp, Warning, TEXT("[SLAM_DEBUG] M map display=%s poseTrackingValid=%d"), SlamComponent->bDrawMap ? TEXT("ON") : TEXT("OFF"), SlamComponent->EstimatedPose.bTrackingValid);
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(reinterpret_cast<uint64>(this) + 1, 2.f,
+			SlamComponent->bDrawMap ? FColor::Green : FColor::Silver,
+			SlamComponent->bDrawMap ? TEXT("SLAM map: ON (M to hide)") : TEXT("SLAM map: OFF (M to show)"));
+	}
 }
 void AAutomatedForklift::CameraYaw(float V) { if (bCameraOrbiting && !FMath::IsNearlyZero(V)) { CameraYawDeg += V * 2.f; CameraBoom->SetRelativeRotation(FRotator(CameraPitchDeg, CameraYawDeg, 0.f)); } }
 void AAutomatedForklift::CameraPitch(float V) { if (bCameraOrbiting && !FMath::IsNearlyZero(V)) { CameraPitchDeg = FMath::Clamp(CameraPitchDeg + V * 2.f, CameraMinPitchDeg, CameraMaxPitchDeg); CameraBoom->SetRelativeRotation(FRotator(CameraPitchDeg, CameraYawDeg, 0.f)); } }

@@ -74,19 +74,14 @@ Plugins/**/Intermediate/*
 # Cache files for the editor to use
 DerivedDataCache/*
 
-# ÇÁ·ÎÁ§Æ® ·çÆ®ÀÇ »ý¼º ÆÄÀÏ
-/Binaries/
-/Intermediate/
-/Saved/
-/DerivedDataCache/
-/.vs/
+# ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æ® ï¿½ï¿½Æ®ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½
 
-# IDE »ý¼º ÆÄÀÏ
+# IDE ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½
 *.sln
 *.vcxproj
 *.vcxproj.filters
 *.vcxproj.user
 
-# Blender ÀÚµ¿ ¹é¾÷
+# Blender ï¿½Úµï¿½ ï¿½ï¿½ï¿½
 *.blend1
 *.blend2

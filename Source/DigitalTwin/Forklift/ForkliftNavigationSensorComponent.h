@@ -10,7 +10,8 @@ enum class ELidarReturnKind : uint8
 {
 	NoReturn,
 	SelfOccluded,
-	ExternalHit
+	ExternalHit,
+	Dropped
 };
 
 /** One ray in the sensor's local UE frame: X forward, Y right, Z up; cm. */
@@ -31,6 +32,8 @@ struct FForkliftLidarScan
 {
 	GENERATED_BODY()
 	UPROPERTY() double TimestampSeconds = 0.0;
+	UPROPERTY() uint64 SequenceNumber = 0;
+	UPROPERTY() FName SensorFrameId = TEXT("lidar_link");
 	UPROPERTY() FTransform SensorToBody = FTransform::Identity;
 	UPROPERTY() TArray<FLidarRaySample> Samples;
 };
@@ -45,6 +48,8 @@ struct FForkliftImuSample
 	UPROPERTY() FVector LinearAccelerationCmPerSecSq = FVector::ZeroVector;
 	UPROPERTY() FVector AngularVelocityRadPerSec = FVector::ZeroVector;
 	UPROPERTY() bool bIncludesGravity = false;
+	/** This simulator derives ideal IMU values from the component world transform. */
+	UPROPERTY() bool bUsesGroundTruthKinematics = true;
 	UPROPERTY() bool bInitialized = false;
 };
 
@@ -71,7 +76,17 @@ public:
 	UPROPERTY(EditAnywhere, Category="LiDAR|Scan", meta=(ClampMin="1", ClampMax="64")) int32 VerticalChannels = 8;
 	UPROPERTY(EditAnywhere, Category="LiDAR|Scan") float VerticalCenterDegrees = -10.f;
 	UPROPERTY(EditAnywhere, Category="LiDAR|Scan", meta=(ClampMin="0.0")) float MinimumRangeCm = 10.f;
+
 	UPROPERTY(EditAnywhere, Category="LiDAR|Scan", meta=(ClampMin="1.0")) float MaximumRangeCm = 3000.f;
+
+	UPROPERTY(EditAnywhere, Category="LiDAR|Scan", meta=(ClampMin="1.0")) float MaximumRangeCm = 1500.f;
+	UPROPERTY(EditAnywhere, Category="LiDAR|Quality") bool bApplyMeasurementNoise = false;
+	UPROPERTY(EditAnywhere, Category="LiDAR|Quality", meta=(ClampMin="0.0")) float RangeBiasCm = 0.f;
+	UPROPERTY(EditAnywhere, Category="LiDAR|Quality", meta=(ClampMin="0.0")) float RangeNoiseStdDevCm = 0.f;
+	UPROPERTY(EditAnywhere, Category="LiDAR|Quality", meta=(ClampMin="0.0", ClampMax="1.0")) float DropoutProbability = 0.f;
+	UPROPERTY(EditAnywhere, Category="LiDAR|Quality") int32 NoiseRandomSeed = 1701;
+	UPROPERTY(EditAnywhere, Category="LiDAR|Frames") FName SensorFrameId = TEXT("lidar_link");
+
 	UPROPERTY(EditAnywhere, Category="LiDAR|Debug") bool bDebugVisible = false;
 	UPROPERTY(EditAnywhere, Category="LiDAR|Debug", meta=(ClampMin="1")) int32 DebugRayStride = 40;
 	UPROPERTY(EditAnywhere, Category="IMU") bool bImuIncludesGravity = false;
@@ -94,8 +109,11 @@ private:
 	FQuat PreviousWorldRotation = FQuat::Identity;
 	FVector PreviousWorldVelocity = FVector::ZeroVector;
 	double PreviousImuTimeSeconds = 0.0;
+	uint64 NextScanSequenceNumber = 1;
+	FRandomStream MeasurementRandomStream;
 
 	void PerformScan();
 	void UpdateImu();
 	void DrawLidarDebug() const;
+	float SampleStandardNormal();
 };

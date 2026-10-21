@@ -16,6 +16,9 @@ class USceneCaptureComponent2D;
 class UTextureRenderTarget2D;
 class UPhysicsConstraintComponent;
 class UForkliftNavigationSensorComponent;
+class UForkliftLocalOccupancyGridComponent;
+class UForkliftSlamComponent;
+class UForkliftGlobalPathPlannerComponent;
 class APallet;
 
 UENUM()
@@ -165,6 +168,9 @@ public:
 	/** Query-only self-occluders used by the LiDAR; they never participate in vehicle physics. */
 	UPROPERTY(VisibleAnywhere, Category="LiDAR") TObjectPtr<UBoxComponent> LidarBodyOccluder;
 	UPROPERTY(VisibleAnywhere, Category="LiDAR") TObjectPtr<UBoxComponent> LidarMastOccluder;
+	UPROPERTY(VisibleAnywhere, Category="Perception") TObjectPtr<UForkliftLocalOccupancyGridComponent> LocalOccupancyGrid;
+	UPROPERTY(VisibleAnywhere, Category="SLAM") TObjectPtr<UForkliftSlamComponent> SlamComponent;
+	UPROPERTY(VisibleAnywhere, Category="Navigation") TObjectPtr<UForkliftGlobalPathPlannerComponent> GlobalPathPlanner;
 	UPROPERTY(VisibleAnywhere, Category="Chaos") TObjectPtr<UBoxComponent> LiftPhysicsBody;
 	UPROPERTY(VisibleAnywhere, Category="Chaos") TObjectPtr<UBoxComponent> ReachPhysicsBody;
 	UPROPERTY(VisibleAnywhere, Category="Chaos") TObjectPtr<UBoxComponent> ForkPhysicsBody;
@@ -320,6 +326,7 @@ private:
 	void ToggleVisionDebugView();
 	void ToggleSensorOcclusionDiagnostic();
 	void ToggleLidarDebug();
+	void ToggleSlamMapDebug();
 	void UpdatePalletSensorSettings();
 	void ProcessOpeningVision();
 	void UpdateAutoPickup(float DeltaSeconds);

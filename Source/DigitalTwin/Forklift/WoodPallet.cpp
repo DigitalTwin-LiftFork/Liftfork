@@ -9,6 +9,7 @@ AWoodPallet::AWoodPallet()
 	SetRootComponent(PhysicsRoot);
 	PhysicsRoot->SetBoxExtent(FVector(2.f)); // Host body; the following simple shapes preserve the two openings.
 	PhysicsRoot->SetCollisionProfileName(TEXT("PhysicsActor"));
+	PhysicsRoot->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
 	PhysicsRoot->SetSimulatePhysics(true); PhysicsRoot->SetEnableGravity(true); PhysicsRoot->SetNotifyRigidBodyCollision(true);
 	PhysicsRoot->OnComponentHit.AddDynamic(this, &AWoodPallet::HandleHit);
 	CollisionShapes.Add(PhysicsRoot);
@@ -45,7 +46,9 @@ UBoxComponent* AWoodPallet::AddCollisionBox(const TCHAR* Name, const FVector& Lo
 {
 	UBoxComponent* Part = CreateDefaultSubobject<UBoxComponent>(Name); Part->SetupAttachment(PhysicsRoot); Part->SetRelativeLocation(Location); Part->SetBoxExtent(HalfExtent);
 	Part->SetCollisionProfileName(TEXT("PhysicsActor"));
+	Part->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
 	Part->SetCollisionResponseToChannel(ECC_WorldDynamic, ECR_Block);
+	Part->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
 	Part->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	Part->SetNotifyRigidBodyCollision(true);
 	Part->OnComponentHit.AddDynamic(this, &AWoodPallet::HandleHit);
