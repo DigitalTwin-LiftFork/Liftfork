@@ -38,7 +38,9 @@ UStaticMeshComponent* AWoodPallet::AddWoodBox(const TCHAR* Name, const FVector& 
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> Cube(TEXT("/Engine/BasicShapes/Cube.Cube"));
 	if (Cube.Succeeded()) Part->SetStaticMesh(Cube.Object);
 	Part->SetRelativeLocation(Location); Part->SetRelativeScale3D(FullSize / 100.f); Part->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	Part->SetVectorParameterValueOnMaterials(TEXT("Color"), FVector(.72f, .50f, .25f));
+	// Deliberately high-saturation red: this is a simulation/vision aid, not a
+	// claim about a real wood-pallet finish.  It is rendered by the same sensor.
+	Part->SetVectorParameterValueOnMaterials(TEXT("Color"), FVector(.78f, .035f, .025f));
 	VisualParts.Add(Part); return Part;
 }
 UBoxComponent* AWoodPallet::AddCollisionBox(const TCHAR* Name, const FVector& Location, const FVector& HalfExtent)
@@ -57,13 +59,13 @@ void AWoodPallet::SetPlacementPreview(bool bPreview)
 {
 	bPlacementPreview = bPreview; PhysicsRoot->SetSimulatePhysics(false); PhysicsRoot->SetEnableGravity(false);
 	for (UBoxComponent* Shape : CollisionShapes) Shape->SetCollisionEnabled(bPreview ? ECollisionEnabled::NoCollision : ECollisionEnabled::QueryAndPhysics);
-	for (UStaticMeshComponent* Part : VisualParts) Part->SetVectorParameterValueOnMaterials(TEXT("Color"), bPreview ? FVector(.25f, .8f, .3f) : FVector(.72f, .50f, .25f));
+	for (UStaticMeshComponent* Part : VisualParts) Part->SetVectorParameterValueOnMaterials(TEXT("Color"), bPreview ? FVector(.25f, .8f, .3f) : FVector(.78f, .035f, .025f));
 }
 void AWoodPallet::FinalizePlacement()
 {
 	bPlacementPreview = false; for (UBoxComponent* Shape : CollisionShapes) Shape->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	PhysicsRoot->SetEnableGravity(true); PhysicsRoot->SetSimulatePhysics(true); PhysicsRoot->SetPhysicsLinearVelocity(FVector::ZeroVector); PhysicsRoot->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
-	for (UStaticMeshComponent* Part : VisualParts) Part->SetVectorParameterValueOnMaterials(TEXT("Color"), FVector(.72f, .50f, .25f));
+	for (UStaticMeshComponent* Part : VisualParts) Part->SetVectorParameterValueOnMaterials(TEXT("Color"), FVector(.78f, .035f, .025f));
 }
 void AWoodPallet::HandleHit(UPrimitiveComponent*, AActor*, UPrimitiveComponent* Other, FVector, const FHitResult& Hit) { LastHit = Hit; LastHitTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f; LastHitOther = Other; }
 bool AWoodPallet::GetRecentForkContact(float MaxAge, UPrimitiveComponent*& OutOther) const { OutOther = nullptr; if (!GetWorld() || GetWorld()->GetTimeSeconds() - LastHitTime > MaxAge) return false; OutOther = LastHitOther.Get(); return OutOther != nullptr; }

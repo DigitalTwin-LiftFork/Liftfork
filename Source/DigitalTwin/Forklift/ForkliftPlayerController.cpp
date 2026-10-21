@@ -37,7 +37,7 @@ void AForkliftPlayerController::ClickAutoPickupButton()
 	if (ActiveWoodPallet) return;
 	if (AAutomatedForklift* Forklift = Cast<AAutomatedForklift>(GetPawn()))
 	{
-		if (Forklift->GetAutoPickupState() == EAutoPickupState::Detecting || Forklift->GetAutoPickupState() == EAutoPickupState::Aligning || Forklift->GetAutoPickupState() == EAutoPickupState::Inserting || Forklift->GetAutoPickupState() == EAutoPickupState::Lifting)
+		if (Forklift->GetAutoPickupState() == EAutoPickupState::Detecting || Forklift->GetAutoPickupState() == EAutoPickupState::Approaching || Forklift->GetAutoPickupState() == EAutoPickupState::Aligning || Forklift->GetAutoPickupState() == EAutoPickupState::Inserting || Forklift->GetAutoPickupState() == EAutoPickupState::Lifting)
 		{
 			WoodPalletPlacementStatus = TEXT("자동 집기 실행 중에는 기존 목재 파레트를 이동할 수 없음");
 			return;
@@ -50,7 +50,7 @@ void AForkliftPlayerController::BeginOrSelectWoodPallet()
 {
 	if (ActiveWoodPallet) { WoodPalletPlacementStatus = TEXT("이미 배치 중 — 좌클릭 확정 또는 Esc 취소"); return; }
 	AAutomatedForklift* Forklift = Cast<AAutomatedForklift>(GetPawn());
-	if (Forklift && (Forklift->GetAutoPickupState() == EAutoPickupState::Detecting || Forklift->GetAutoPickupState() == EAutoPickupState::Aligning || Forklift->GetAutoPickupState() == EAutoPickupState::Inserting || Forklift->GetAutoPickupState() == EAutoPickupState::Lifting)) { WoodPalletPlacementStatus = TEXT("자동 집기 실행 중에는 배치 불가"); return; }
+	if (Forklift && (Forklift->GetAutoPickupState() == EAutoPickupState::Detecting || Forklift->GetAutoPickupState() == EAutoPickupState::Approaching || Forklift->GetAutoPickupState() == EAutoPickupState::Aligning || Forklift->GetAutoPickupState() == EAutoPickupState::Inserting || Forklift->GetAutoPickupState() == EAutoPickupState::Lifting)) { WoodPalletPlacementStatus = TEXT("자동 집기 실행 중에는 배치 불가"); return; }
 	FActorSpawnParameters Params; Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 	ActiveWoodPallet = GetWorld()->SpawnActor<AWoodPallet>(AWoodPallet::StaticClass(), FVector(0.f, 0.f, -10000.f), FRotator::ZeroRotator, Params);
 	if (!ActiveWoodPallet) { WoodPalletPlacementStatus = TEXT("목재 파레트 생성 실패"); return; }
