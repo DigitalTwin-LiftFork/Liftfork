@@ -21,7 +21,7 @@ void AForkliftSensorHUD::DrawHUD()
 	const bool NavActive=Forklift->IsNavigationActive();
 	DrawRect(NavActive ? FLinearColor(.65f,.12f,.08f,.95f) : FLinearColor(.05f,.3f,.55f,.95f),NavButton.Min.X,NavButton.Min.Y,NavButton.GetSize().X,NavButton.GetSize().Y);
 	DrawText(NavActive ? TEXT("자동 탐색 정지") : TEXT("자동 탐색 시작"), FLinearColor::White,NavButton.Min.X+16.f,NavButton.Min.Y+12.f,nullptr,1.f);
-	DrawText(TEXT("목적지 자동 선택 / 수동 입력 시 중지"),FLinearColor::White,24.f,NavButton.Min.Y-20.f,nullptr,.72f);
+	DrawText(TEXT("지도 클릭: 지정 위치 주행 / 시작 버튼: 자동 탐색"),FLinearColor::White,24.f,NavButton.Min.Y-20.f,nullptr,.72f);
 	DrawRect(bRunning ? FLinearColor(.65f, .18f, .12f, .92f) : FLinearColor(.08f, .32f, .12f, .92f), 24.f, ButtonY, 240.f, 48.f);
 	DrawText(bRunning ? TEXT("작업 중지") : TEXT("파레트 자동 집기"), FLinearColor::White, 40.f, ButtonY + 13.f, nullptr, 1.f);
 	DrawRect(FLinearColor(.35f, .22f, .08f, .92f), 274.f, ButtonY, 240.f, 48.f);
@@ -68,7 +68,7 @@ void AForkliftSensorHUD::DrawHUD()
 		const float CX = MX + Size * .5f, CY = MY + Size * .5f;
 		DrawRect(FLinearColor::Yellow, CX - 3.f, CY - 3.f, 6.f, 6.f);
 		DrawLine(CX, CY, CX + FMath::Sin(Slam->GetYaw()) * 18.f, CY - FMath::Cos(Slam->GetYaw()) * 18.f, FLinearColor::Yellow, 2.f);
-		DrawText(TEXT("LiDAR / 2D local SLAM | 30 m view"), FLinearColor::White, MX, MY - 20.f, nullptr, .8f);
+		DrawText(TEXT("LiDAR / SLAM | 클릭해 탐색된 목표 선택"), FLinearColor::White, MX, MY - 20.f, nullptr, .8f);
 		DrawText(Slam->GetStatus(), FLinearColor::Yellow, MX, MY + Size + 4.f, nullptr, .75f);
 		DrawText(FString::Printf(TEXT("x %.2f m  y %.2f m | match %.0f%%"), Pose.X / 100., Pose.Y / 100., Slam->GetConfidence() * 100.f), FLinearColor::White, MX, MY + Size + 22.f, nullptr, .75f);
 		DrawText(TEXT("M: map  B: reset  L: LiDAR rays"), FLinearColor::White, MX, MY + Size + 40.f, nullptr, .75f);

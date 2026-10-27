@@ -27,7 +27,7 @@ public:
 	int32 GetScanCount() const { return ScanCount; }
 	int32 GetMapUpdateCount() const { return MapUpdateCount; }
 		int32 GetMapGeneration() const { return MapGeneration; }
-	bool IsTrackingFresh(double Now) const { return bInitialized && StableScans >= 3 && LastAcceptedScan == LastScan && Now-LastAcceptedScan < .3 && Confidence >= .45f; }
+	bool IsTrackingFresh(double Now) const { return bInitialized && StableScans >= 3 && LastAcceptedScan == LastScan && Now-LastAcceptedScan < 1.25 && Confidence >= .45f; }
 	static constexpr float CellCm = 20.f;
 private:
 	UPROPERTY(Transient) TObjectPtr<UForkliftNavigationSensorComponent> Sensor;

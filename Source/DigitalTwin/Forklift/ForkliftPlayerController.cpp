@@ -38,6 +38,15 @@ void AForkliftPlayerController::ClickAutoPickupButton()
 		}
 		return;
 	}
+	if (bHasMouse && AAutomatedForklift::SlamMapRect(ViewY).IsInside(FVector2D(MouseX,MouseY)))
+	{
+		if (AAutomatedForklift* Forklift=Cast<AAutomatedForklift>(GetPawn()))
+		{
+			if (ActiveWoodPallet) CancelWoodPalletPlacement();
+			Forklift->SetNavigationGoalFromMapScreen(FVector2D(MouseX,MouseY),static_cast<float>(ViewY));
+		}
+		return;
+	}
 	const bool bInsideAutoButton = bHasMouse && MouseX >= 24.f && MouseX <= 264.f && MouseY >= ViewY - 72.f && MouseY <= ViewY - 24.f;
 	const bool bInsideWoodButton = bHasMouse && MouseX >= 274.f && MouseX <= 514.f && MouseY >= ViewY - 72.f && MouseY <= ViewY - 24.f;
 	UE_LOG(LogTemp, Warning, TEXT("[R16HD_UI] controller=%s viewport=%dx%d mouse=(%.0f,%.0f) valid=%d auto=%d wood=%d pawn=%s"), *GetName(), ViewX, ViewY, MouseX, MouseY, bHasMouse, bInsideAutoButton, bInsideWoodButton, *GetNameSafe(GetPawn()));

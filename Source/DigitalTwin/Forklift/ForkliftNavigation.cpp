@@ -25,7 +25,48 @@ void AAutomatedForklift::StopNavigation()
 	bNavigationActive = false;
 	NavigationRoute.Reset();
 	bNavigationGoalSet=false;
+	bNavigationGoalIsManual=false;
 	NavigationStatus = TEXT("자동 탐색 중지");
+}
+
+bool AAutomatedForklift::SetNavigationGoalFromMapScreen(FVector2D ScreenPosition, float ViewportHeight)
+{
+	const FBox2D MapRect = SlamMapRect(ViewportHeight);
+	if (!MapRect.IsInside(ScreenPosition)) return false;
+	const auto* S = FindComponentByClass<UForkliftSlamComponent>();
+	if (!S || !NavigationSensor || !S->bShowMap) return false;
+	const float Size = MapRect.GetSize().X;
+	const float Scale = Size / 3000.f;
+	const FVector2D Centre = MapRect.GetCenter();
+	const FVector2D MapPose = S->GetPosition();
+	const FVector2D Offset((Centre.Y-ScreenPosition.Y)/Scale,(ScreenPosition.X-Centre.X)/Scale);
+	const FIntPoint GoalCell = NavCell(MapPose+Offset);
+	NavigationGoal = NavCentre(GoalCell);
+	bNavigationGoalIsManual = true;
+	bNavigationGoalSet = true;
+	bNavigationActive = true;
+	NavigationRoute.Reset();
+	NavigationMapGeneration = S->GetMapGeneration();
+	NavigationTrackingWaitStart = -1.f;
+	if (!S->IsTrackingFresh(GetWorld()->GetTimeSeconds()))
+	{
+		NavigationStatus = TEXT("목표 설정됨: SLAM 위치 추적 대기");
+		return true;
+	}
+	const FVector2D Start = BodyPose(S,NavigationSensor);
+	if (!PlanNavigationRoute(Start))
+	{
+		bNavigationActive = false;
+		bNavigationGoalSet = false;
+		bNavigationGoalIsManual = false;
+		NavigationStatus = TEXT("목표 불가: 지도에서 탐색된 빈 구역을 선택하세요");
+		return true;
+	}
+	NavigationReplanTime = GetWorld()->GetTimeSeconds()+1.f;
+	NavigationProgressPosition = Start;
+	NavigationProgressTime = GetWorld()->GetTimeSeconds();
+	NavigationStatus = TEXT("목표 경로 설정: LiDAR 지도 경로 주행");
+	return true;
 }
 
 void AAutomatedForklift::ToggleNavigation()
@@ -106,14 +147,10 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 	{
 		StopNavigation(); NavigationStatus=TEXT("중지: 센서 꺼짐 또는 지도 초기화"); return;
 	}
-	if (!S->IsTrackingFresh(Now) || Now-NavigationSensor->GetLatestScan().TimestampSeconds>.3 || Dt>.15f)
+	if (!S->IsTrackingFresh(Now) || Now-NavigationSensor->GetLatestScan().TimestampSeconds>1.25 || Dt>.15f)
 	{
 		if (NavigationTrackingWaitStart<0.f) NavigationTrackingWaitStart=Now;
-		NavigationStatus=FString::Printf(TEXT("출발 대기: %s (%.2fs/frame)"), *S->GetStatus(), Dt);
-		if (Now-NavigationTrackingWaitStart>5.f)
-		{
-			StopNavigation(); NavigationStatus=FString::Printf(TEXT("출발 중지: %s (%.2fs/frame)"), *S->GetStatus(), Dt);
-		}
+		NavigationStatus=FString::Printf(TEXT("안전 정지: 위치 추정 회복 대기 — %s (%.2fs/frame)"), *S->GetStatus(), Dt);
 		return;
 	}
 	if (NavigationTrackingWaitStart>=0.f)
@@ -128,6 +165,12 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 	const FVector2D Pose=BodyPose(S,NavigationSensor);
 	if (bNavigationGoalSet && FVector2D::Distance(Pose,NavigationGoal)<70.f)
 	{
+		if (bNavigationGoalIsManual)
+		{
+			StopNavigation();
+			NavigationStatus=TEXT("지정한 목표 위치에 도착했습니다");
+			return;
+		}
 		ExplorationVisited.Add(NavigationGoal);
 		bNavigationGoalSet=false;
 		ExplorationBlockedGoals=0;
@@ -138,11 +181,20 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 	}
 	if (bNavigationGoalSet && Now-NavigationProgressTime>10.f)
 	{
-		ExplorationVisited.Add(NavigationGoal);
-		bNavigationGoalSet=false;
-		if (++ExplorationBlockedGoals>=5)
+		if (bNavigationGoalIsManual)
 		{
-			StopNavigation(); NavigationStatus=TEXT("중지: 연속된 통로 막힘"); return;
+			NavigationProgressTime=Now;
+			NavigationReplanTime=Now;
+			NavigationStatus=TEXT("목표 진행 지연: 지정 목적지 경로 재탐색 중");
+		}
+		else
+		{
+			ExplorationVisited.Add(NavigationGoal);
+			bNavigationGoalSet=false;
+			if (++ExplorationBlockedGoals>=5)
+			{
+				StopNavigation(); NavigationStatus=TEXT("중지: 연속된 통로 막힘"); return;
+			}
 		}
 	}
 	if (!bNavigationGoalSet)
@@ -157,6 +209,11 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 		NavigationReplanTime=Now+1.f;
 		if (!PlanNavigationRoute(Pose))
 		{
+			if (bNavigationGoalIsManual)
+			{
+				NavigationStatus=TEXT("목표 경로 대기: 지도상 통로 확인 후 다시 계산");
+				return;
+			}
 			ExplorationVisited.Add(NavigationGoal);
 			bNavigationGoalSet=false;
 			NavigationStatus=TEXT("경로 변경: 다른 탐색 지점 선택 중");
@@ -164,7 +221,10 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 		}
 	}	while (NavigationRoute.Num()>1 && FVector2D::Distance(Pose,NavigationRoute[0])<70.f) NavigationRoute.RemoveAt(0);
 	if (NavigationRoute.IsEmpty()) return;
-	const FVector2D Target=NavRotate(NavigationRoute[0]-Pose,-S->GetYaw());
+	// Route points are in the SLAM map frame. Express them in the actual
+	// vehicle frame because Tick applies steering to the actor's world yaw.
+	const float VehicleYaw=FMath::DegreesToRadians(GetActorRotation().Yaw);
+	const FVector2D Target=NavRotate(NavigationRoute[0]-Pose,-VehicleYaw);
 	// Full vehicle planar envelope measured from existing collision parts.
 	FBox Bounds(ForceInit);
 	const UBoxComponent* Parts[]={BodyCollision,LeftSupportLegCollision,RightSupportLegCollision,LeftForkCollision,RightForkCollision,LidarMastOccluder};
@@ -204,7 +264,11 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 			if (!Clear) continue;
 			const FVector2D Remaining=Target-P;
 			const float Heading=FMath::Abs(FMath::UnwindRadians(FMath::Atan2(Remaining.Y,Remaining.X)-A));
-			const float Score=(Target.Size()-Remaining.Size())-Heading*100.f-FMath::Abs(Rate)*.1f;
+			// Prefer a safe translating arc. A large heading weight made the
+			// planner choose a stationary spin repeatedly, even when forward
+			// motion was clear. Keep pivot turns for targets well off the nose.
+			const float PivotPenalty=Speed==0.f ? 35.f : 0.f;
+			const float Score=(Target.Size()-Remaining.Size())-Heading*30.f-FMath::Abs(Rate)*.1f-PivotPenalty;
 			if (Score>Best) { Best=Score; BestSpeed=Speed; BestRate=Rate; }
 		}
 	if (Best==-BIG_NUMBER) { NavigationStatus=TEXT("장애물 대기: 다른 경로 탐색 예정"); return; }
@@ -234,7 +298,7 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 	}
 	DriveInput=BestSpeed/FMath::Max(Motion.ForwardSpeedCmPerSec,1.f);
 	SteerInput=BestRate/FMath::Max(Motion.SteeringRateDegPerSec,1.f);
-	NavigationStatus=TEXT("자동 탐색 중: 지도 생성 및 장애물 회피");
+	NavigationStatus=FString::Printf(TEXT("주행 중: 전진 %.0fcm/s / 조향 %.0f°/s"),BestSpeed,BestRate);
 }
 
 bool AAutomatedForklift::SelectExplorationGoal(FVector2D Start)

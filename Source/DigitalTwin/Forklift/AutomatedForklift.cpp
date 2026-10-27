@@ -55,10 +55,18 @@ AAutomatedForklift::AAutomatedForklift()
 	NavigationSensor = CreateDefaultSubobject<UForkliftNavigationSensorComponent>(TEXT("RearBodyLidarImu"));
 	NavigationSensor->SetupAttachment(BodyCollision);
 	CreateDefaultSubobject<UForkliftSlamComponent>(TEXT("LidarSlam"));
-	// Rear, above the fixed body deck: actor X is vehicle-forward, so negative
-	// X is rear.  This point is outside the 95cm body shell and does not follow
-	// the mast, lift, reach, fork or user camera.
-	NavigationSensor->SetRelativeLocation(FVector(-72.f, 0.f, 92.f));
+	// One clean six-metre support pole with the LiDAR fixed at its top.
+	// 50 cm enters the chassis so the pole joins cleanly; 700 cm remains
+	// visible above the body roof.
+	constexpr float LidarPoleHeightCm = 750.f;
+	const float SensorColumnX = Dimensions.OverallLengthCm * .5f - 10.f;
+	const float PoleBottomZ = Dimensions.BodyHeightCm * .5f - 50.f;
+	const float SensorZ = PoleBottomZ + LidarPoleHeightCm;
+	LidarPole7mRebuilt = CreateVisual(TEXT("LidarPole7mRebuilt"), BodyCollision);
+	LidarPole7mRebuilt->SetStaticMesh(Forklift::SensorHousing());
+	LidarPole7mRebuilt->SetRelativeLocation(FVector(SensorColumnX, 0.f, PoleBottomZ + LidarPoleHeightCm * .5f));
+	LidarPole7mRebuilt->SetRelativeScale3D(FVector(.08f, .08f, LidarPoleHeightCm / 100.f));
+	NavigationSensor->SetRelativeLocation(FVector(SensorColumnX, 0.f, SensorZ));
 	NavigationSensor->SetRelativeRotation(FRotator::ZeroRotator);
 	NavigationSensorVisual = CreateVisual(TEXT("RearBodyLidarImuHousing"), NavigationSensor);
 	NavigationSensorVisual->SetStaticMesh(Forklift::SensorHousing());
@@ -95,6 +103,7 @@ AAutomatedForklift::AAutomatedForklift()
 	RightForkFixedConstraint = CreateDefaultSubobject<UPhysicsConstraintComponent>(TEXT("RightForkFixedConstraint")); RightForkFixedConstraint->SetupAttachment(ForkPhysicsBody);
 	MastAssembly = CreateDefaultSubobject<USceneComponent>(TEXT("MastAssembly")); MastAssembly->SetupAttachment(BodyCollision);
 	LidarMastOccluder->SetupAttachment(MastAssembly);
+
 	MastOuterVisual = CreateVisual(TEXT("MastOuterVisual_ReplaceMesh"), MastAssembly);
 	MastInnerVisual = CreateVisual(TEXT("MastInnerVisual_ReplaceMesh"), MastAssembly);
 	MastLiftVisual = CreateVisual(TEXT("MastLiftVisual_ReplaceMesh"), MastAssembly);
@@ -192,7 +201,45 @@ void AAutomatedForklift::ApplyDimensions()
 	constexpr float ReachVisualBaseHeightCm = 35.f;
 	constexpr float ForkMountForwardOffsetCm = 20.f;
 	constexpr float ForkCarriageBaseHeightCm = 10.f;
+	// Remove stale support parts from previously saved Blueprints.
+	TArray<UStaticMeshComponent*> ExistingSensorMeshes;
+	GetComponents<UStaticMeshComponent>(ExistingSensorMeshes);
+	for (UStaticMeshComponent* Mesh : ExistingSensorMeshes)
+	{
+		if (Mesh && (Mesh->GetName().StartsWith(TEXT("LidarPole6m")) ||
+			Mesh->GetName().StartsWith(TEXT("NavigationSensorSupportColumn")) ||
+			Mesh->GetName().StartsWith(TEXT("NavigationSensorSupportBase")) ||
+			Mesh->GetName().StartsWith(TEXT("LidarPoleFoot6m"))))
+		{
+			Mesh->DestroyComponent();
+		}
+	}
+	if (!IsValid(LidarPole7mRebuilt))
+	{
+		LidarPole7mRebuilt = NewObject<UStaticMeshComponent>(this, TEXT("LidarPole7mRebuilt_Runtime"));
+		if (LidarPole7mRebuilt)
+		{
+			LidarPole7mRebuilt->SetupAttachment(BodyCollision);
+			LidarPole7mRebuilt->SetStaticMesh(Forklift::SensorHousing());
+			LidarPole7mRebuilt->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			LidarPole7mRebuilt->RegisterComponent();
+		}
+	}
 	BodyCollision->SetBoxExtent(FVector(Dimensions.OverallLengthCm * .5f, Dimensions.MaximumWidthCm * .5f, Dimensions.BodyHeightCm * .5f));
+	// 50 cm enters the chassis so the pole joins cleanly; 700 cm remains
+	// visible above the body roof.
+	constexpr float LidarPoleHeightCm = 750.f;
+	const float PoleBottomZ = Dimensions.BodyHeightCm * .5f - 50.f;
+	const float SensorColumnX = Dimensions.OverallLengthCm * .5f - 10.f;
+	const float SensorZ = PoleBottomZ + LidarPoleHeightCm;
+	NavigationSensor->SetRelativeLocation(FVector(SensorColumnX, 0.f, SensorZ));
+	if (IsValid(LidarPole7mRebuilt))
+	{
+		LidarPole7mRebuilt->AttachToComponent(BodyCollision, FAttachmentTransformRules::KeepRelativeTransform);
+		LidarPole7mRebuilt->SetStaticMesh(Forklift::SensorHousing());
+		LidarPole7mRebuilt->SetRelativeLocation(FVector(SensorColumnX, 0.f, PoleBottomZ + LidarPoleHeightCm * .5f));
+		LidarPole7mRebuilt->SetRelativeScale3D(FVector(.08f, .08f, LidarPoleHeightCm / 100.f));
+	}
 	// Query-only representations preserve self-occlusion for line traces without
 	// changing the chassis/mast's existing physics collision responses.
 	LidarBodyOccluder->SetRelativeLocation(FVector::ZeroVector);
@@ -331,7 +378,7 @@ void AAutomatedForklift::UpdateMastVisuals(float ActualLiftCm)
 	// two telescopic stages at different ratios so the carriage never appears
 	// detached while preserving their original FBX scales.
 	const float ClampedLift = FMath::Clamp(ActualLiftCm, 0.f, RequiredLiftStrokeCm);
-	MastInnerVisual->SetRelativeLocation(FVector(-8.f, 0.f, Dimensions.MaximumLiftHeightCm * .45f + ClampedLift * .5f));
+	    MastInnerVisual->SetRelativeLocation(FVector(-8.f, 0.f, Dimensions.MaximumLiftHeightCm * .45f + ClampedLift * .5f));
 	MastLiftVisual->SetRelativeLocation(FVector(-14.f, 0.f, Dimensions.MaximumLiftHeightCm * .38f + ClampedLift));
 }
 

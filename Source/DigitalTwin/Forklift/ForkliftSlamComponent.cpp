@@ -59,7 +59,7 @@ void UForkliftSlamComponent::TickComponent(float Dt, ELevelTick Type, FActorComp
 	if (Imu.bInitialized && Dt > 0.f && Dt < .25f)
 		PendingYaw += Imu.AngularVelocityRadPerSec.Z * Dt;
 	if (Sensor->GetLatestScan().TimestampSeconds > LastScan) ProcessScan();
-	if (GetWorld()->GetTimeSeconds() - LastScan > .5)
+	if (GetWorld()->GetTimeSeconds() - LastScan > 1.25)
 		Status = TEXT("Stale scan - map paused");
 }
 
@@ -89,20 +89,24 @@ void UForkliftSlamComponent::ProcessScan()
 	LastScan = Scan.TimestampSeconds;
 	++ScanCount;
 	TArray<FVector2D> Points;
-	// Only near-horizontal rays define the 2D map. Sloped rays hitting floors
-	// and shelf tops would otherwise shift their endpoints as the truck moves.
+	// Accept returns from every elevation when they hit vertical surfaces.
+	// Surface normals reject floor and ceiling hits that would destabilize 2D SLAM.
 	for (const auto& Ray : Scan.Samples)
 		if (Ray.bValid && Ray.ReturnKind == ELidarReturnKind::ExternalHit &&
-			FMath::Abs(Ray.LocalDirection.Z) < .015f && Ray.DistanceCm > 30.f)
+			!Ray.LocalNormal.IsNearlyZero() && FMath::Abs(Ray.LocalNormal.Z) < .55f && Ray.DistanceCm > 30.f)
 			Points.Add(FVector2D(Ray.LocalPointCm.X, Ray.LocalPointCm.Y));
-	if (Points.Num() < 20 || Dt <= 0.f)
+	// Sparse returns are normal in wide warehouse aisles. Five hit points are
+	// enough to seed/track a local scan; no-return beams still contribute free
+	// space below, but are deliberately excluded from scan matching.
+	if (Points.Num() < 5 || Dt <= 0.f)
 	{
 		StableScans = 0;
-		Status = FString::Printf(TEXT("측정점 부족: %d/20, 범위 %.0fm"), Points.Num(), Sensor->MaximumRangeCm/100.f);
+		Status = FString::Printf(TEXT("측정점 부족: %d/5, 범위 %.0fm"), Points.Num(), Sensor->MaximumRangeCm/100.f);
 		Velocity = FVector2D::ZeroVector;
 		Confidence = 0.f;
 		return;
 	}
+	bool bPoseAccepted = true;
 	if (bInitialized)
 	{
 		// Build a distance-like lookup once per scan, rather than querying
@@ -149,15 +153,18 @@ void UForkliftSlamComponent::ProcessScan()
 		if (BestScore < .45f || FVector2D::Distance(BestP, Position) > 150.f)
 		{
 			StableScans = 0;
-		Status = FString::Printf(TEXT("스캔 정합 대기: 일치 %.0f%%, 측정점 %d"), BestScore*100.f, Points.Num());
+			Status = FString::Printf(TEXT("스캔 정합 대기: 일치 %.0f%%, 측정점 %d"), BestScore*100.f, Points.Num());
 			Velocity = FVector2D::ZeroVector;
-
-			return;
+			PendingYaw = 0.f;
+			bPoseAccepted = false;
 		}
-		Velocity = .5f * Velocity + .5f * (BestP - Position) / FMath::Max(Dt, .02f);
-		Velocity = Velocity.GetClampedToMaxSize(500.f);
-		Position = BestP;
-		Yaw = FMath::UnwindRadians(BestYaw);
+		else
+		{
+			Velocity = .5f * Velocity + .5f * (BestP - Position) / FMath::Max(Dt, .02f);
+			Velocity = Velocity.GetClampedToMaxSize(500.f);
+			Position = BestP;
+			Yaw = FMath::UnwindRadians(BestYaw);
+		}
 	}
 	else
 	{
@@ -167,22 +174,38 @@ void UForkliftSlamComponent::ProcessScan()
 	PendingYaw = 0.f;
 	// Ray carving: observed free space is distinct from unknown cells.
 	TSet<FIntPoint> FreeCells, HitCells;
-	for (const FVector2D& Point : Points)
+	for (const auto& Ray : Scan.Samples)
 	{
+		// Use the same wall returns for the occupied map and scan matching.
+		const bool bVerticalWallHit = Ray.bValid && Ray.ReturnKind == ELidarReturnKind::ExternalHit &&
+			!Ray.LocalNormal.IsNearlyZero() && FMath::Abs(Ray.LocalNormal.Z) < .55f && Ray.DistanceCm > 30.f;
+		if (bVerticalWallHit)
+		{
+			const FVector2D WallPoint(Ray.LocalPointCm.X, Ray.LocalPointCm.Y);
+			HitCells.Add(CellAt(Position + Rotate2(WallPoint, Yaw)));
+		}
+		if (FMath::Abs(Ray.LocalDirection.Z) >= .015f ||
+			(Ray.ReturnKind != ELidarReturnKind::ExternalHit && Ray.ReturnKind != ELidarReturnKind::NoReturn)) continue;
+		const bool bHit = Ray.ReturnKind == ELidarReturnKind::ExternalHit && Ray.bValid;
+		const FVector2D Point = bHit ? FVector2D(Ray.LocalPointCm.X, Ray.LocalPointCm.Y) :
+			FVector2D(Ray.LocalDirection.X, Ray.LocalDirection.Y) * Sensor->MaximumRangeCm;
 		const FVector2D End = Position + Rotate2(Point, Yaw);
 		const int32 Steps = FMath::CeilToInt(Point.Size() / (CellCm * .5f));
 		const FIntPoint Hit = CellAt(End);
-		HitCells.Add(Hit);
+		if (bHit) HitCells.Add(Hit);
 		for (int32 I = 0; I < Steps; ++I)
 		{
 			const FIntPoint C = CellAt(FMath::Lerp(Position, End, static_cast<float>(I) / Steps));
-			if (C != Hit) FreeCells.Add(C);
+			if (!bHit || C != Hit) FreeCells.Add(C);
 		}
 	}
 	for (const FIntPoint& C : FreeCells) if (!HitCells.Contains(C)) UpdateCell(C, -1);
 	for (const FIntPoint& C : HitCells) UpdateCell(C, 4);
 	++MapUpdateCount;
-	++StableScans;
-	LastAcceptedScan = Scan.TimestampSeconds;
-	Status = FString::Printf(TEXT("SLAM 추적: 측정점 %d / 안정 스캔 %d/3"), Points.Num(), FMath::Min(StableScans,3));
+	if (bPoseAccepted)
+	{
+		++StableScans;
+		LastAcceptedScan = Scan.TimestampSeconds;
+		Status = FString::Printf(TEXT("SLAM 추적: 측정점 %d / 안정 스캔 %d/3"), Points.Num(), FMath::Min(StableScans,3));
+	}
 }

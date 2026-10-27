@@ -15,24 +15,41 @@ void UForkliftNavigationSensorComponent::BeginPlay()
 	Super::BeginPlay();
 	// Migrate the previous 15 m instance setting for the expanded factory.
 	if (FMath::IsNearlyEqual(MaximumRangeCm, 1500.f)) MaximumRangeCm = 3000.f;
+	// Migrate serialized defaults from the old stationary sector scanner.
+	if (FMath::IsNearlyEqual(ScanIntervalSeconds, .10f)) ScanIntervalSeconds = .01f;
+	if (HorizontalSamples == 120) HorizontalSamples = 100;
+	if (FMath::IsNearlyEqual(VerticalFieldOfViewDegrees, 50.f)) VerticalFieldOfViewDegrees = 120.f;
+	if (VerticalChannels == 8) VerticalChannels = 9;
+	if (FMath::IsNearlyEqual(VerticalCenterDegrees, 0.f) || FMath::IsNearlyEqual(VerticalCenterDegrees, -10.f) || FMath::IsNearlyEqual(VerticalCenterDegrees, -15.f)) VerticalCenterDegrees = -30.f;
 	if (AActor* Owner = GetOwner()) PrimaryComponentTick.AddPrerequisite(Owner, Owner->PrimaryActorTick);
 	PreviousWorldLocation = GetComponentLocation();
 	PreviousWorldRotation = GetComponentQuat();
 	PreviousImuTimeSeconds = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
+	SweepSamples.Reserve(FMath::Max(1, HorizontalSamples) * FMath::Max(1, VerticalChannels));
 }
 
 void UForkliftNavigationSensorComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 	UpdateImu();
-	if (bScanEnabled && ScanIntervalSeconds >= .02f && HorizontalSamples > 0 && VerticalChannels > 0 && MaximumRangeCm > MinimumRangeCm)
+	if (!bScanEnabled)
+	{
+		ScanElapsedSeconds = 0.f;
+		SweepSamples.Reset();
+		bSweepReferenceInitialized = false;
+	}
+	else if (ScanIntervalSeconds >= .005f && HorizontalSamples > 0 && VerticalChannels > 0 && MaximumRangeCm > MinimumRangeCm)
 	{
 		ScanElapsedSeconds += DeltaTime;
-		if (ScanElapsedSeconds >= ScanIntervalSeconds)
+		int32 ColumnsThisFrame = 0;
+		while (ScanElapsedSeconds >= ScanIntervalSeconds && ColumnsThisFrame < 16)
 		{
-			ScanElapsedSeconds = FMath::Fmod(ScanElapsedSeconds, ScanIntervalSeconds);
+			ScanElapsedSeconds -= ScanIntervalSeconds;
 			PerformScan();
+			++ColumnsThisFrame;
 		}
+		// Drop excess backlog after a long frame instead of replaying stale rays.
+		if (ColumnsThisFrame == 16) ScanElapsedSeconds = 0.f;
 	}
 	if (bDebugVisible) DrawLidarDebug();
 }
@@ -40,56 +57,92 @@ void UForkliftNavigationSensorComponent::TickComponent(float DeltaTime, ELevelTi
 void UForkliftNavigationSensorComponent::ToggleDebugVisible()
 {
 	bDebugVisible = !bDebugVisible;
-	UE_LOG(LogTemp, Warning, TEXT("[R16HD_LIDAR] debugVisible=%d scanEnabled=%d"), bDebugVisible, bScanEnabled);
+	UE_LOG(LogTemp, Warning, TEXT("[R16HD_LIDAR] debugVisible=%d scanEnabled=%d spin=%.1f deg/s verticalFov=%.1f deg"),
+		bDebugVisible, bScanEnabled, 360.f / FMath::Max(.001f, ScanIntervalSeconds * HorizontalSamples), VerticalFieldOfViewDegrees);
 }
 
 void UForkliftNavigationSensorComponent::PerformScan()
 {
 	UWorld* World = GetWorld();
 	if (!World) return;
-	LatestScan.TimestampSeconds = World->GetTimeSeconds();
-	LatestScan.SensorToBody = GetRelativeTransform();
-	LatestScan.Samples.Reset();
-	LatestScan.Samples.Reserve(HorizontalSamples * VerticalChannels + FMath::Clamp(MappingHorizontalSamples,120,720));
+	const double Now = World->GetTimeSeconds();
 	const FTransform SensorWorld = GetComponentTransform();
+	if (!bSweepReferenceInitialized)
+	{
+		SweepStartTransform = SensorWorld;
+		SweepSamples.Reset();
+		ScannerYawDegrees = 0.f;
+		bSweepReferenceInitialized = true;
+	}
+
+	LatestBeamSamples.Reset();
+	LatestBeamWorldEnds.Reset();
+	LatestBeamSamples.Reserve(VerticalChannels);
+	LatestBeamWorldEnds.Reserve(VerticalChannels);
+	LatestBeamWorldStart = SensorWorld.GetLocation();
+	LatestBeamWorldForward = SensorWorld.TransformVectorNoScale(FRotator(VerticalCenterDegrees, ScannerYawDegrees, 0.f).Vector()).GetSafeNormal();
+
 	const float VerticalStep = VerticalChannels > 1 ? VerticalFieldOfViewDegrees / (VerticalChannels - 1) : 0.f;
-	const float HorizontalStart = -HorizontalFieldOfViewDegrees * .5f;
 	const float VerticalStart = VerticalCenterDegrees - VerticalFieldOfViewDegrees * .5f;
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(R16HDLidar), false);
 	Params.bTraceComplex = false;
-	for (int32 VerticalIndex = 0; VerticalIndex <= VerticalChannels; ++VerticalIndex)
+
+	for (int32 VerticalIndex = 0; VerticalIndex < VerticalChannels; ++VerticalIndex)
 	{
-		const float PitchRad = (VerticalIndex == VerticalChannels ? 0.f : FMath::DegreesToRadians(VerticalStart + VerticalIndex * VerticalStep));
-		const int32 RayCount = VerticalIndex == VerticalChannels ? FMath::Clamp(MappingHorizontalSamples,120,720) : HorizontalSamples;
-		const float RayStep = HorizontalFieldOfViewDegrees >= 359.99f ? HorizontalFieldOfViewDegrees / RayCount : HorizontalFieldOfViewDegrees / FMath::Max(1, RayCount-1);
-		for (int32 HorizontalIndex = 0; HorizontalIndex < RayCount; ++HorizontalIndex)
+		const float PitchDegrees = VerticalChannels > 1 ? VerticalStart + VerticalIndex * VerticalStep : VerticalCenterDegrees;
+		const FVector LocalDirection = FRotator(PitchDegrees, ScannerYawDegrees, 0.f).Vector();
+		const FVector WorldDirection = SensorWorld.TransformVectorNoScale(LocalDirection).GetSafeNormal();
+		const FVector Start = SensorWorld.GetLocation() + WorldDirection * MinimumRangeCm;
+		const FVector End = SensorWorld.GetLocation() + WorldDirection * MaximumRangeCm;
+
+		FLidarRaySample Sample;
+		Sample.LocalDirection = SweepStartTransform.InverseTransformVectorNoScale(WorldDirection).GetSafeNormal();
+		FVector DebugEnd = End;
+		FHitResult Hit;
+		if (World->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Params))
 		{
-			const float YawRad = FMath::DegreesToRadians(HorizontalStart + HorizontalIndex * RayStep);
-			FLidarRaySample& Sample = LatestScan.Samples.AddDefaulted_GetRef();
-			Sample.LocalDirection = FRotator(FMath::RadiansToDegrees(PitchRad), FMath::RadiansToDegrees(YawRad), 0.f).Vector();
-			const FVector Start = SensorWorld.GetLocation() + SensorWorld.TransformVectorNoScale(Sample.LocalDirection) * MinimumRangeCm;
-			const FVector End = SensorWorld.GetLocation() + SensorWorld.TransformVectorNoScale(Sample.LocalDirection) * MaximumRangeCm;
-			FHitResult Hit;
-			if (World->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Params))
+			Sample.DistanceCm = FVector::Distance(SensorWorld.GetLocation(), Hit.ImpactPoint);
+			Sample.LocalPointCm = SweepStartTransform.InverseTransformPosition(Hit.ImpactPoint);
+			Sample.LocalNormal = SweepStartTransform.InverseTransformVectorNoScale(Hit.ImpactNormal).GetSafeNormal();
+			DebugEnd = Hit.ImpactPoint;
+			if (Hit.GetActor() == GetOwner())
 			{
-				Sample.DistanceCm = FVector::Distance(SensorWorld.GetLocation(), Hit.ImpactPoint);
-				Sample.LocalPointCm = SensorWorld.InverseTransformPosition(Hit.ImpactPoint);
-				if (Hit.GetActor() == GetOwner())
-				{
-					Sample.ReturnKind = ELidarReturnKind::SelfOccluded;
-					Sample.bValid = false;
-				}
-				else
-				{
-					Sample.ReturnKind = ELidarReturnKind::ExternalHit;
-					Sample.bValid = true;
-				}
+				Sample.ReturnKind = ELidarReturnKind::SelfOccluded;
+				Sample.bValid = false;
 			}
 			else
 			{
-				Sample.ReturnKind = ELidarReturnKind::NoReturn;
+				Sample.ReturnKind = ELidarReturnKind::ExternalHit;
+				Sample.bValid = true;
 			}
 		}
+		else
+		{
+			Sample.ReturnKind = ELidarReturnKind::NoReturn;
+		}
+		SweepSamples.Add(Sample);
+		LatestBeamSamples.Add(Sample);
+		LatestBeamWorldEnds.Add(DebugEnd);
+	}
+
+	const float AzimuthStepDegrees = 360.f / FMath::Max(1, HorizontalSamples);
+	ScannerYawDegrees += AzimuthStepDegrees;
+	if (ScannerYawDegrees >= 360.f - KINDA_SMALL_NUMBER)
+	{
+		ScannerYawDegrees = 0.f;
+		const FTransform EndSensorTransform = GetComponentTransform();
+		for (FLidarRaySample& Sample : SweepSamples)
+		{
+			if (Sample.ReturnKind != ELidarReturnKind::NoReturn)
+				Sample.LocalPointCm = EndSensorTransform.InverseTransformPosition(SweepStartTransform.TransformPosition(Sample.LocalPointCm));
+			Sample.LocalDirection = EndSensorTransform.InverseTransformVectorNoScale(SweepStartTransform.TransformVectorNoScale(Sample.LocalDirection)).GetSafeNormal();
+			if (!Sample.LocalNormal.IsNearlyZero()) Sample.LocalNormal = EndSensorTransform.InverseTransformVectorNoScale(SweepStartTransform.TransformVectorNoScale(Sample.LocalNormal)).GetSafeNormal();
+		}
+		LatestScan.TimestampSeconds = Now;
+		LatestScan.SensorToBody = GetRelativeTransform();
+		LatestScan.Samples = MoveTemp(SweepSamples);
+		SweepSamples.Reserve(FMath::Max(1, HorizontalSamples) * FMath::Max(1, VerticalChannels));
+		SweepStartTransform = EndSensorTransform;
 	}
 }
 
@@ -150,16 +203,14 @@ void UForkliftNavigationSensorComponent::DrawLidarDebug() const
 {
 	UWorld* World = GetWorld();
 	if (!World) return;
-	const FTransform SensorWorld = GetComponentTransform();
-	DrawDebugSphere(World, SensorWorld.GetLocation(), 8.f, 12, FColor::Cyan, false, 0.f, 0, 1.5f);
-	DrawDebugDirectionalArrow(World, SensorWorld.GetLocation(), SensorWorld.GetLocation() + SensorWorld.GetUnitAxis(EAxis::X) * 50.f, 10.f, FColor::Cyan, false, 0.f, 0, 1.5f);
-	for (int32 Index = 0; Index < LatestScan.Samples.Num(); Index += FMath::Max(1, DebugRayStride))
+	DrawDebugSphere(World, LatestBeamWorldStart, 8.f, 12, FColor::Cyan, false, 0.f, 0, 1.5f);
+	DrawDebugDirectionalArrow(World, LatestBeamWorldStart, LatestBeamWorldStart + LatestBeamWorldForward * 70.f, 12.f, FColor::Cyan, false, 0.f, 0, 2.f);
+	for (int32 Index = 0; Index < LatestBeamSamples.Num(); ++Index)
 	{
-		const FLidarRaySample& Sample = LatestScan.Samples[Index];
-		const FVector Start = SensorWorld.GetLocation();
-		const FVector End = Sample.ReturnKind == ELidarReturnKind::NoReturn ? Start + SensorWorld.TransformVectorNoScale(Sample.LocalDirection) * MaximumRangeCm : SensorWorld.TransformPosition(Sample.LocalPointCm);
+		const FLidarRaySample& Sample = LatestBeamSamples[Index];
+		const FVector End = LatestBeamWorldEnds.IsValidIndex(Index) ? LatestBeamWorldEnds[Index] : LatestBeamWorldStart;
 		const FColor Colour = Sample.ReturnKind == ELidarReturnKind::ExternalHit ? FColor::Green : (Sample.ReturnKind == ELidarReturnKind::SelfOccluded ? FColor::Orange : FColor(80, 80, 80));
-		DrawDebugLine(World, Start, End, Colour, false, 0.f, 0, 0.75f);
-		if (Sample.ReturnKind != ELidarReturnKind::NoReturn) DrawDebugPoint(World, End, 4.f, Colour, false, 0.f);
+		DrawDebugLine(World, LatestBeamWorldStart, End, Colour, false, 0.f, 0, 1.f);
+		if (Sample.ReturnKind != ELidarReturnKind::NoReturn) DrawDebugPoint(World, End, 5.f, Colour, false, 0.f);
 	}
 }

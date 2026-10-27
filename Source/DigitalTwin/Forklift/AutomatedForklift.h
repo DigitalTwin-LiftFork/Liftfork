@@ -147,6 +147,7 @@ public:
 	UPROPERTY(VisibleAnywhere, Category="Replaceable visual slots") TObjectPtr<UStaticMeshComponent> MastOuterVisual;
 	UPROPERTY(VisibleAnywhere, Category="Replaceable visual slots") TObjectPtr<UStaticMeshComponent> MastInnerVisual;
 	UPROPERTY(VisibleAnywhere, Category="Replaceable visual slots") TObjectPtr<UStaticMeshComponent> MastLiftVisual;
+
 	UPROPERTY(VisibleAnywhere, Category="Replaceable visual slots") TObjectPtr<UStaticMeshComponent> LeftForkVisual;
 	UPROPERTY(VisibleAnywhere, Category="Replaceable visual slots") TObjectPtr<UStaticMeshComponent> RightForkVisual;
 	UPROPERTY(VisibleAnywhere, Category="Replaceable visual slots") TObjectPtr<UStaticMeshComponent> UnderframeVisual;
@@ -222,6 +223,7 @@ public:
 	/** One fixed rear-body LiDAR/IMU module. It is intentionally independent of the moving fork camera. */
 	UPROPERTY(VisibleAnywhere, Category="LiDAR") TObjectPtr<UForkliftNavigationSensorComponent> NavigationSensor;
 	UPROPERTY(VisibleAnywhere, Category="LiDAR") TObjectPtr<UStaticMeshComponent> NavigationSensorVisual;
+    UPROPERTY(VisibleAnywhere, Category="LiDAR") TObjectPtr<UStaticMeshComponent> LidarPole7mRebuilt;
 
 	/** Reapplies sizes after editing Dimensions in the Details panel (safe during construction). */
 	virtual void OnConstruction(const FTransform& Transform) override;
@@ -242,6 +244,8 @@ public:
 		void ToggleAutoPickup();
 		bool IsNavigationActive() const { return bNavigationActive; }
 	static FBox2D NavigationButtonRect(float Height) { return FBox2D(FVector2D(24.f,Height-154.f),FVector2D(264.f,Height-112.f)); }
+	static FBox2D SlamMapRect(float Height) { const float Size=FMath::Min(300.f,Height*.40f); return FBox2D(FVector2D(20.f,100.f),FVector2D(20.f+Size,100.f+Size)); }
+	bool SetNavigationGoalFromMapScreen(FVector2D ScreenPosition, float ViewportHeight);
 	void ToggleNavigation();
 	void StopNavigation();
 	const FString& GetNavigationStatus() const { return NavigationStatus; }
@@ -257,7 +261,7 @@ private:
 	TArray<FVector2D> ExplorationVisited;
 	int32 ExplorationBlockedGoals = 0;
 	float NavigationTrackingWaitStart = -1.f;
-	bool bNavigationActive = false, bNavigationGoalSet = false;
+	bool bNavigationActive = false, bNavigationGoalSet = false, bNavigationGoalIsManual = false;
 	int32 NavigationMapGeneration = -1;
 	FVector2D NavigationGoal = FVector2D::ZeroVector, NavigationProgressPosition = FVector2D::ZeroVector;
 	TArray<FVector2D> NavigationRoute;
