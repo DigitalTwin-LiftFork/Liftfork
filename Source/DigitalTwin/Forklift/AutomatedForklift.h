@@ -259,6 +259,7 @@ private:
 		bool PlanNavigationRoute(FVector2D Start);
 	bool SelectExplorationGoal(FVector2D Start);
 	TArray<FVector2D> ExplorationVisited;
+	TMap<FIntPoint,double> ExplorationBlockedUntil;
 	int32 ExplorationBlockedGoals = 0;
 	float NavigationTrackingWaitStart = -1.f;
 	bool bNavigationActive = false, bNavigationGoalSet = false, bNavigationGoalIsManual = false;
@@ -266,7 +267,7 @@ private:
 	FVector2D NavigationGoal = FVector2D::ZeroVector, NavigationProgressPosition = FVector2D::ZeroVector;
 	TArray<FVector2D> NavigationRoute;
 	float NavigationReplanTime = 0.f, NavigationProgressTime = 0.f;
-	FString NavigationStatus = TEXT("하단 자동 탐색 시작 버튼을 누르세요");
+	FString NavigationStatus = TEXT("하단 랜덤 순찰 시작 버튼을 누르세요");
 	float DriveInput = 0.f, SteerInput = 0.f, LiftInput = 0.f, ReachInput = 0.f, SideShiftInput = 0.f;
 	float LiftCm = 0.f, ReachCm = 0.f, SideShiftCm = 0.f;
 	float TargetForwardSpeedCmPerSec = 0.f, CurrentForwardSpeedCmPerSec = 0.f, DriveDebugElapsed = 0.f;

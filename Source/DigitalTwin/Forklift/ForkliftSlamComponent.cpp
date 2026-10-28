@@ -34,6 +34,9 @@ void UForkliftSlamComponent::BeginPlay()
 void UForkliftSlamComponent::ResetMap()
 {
 	Cells.Reset();
+	LocalizationCells.Reset();
+	MarginalScans=0;
+	bLastPoseQualityAccepted=false;
 	MatchField.Reset();
 	StableScans = 0;
 	++MapGeneration;
@@ -88,19 +91,25 @@ void UForkliftSlamComponent::ProcessScan()
 	const float Dt = static_cast<float>(Scan.TimestampSeconds - LastScan);
 	LastScan = Scan.TimestampSeconds;
 	++ScanCount;
+	bLastPoseQualityAccepted=false;
 	TArray<FVector2D> Points;
+	TSet<FIntPoint> PointCells;
 	// Accept returns from every elevation when they hit vertical surfaces.
 	// Surface normals reject floor and ceiling hits that would destabilize 2D SLAM.
 	for (const auto& Ray : Scan.Samples)
 		if (Ray.bValid && Ray.ReturnKind == ELidarReturnKind::ExternalHit &&
 			!Ray.LocalNormal.IsNearlyZero() && FMath::Abs(Ray.LocalNormal.Z) < .55f && Ray.DistanceCm > 30.f)
-			Points.Add(FVector2D(Ray.LocalPointCm.X, Ray.LocalPointCm.Y));
+					{
+			const FVector2D P(Ray.LocalPointCm.X, Ray.LocalPointCm.Y);
+			if (!PointCells.Contains(CellAt(P))) { PointCells.Add(CellAt(P)); Points.Add(P); }
+		}
 	// Sparse returns are normal in wide warehouse aisles. Five hit points are
 	// enough to seed/track a local scan; no-return beams still contribute free
 	// space below, but are deliberately excluded from scan matching.
 	if (Points.Num() < 5 || Dt <= 0.f)
 	{
 		StableScans = 0;
+		MarginalScans=0;
 		Status = FString::Printf(TEXT("측정점 부족: %d/5, 범위 %.0fm"), Points.Num(), Sensor->MaximumRangeCm/100.f);
 		Velocity = FVector2D::ZeroVector;
 		Confidence = 0.f;
@@ -112,14 +121,13 @@ void UForkliftSlamComponent::ProcessScan()
 		// Build a distance-like lookup once per scan, rather than querying
 		// 25 neighbours for every point in every pose candidate.
 		MatchField.Reset();
-		for (const auto& Entry : Cells)
+		for (const FIntPoint& Cell : LocalizationCells)
 		{
-			if (Entry.Value < 3) continue;
-			const FVector2D Centre((Entry.Key.X+.5)*CellCm,(Entry.Key.Y+.5)*CellCm);
+			const FVector2D Centre((Cell.X+.5)*CellCm,(Cell.Y+.5)*CellCm);
 			if (FVector2D::Distance(Centre,Position)>Sensor->MaximumRangeCm+200.f) continue;
 			for (int32 X=-2; X<=2; ++X) for (int32 Y=-2; Y<=2; ++Y)
 			{
-				float& Value=MatchField.FindOrAdd(Entry.Key+FIntPoint(X,Y));
+				float& Value=MatchField.FindOrAdd(Cell+FIntPoint(X,Y));
 				Value=FMath::Max(Value,FMath::Exp(-.5f*(X*X+Y*Y)));
 			}
 		}
@@ -150,12 +158,38 @@ void UForkliftSlamComponent::ProcessScan()
 					}
 		}
 		Confidence = BestScore;
-		if (BestScore < .45f || FVector2D::Distance(BestP, Position) > 150.f)
+		// Borderline matches must have spatial support and a repeatable small
+        // correction; score alone cannot authorize continued motion.
+        TSet<FIntPoint> UniqueSupport;
+        TSet<int32> BearingSectors;
+        int32 Inliers=0;
+        for (const FVector2D& Point:Points)
+        {
+            const FIntPoint Cell=CellAt(BestP+Rotate2(Point,BestYaw));
+            if (MatchField.FindRef(Cell)>=.36f)
+            {
+                ++Inliers;
+                UniqueSupport.Add(Cell);
+                BearingSectors.Add(FMath::FloorToInt((FMath::Atan2(Point.Y,Point.X)+PI)/(PI/4.f)));
+            }
+        }
+        const bool Supported=UniqueSupport.Num()>=12 && BearingSectors.Num()>=2 &&
+            Inliers>=FMath::CeilToInt(Points.Num()*.60f);
+        const bool SmallCorrection=FVector2D::Distance(BestP,Prior)<=20.f &&
+            FMath::Abs(FMath::UnwindRadians(BestYaw-PriorYaw))<=FMath::DegreesToRadians(2.f);
+        const bool Repeatable=MarginalScans==0 ||
+            (FVector2D::Distance(BestP,MarginalPosition)<=25.f &&
+             FMath::Abs(FMath::UnwindRadians(BestYaw-MarginalYaw))<=FMath::DegreesToRadians(5.f));
+        const bool Marginal=BestScore>=.40f && BestScore<.45f && Supported && SmallCorrection;
+        MarginalScans=Marginal ? (Repeatable ? FMath::Min(MarginalScans+1,5) : 1) : 0;
+        MarginalPosition=BestP;
+        MarginalYaw=BestYaw;
+        const bool QualityOK=BestScore>=.45f || (Marginal && MarginalScans>=5);
+        if (!QualityOK || FVector2D::Distance(BestP, Position) > 150.f)
 		{
 			StableScans = 0;
-			Status = FString::Printf(TEXT("스캔 정합 대기: 일치 %.0f%%, 측정점 %d"), BestScore*100.f, Points.Num());
+			Status = FString::Printf(TEXT("정합 %.1f%% | 경계 안정 %d/5 | 지지점 %d | 방향 %d"), BestScore*100.f, MarginalScans, UniqueSupport.Num(), BearingSectors.Num());
 			Velocity = FVector2D::ZeroVector;
-			PendingYaw = 0.f;
 			bPoseAccepted = false;
 		}
 		else
@@ -171,41 +205,54 @@ void UForkliftSlamComponent::ProcessScan()
 		bInitialized = true;
 		Confidence = 1.f;
 	}
+	// Never corrupt the map using a rejected pose.
+	if (!bPoseAccepted) return;
 	PendingYaw = 0.f;
-	// Ray carving: observed free space is distinct from unknown cells.
+	// Separate localization landmarks from the traversability map.
+	// Only accepted poses may insert either type of evidence.
+	for (const FVector2D& P : Points)
+	{
+		const FIntPoint C=CellAt(Position+Rotate2(P,Yaw));
+		if (FMath::Abs(C.X)<500 && FMath::Abs(C.Y)<500) LocalizationCells.Add(C);
+	}
 	TSet<FIntPoint> FreeCells, HitCells;
+	const float GroundZ=Sensor->GetGroundHeightInBody();
 	for (const auto& Ray : Scan.Samples)
 	{
-		// Use the same wall returns for the occupied map and scan matching.
-		const bool bVerticalWallHit = Ray.bValid && Ray.ReturnKind == ELidarReturnKind::ExternalHit &&
-			!Ray.LocalNormal.IsNearlyZero() && FMath::Abs(Ray.LocalNormal.Z) < .55f && Ray.DistanceCm > 30.f;
-		if (bVerticalWallHit)
+		if (!Ray.bValid || Ray.ReturnKind!=ELidarReturnKind::ExternalHit) continue;
+		const FVector BodyPoint=Scan.SensorToBody.TransformPosition(Ray.LocalPointCm);
+		const FVector BodyNormal=Scan.SensorToBody.TransformVectorNoScale(Ray.LocalNormal);
+		const FIntPoint C=CellAt(Position+Rotate2(FVector2D(Ray.LocalPointCm.X,Ray.LocalPointCm.Y),Yaw));
+		// A high horizontal/no-return ray says nothing about floor clearance.
+		// Observe only a small patch around a measured floor endpoint. Never
+		// clear the whole projected ray: it may pass above a pallet or shelf.
+		const float Height=BodyPoint.Z-GroundZ;
+		if (BodyNormal.Z>.85f && Height>=-12.f && Height<=6.f)
 		{
-			const FVector2D WallPoint(Ray.LocalPointCm.X, Ray.LocalPointCm.Y);
-			HitCells.Add(CellAt(Position + Rotate2(WallPoint, Yaw)));
+			for (int32 X=-1; X<=1; ++X) for (int32 Y=-1; Y<=1; ++Y)
+				FreeCells.Add(C+FIntPoint(X,Y));
 		}
-		if (FMath::Abs(Ray.LocalDirection.Z) >= .015f ||
-			(Ray.ReturnKind != ELidarReturnKind::ExternalHit && Ray.ReturnKind != ELidarReturnKind::NoReturn)) continue;
-		const bool bHit = Ray.ReturnKind == ELidarReturnKind::ExternalHit && Ray.bValid;
-		const FVector2D Point = bHit ? FVector2D(Ray.LocalPointCm.X, Ray.LocalPointCm.Y) :
-			FVector2D(Ray.LocalDirection.X, Ray.LocalDirection.Y) * Sensor->MaximumRangeCm;
-		const FVector2D End = Position + Rotate2(Point, Yaw);
-		const int32 Steps = FMath::CeilToInt(Point.Size() / (CellCm * .5f));
-		const FIntPoint Hit = CellAt(End);
-		if (bHit) HitCells.Add(Hit);
-		for (int32 I = 0; I < Steps; ++I)
+		else if (Height>6.f && Height<550.f)
 		{
-			const FIntPoint C = CellAt(FMath::Lerp(Position, End, static_cast<float>(I) / Steps));
-			if (!bHit || C != Hit) FreeCells.Add(C);
+			// Includes pallet/box tops, not just vertical wall normals.
+			HitCells.Add(C);
 		}
 	}
-	for (const FIntPoint& C : FreeCells) if (!HitCells.Contains(C)) UpdateCell(C, -1);
-	for (const FIntPoint& C : HitCells) UpdateCell(C, 4);
+	for (const FIntPoint& C : FreeCells) if (!HitCells.Contains(C)) UpdateCell(C,-1);
+	for (const FIntPoint& C : HitCells) UpdateCell(C,4);
 	++MapUpdateCount;
 	if (bPoseAccepted)
 	{
 		++StableScans;
 		LastAcceptedScan = Scan.TimestampSeconds;
-		Status = FString::Printf(TEXT("SLAM 추적: 측정점 %d / 안정 스캔 %d/3"), Points.Num(), FMath::Min(StableScans,3));
+		bLastPoseQualityAccepted=true;
+		Status = FString::Printf(TEXT("SLAM %d점 | 바닥 %d / 장애물 %d | 안정 %d/3"), Points.Num(), FreeCells.Num(), HitCells.Num(), FMath::Min(StableScans,3));
 	}
+}
+
+FVector2D UForkliftSlamComponent::GetPredictedPosition(double Now) const
+{
+    // Extrapolate the scan-matched velocity, never simulation world velocity.
+    const double Age = FMath::Clamp(Now - LastAcceptedScan, 0.0, .3);
+    return Position + Velocity * Age;
 }

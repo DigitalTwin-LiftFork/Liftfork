@@ -3,6 +3,13 @@
 #include "DrawDebugHelpers.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
+#include "Components/BoxComponent.h"
+
+float UForkliftNavigationSensorComponent::GetGroundHeightInBody() const
+{
+	const UBoxComponent* Body = GetOwner() ? Cast<UBoxComponent>(GetOwner()->GetRootComponent()) : nullptr;
+	return Body ? -Body->GetUnscaledBoxExtent().Z - 2.f : -55.f;
+}
 
 UForkliftNavigationSensorComponent::UForkliftNavigationSensorComponent()
 {
@@ -13,6 +20,7 @@ UForkliftNavigationSensorComponent::UForkliftNavigationSensorComponent()
 void UForkliftNavigationSensorComponent::BeginPlay()
 {
 	Super::BeginPlay();
+	if (FMath::IsNearlyEqual(ScanIntervalSeconds,.01f) || FMath::IsNearlyEqual(ScanIntervalSeconds,.10f)) ScanIntervalSeconds=.002f;
 	// Migrate the previous 15 m instance setting for the expanded factory.
 	if (FMath::IsNearlyEqual(MaximumRangeCm, 1500.f)) MaximumRangeCm = 3000.f;
 	// Migrate serialized defaults from the old stationary sector scanner.
@@ -25,7 +33,7 @@ void UForkliftNavigationSensorComponent::BeginPlay()
 	PreviousWorldLocation = GetComponentLocation();
 	PreviousWorldRotation = GetComponentQuat();
 	PreviousImuTimeSeconds = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
-	SweepSamples.Reserve(FMath::Max(1, HorizontalSamples) * FMath::Max(1, VerticalChannels));
+	SweepSamples.Reserve(FMath::Max(1, HorizontalSamples) * (FMath::Max(1, VerticalChannels)+38));
 }
 
 void UForkliftNavigationSensorComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
@@ -38,18 +46,18 @@ void UForkliftNavigationSensorComponent::TickComponent(float DeltaTime, ELevelTi
 		SweepSamples.Reset();
 		bSweepReferenceInitialized = false;
 	}
-	else if (ScanIntervalSeconds >= .005f && HorizontalSamples > 0 && VerticalChannels > 0 && MaximumRangeCm > MinimumRangeCm)
+	else if (ScanIntervalSeconds >= .001f && HorizontalSamples > 0 && VerticalChannels > 0 && MaximumRangeCm > MinimumRangeCm)
 	{
 		ScanElapsedSeconds += DeltaTime;
 		int32 ColumnsThisFrame = 0;
-		while (ScanElapsedSeconds >= ScanIntervalSeconds && ColumnsThisFrame < 16)
+		while (ScanElapsedSeconds >= ScanIntervalSeconds && ColumnsThisFrame < 128)
 		{
 			ScanElapsedSeconds -= ScanIntervalSeconds;
 			PerformScan();
 			++ColumnsThisFrame;
 		}
 		// Drop excess backlog after a long frame instead of replaying stale rays.
-		if (ColumnsThisFrame == 16) ScanElapsedSeconds = 0.f;
+		if (ColumnsThisFrame == 128) ScanElapsedSeconds = 0.f;
 	}
 	if (bDebugVisible) DrawLidarDebug();
 }
@@ -77,8 +85,8 @@ void UForkliftNavigationSensorComponent::PerformScan()
 
 	LatestBeamSamples.Reset();
 	LatestBeamWorldEnds.Reset();
-	LatestBeamSamples.Reserve(VerticalChannels);
-	LatestBeamWorldEnds.Reserve(VerticalChannels);
+	LatestBeamSamples.Reserve(VerticalChannels+38);
+	LatestBeamWorldEnds.Reserve(VerticalChannels+38);
 	LatestBeamWorldStart = SensorWorld.GetLocation();
 	LatestBeamWorldForward = SensorWorld.TransformVectorNoScale(FRotator(VerticalCenterDegrees, ScannerYawDegrees, 0.f).Vector()).GetSafeNormal();
 
@@ -86,10 +94,17 @@ void UForkliftNavigationSensorComponent::PerformScan()
 	const float VerticalStart = VerticalCenterDegrees - VerticalFieldOfViewDegrees * .5f;
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(R16HDLidar), false);
 	Params.bTraceComplex = false;
+	Params.AddIgnoredActor(GetOwner()); // Ignore only this forklift in the sensor query.
 
-	for (int32 VerticalIndex = 0; VerticalIndex < VerticalChannels; ++VerticalIndex)
+	// Same rotating head, with extra downward elevation channels. Fixed 15-degree
+	// spacing at a 7 m mount left metre-wide gaps in floor observations.
+	const float MountHeight = GetRelativeLocation().Z - GetGroundHeightInBody();
+	const int32 GroundChannels = MountHeight > 250.f ? 38 : 0;
+	for (int32 VerticalIndex = 0; VerticalIndex < VerticalChannels + GroundChannels; ++VerticalIndex)
 	{
-		const float PitchDegrees = VerticalChannels > 1 ? VerticalStart + VerticalIndex * VerticalStep : VerticalCenterDegrees;
+		const float PitchDegrees = VerticalIndex < VerticalChannels ?
+			(VerticalChannels > 1 ? VerticalStart + VerticalIndex * VerticalStep : VerticalCenterDegrees) :
+			-FMath::RadiansToDegrees(FMath::Atan2(MountHeight, 20.f + 40.f * (VerticalIndex - VerticalChannels)));
 		const FVector LocalDirection = FRotator(PitchDegrees, ScannerYawDegrees, 0.f).Vector();
 		const FVector WorldDirection = SensorWorld.TransformVectorNoScale(LocalDirection).GetSafeNormal();
 		const FVector Start = SensorWorld.GetLocation() + WorldDirection * MinimumRangeCm;
@@ -141,7 +156,7 @@ void UForkliftNavigationSensorComponent::PerformScan()
 		LatestScan.TimestampSeconds = Now;
 		LatestScan.SensorToBody = GetRelativeTransform();
 		LatestScan.Samples = MoveTemp(SweepSamples);
-		SweepSamples.Reserve(FMath::Max(1, HorizontalSamples) * FMath::Max(1, VerticalChannels));
+		SweepSamples.Reserve(FMath::Max(1, HorizontalSamples) * (FMath::Max(1, VerticalChannels)+38));
 		SweepStartTransform = EndSensorTransform;
 	}
 }

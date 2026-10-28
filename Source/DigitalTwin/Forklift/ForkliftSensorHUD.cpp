@@ -20,8 +20,8 @@ void AForkliftSensorHUD::DrawHUD()
 	const FBox2D NavButton=AAutomatedForklift::NavigationButtonRect(Canvas->SizeY);
 	const bool NavActive=Forklift->IsNavigationActive();
 	DrawRect(NavActive ? FLinearColor(.65f,.12f,.08f,.95f) : FLinearColor(.05f,.3f,.55f,.95f),NavButton.Min.X,NavButton.Min.Y,NavButton.GetSize().X,NavButton.GetSize().Y);
-	DrawText(NavActive ? TEXT("자동 탐색 정지") : TEXT("자동 탐색 시작"), FLinearColor::White,NavButton.Min.X+16.f,NavButton.Min.Y+12.f,nullptr,1.f);
-	DrawText(TEXT("지도 클릭: 지정 위치 주행 / 시작 버튼: 자동 탐색"),FLinearColor::White,24.f,NavButton.Min.Y-20.f,nullptr,.72f);
+	DrawText(NavActive ? TEXT("주행 정지") : TEXT("랜덤 순찰 시작"), FLinearColor::White,NavButton.Min.X+16.f,NavButton.Min.Y+12.f,nullptr,1.f);
+	DrawText(TEXT("지도 클릭: 지정 위치 주행 / 시작 버튼: 랜덤 순찰"),FLinearColor::White,24.f,NavButton.Min.Y-20.f,nullptr,.72f);
 	DrawRect(bRunning ? FLinearColor(.65f, .18f, .12f, .92f) : FLinearColor(.08f, .32f, .12f, .92f), 24.f, ButtonY, 240.f, 48.f);
 	DrawText(bRunning ? TEXT("작업 중지") : TEXT("파레트 자동 집기"), FLinearColor::White, 40.f, ButtonY + 13.f, nullptr, 1.f);
 	DrawRect(FLinearColor(.35f, .22f, .08f, .92f), 274.f, ButtonY, 240.f, 48.f);
@@ -78,11 +78,11 @@ void AForkliftSensorHUD::DrawHUD()
 			// Sensor-local preview stays live even when map localization is uncertain.
 			const float LX = MX + Size + 12.f, LY = MY, LS = FMath::Min(160.f, Size);
 			DrawRect(FLinearColor(.02f, .035f, .05f, .95f), LX, LY, LS, LS);
-			DrawText(TEXT("LIVE LiDAR (sensor frame)"), FLinearColor::White, LX, LY - 18.f, nullptr, .65f);
+			DrawText(TEXT("LIVE LiDAR (all elevations)"), FLinearColor::White, LX, LY - 18.f, nullptr, .65f);
 			const float Range = FMath::Max(Sensor->MaximumRangeCm, 1.f);
 			for (const auto& Ray : Sensor->GetLatestScan().Samples)
 			{
-				if (!Ray.bValid || FMath::Abs(Ray.LocalDirection.Z) >= .015f) continue;
+				if (!Ray.bValid) continue;
 				const float PX = LS * .5f + Ray.LocalPointCm.Y / Range * (LS * .48f);
 				const float PY = LS * .5f - Ray.LocalPointCm.X / Range * (LS * .48f);
 				DrawRect(FLinearColor::Green, LX + PX, LY + PY, 2.f, 2.f);

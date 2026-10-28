@@ -64,8 +64,8 @@ public:
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 	UPROPERTY(EditAnywhere, Category="LiDAR|Scan") bool bScanEnabled = true;
-	/** Time between successive azimuth columns. At 0.01 s and 100 samples, a revolution takes one second. */
-	UPROPERTY(EditAnywhere, Category="LiDAR|Scan", meta=(ClampMin="0.005")) float ScanIntervalSeconds = 0.01f;
+	/** Time between successive azimuth columns. At 0.002 s and 100 samples, a revolution takes 0.2 seconds. */
+	UPROPERTY(EditAnywhere, Category="LiDAR|Scan", meta=(ClampMin="0.001")) float ScanIntervalSeconds = 0.002f;
 	/** Number of azimuth columns in each full 360-degree rotation. */
 	UPROPERTY(EditAnywhere, Category="LiDAR|Scan", meta=(ClampMin="1", ClampMax="720")) int32 HorizontalSamples = 100;
 	UPROPERTY(EditAnywhere, Category="LiDAR|Scan", meta=(ClampMin="1.0", ClampMax="180.0")) float VerticalFieldOfViewDegrees = 120.f;
@@ -79,9 +79,12 @@ public:
 	UPROPERTY(EditAnywhere, Category="IMU", meta=(ClampMin="1.0", ClampMax="180.0")) float TeleportResetRotationDegrees = 60.f;
 
 	const FForkliftLidarScan& GetLatestScan() const { return LatestScan; }
+	/** Flat factory calibration in the chassis frame, independent of mount height. */
+	float GetGroundHeightInBody() const;
 	const FForkliftImuSample& GetLatestImu() const { return LatestImu; }
 	/** Debug/simulation truth only. Do not use as an estimated vehicle pose. */
 	FTransform GetDebugSensorWorldTransform() const { return GetComponentTransform(); }
+	float GetScanTimeout() const { return FMath::Clamp(ScanIntervalSeconds * HorizontalSamples * 2.f + .1f, .3f, 1.25f); }
 	float GetScannerYawDegrees() const { return ScannerYawDegrees; }
 	void ToggleDebugVisible();
 
