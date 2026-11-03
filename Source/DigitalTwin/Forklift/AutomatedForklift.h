@@ -35,6 +35,17 @@ struct FOpeningDetection
 	bool bDepthValid = false;
 	float MonocularDistanceCm = 0.f, FrontOpticalDepthCm = 0.f, FrontRayDistanceCm = 0.f;
 	float EstimatedHeightCm = 0.f, FrontYawErrorRad = 0.f, DepthOpeningContrastCm = 0.f;
+	/** Measured front-plane opening centre in the *current* ForkCarriage frame.
+	 * This includes the live lift/reach/side-shift transform and is therefore
+	 * never corrected a second time by a control-axis value. */
+	FVector OpeningCenterInForkCm = FVector::ZeroVector;
+	float MeasuredOpeningHeightCm = 0.f, MeasuredOpeningWidthCm = 0.f;
+	/** Per-opening RGB-D reconstruction.  Height alignment intersects these two
+	 * measured aperture ranges; it does not rely on their averaged pixel height. */
+	FVector LeftOpeningCenterInForkCm = FVector::ZeroVector;
+	FVector RightOpeningCenterInForkCm = FVector::ZeroVector;
+	float LeftMeasuredOpeningHeightCm = 0.f, RightMeasuredOpeningHeightCm = 0.f;
+	float LeftMeasuredOpeningWidthCm = 0.f, RightMeasuredOpeningWidthCm = 0.f;
 };
 
 /** HUD-only diagnostics for a connected dark region from the real sensor image. */
@@ -232,10 +243,14 @@ public:
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Vision|Segmentation") int32 VisionMaximumSubdivisionDepth = 3;
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Vision|Segmentation") int32 VisionMinimumSubdivisionCellPx = 12;
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Vision|Segmentation") int32 VisionMaximumFineCells = 1024;
+	/** Bound expensive original-pixel refinement.  A locked tracking ROI is always
+	 * processed first; global proposals are retained as a low-rate fallback. */
+	UPROPERTY(EditAnywhere, Category="Auto pickup|Vision|Segmentation", meta=(ClampMin="1", ClampMax="32")) int32 VisionMaximumFineRegions = 10;
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Vision|Segmentation") float VisionOpeningMinimumContrast = .12f;
 	/** Known test-pallet opening geometry. Used only to convert pixel spacing to range; never reads an Actor position. */
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Vision|Known pallet") float VisionKnownOpeningCenterSpacingCm = 60.f;
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Vision|Known pallet") float VisionKnownOpeningWidthCm = 36.f;
+	UPROPERTY(EditAnywhere, Category="Auto pickup|Vision|Known pallet") float VisionKnownOpeningHeightCm = 8.f;
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoInsertSpeedScale = .20f;
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoApproachSpeedScale = .12f;
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoApproachMaximumSteer = .35f;
@@ -249,6 +264,10 @@ public:
 	/** Desired remaining distance from the fork tips to the detected pallet front.
 	 * This is distinct from camera-to-pallet distance. */
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoApproachForkTipClearanceCm = 14.f;
+	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoChassisApproachToleranceCm = 3.f;
+	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoForkOpeningSideClearanceCm = 2.f;
+	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoForkOpeningBottomClearanceCm = 1.f;
+	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoDirectionToleranceDeg = 3.f;
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoApproachLateralToleranceCm = 6.f;
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoApproachTimeoutSeconds = 10.f;
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoLiftSpeedScale = .25f;
@@ -271,15 +290,25 @@ public:
 	const TArray<float>& GetLatestDepthCm() const { return LatestDepthCm; }
 	bool IsDepthFrameValid() const { return bDepthFrameValid; }
 	int32 GetDepthFrameId() const { return DepthFrameId; }
+	int32 GetSensorFrameId() const { return SensorFrameId; }
+	float GetDepthFrameTimestampSeconds() const { return DepthFrameTimestampSeconds; }
+	const FString& GetLastDepthReadStatus() const { return LastDepthReadStatus; }
 	int32 GetDepthDebugViewMode() const { return DepthDebugViewMode; }
 	float GetDepthMinimumCm() const { return DepthMinimumCm; }
 	float GetDepthMaximumCm() const { return DepthMaximumCm; }
+	int32 GetDepthInvalidPixelCount() const { return DepthInvalidPixelCount; }
+	int32 GetDepthBelowRangePixelCount() const { return DepthBelowRangePixelCount; }
+	int32 GetDepthAboveRangePixelCount() const { return DepthAboveRangePixelCount; }
 	int32 GetPalletSensorDisplayMode() const { return PalletSensorDisplayMode; }
+	bool IsDetailedSensorDiagnostics() const { return bDetailedSensorDiagnostics; }
 	const FOpeningDetection& GetOpeningDetection() const { return OpeningDetection; }
 	const TArray<FVisionCandidateDebug>& GetVisionCandidates() const { return VisionCandidates; }
 	const TArray<FString>& GetVisionPairDiagnostics() const { return VisionPairDiagnostics; }
 	const TArray<uint8>& GetVisionMask() const { return VisionMask; }
 	const TArray<uint8>& GetVisionRegionMask() const { return VisionRegionMask; }
+	const TArray<uint8>& GetVisionRgbBodyMask() const { return VisionRgbBodyMask; }
+	const TArray<uint8>& GetVisionHsvBodyMask() const { return VisionHsvBodyMask; }
+	const TArray<uint8>& GetVisionQuadTreeBodyMask() const { return VisionQuadTreeBodyMask; }
 	const TArray<uint8>& GetVisionBodyMask() const { return VisionBodyMask; }
 	const TArray<int32>& GetVisionCoarseLabels() const { return VisionCoarseLabels; }
 	const TArray<FIntRect>& GetVisionSubdivisionCells() const { return VisionSubdivisionCells; }
@@ -315,12 +344,16 @@ private:
 	TArray<float> LatestDepthCm;
 	bool bDepthFrameValid = false;
 	int32 DepthValidPixelCount = 0;
+	int32 DepthInvalidPixelCount = 0, DepthBelowRangePixelCount = 0, DepthAboveRangePixelCount = 0;
 	float DepthObservedMinimumCm = -BIG_NUMBER, DepthObservedMaximumCm = -BIG_NUMBER, LastDepthReadTime = -BIG_NUMBER;
 	FString LastDepthReadStatus = TEXT("not measured");
 	float VisionProcessElapsed = 0.f, AutoPickupStateElapsed = 0.f, AutoLiftStartCm = 0.f, AutoLiftPalletStartZ = 0.f, AutoRequiredForwardTravelCm = -BIG_NUMBER, AutoMaximumForwardTravelCm = -BIG_NUMBER;
 	FVector AutoInsertionStartLocation = FVector::ZeroVector;
-	FVector AutoApproachStartLocation = FVector::ZeroVector;
+	FVector AutoApproachStartLocation = FVector::ZeroVector, AutoApproachStartForward = FVector::ForwardVector;
 	float AutoApproachStartDistanceCm = -BIG_NUMBER, AutoApproachRequiredTravelCm = -BIG_NUMBER, LastAutoApproachTravelCm = -BIG_NUMBER;
+	float AutoApproachPlannedTravelCm = -BIG_NUMBER, AutoApproachTravelBudgetCm = -BIG_NUMBER;
+	int32 AutoApproachReplanCount = 0;
+	float AutoRequiredForkAdvanceCm = -BIG_NUMBER, AutoChassisAdvanceNeededCm = -BIG_NUMBER, AutoReachTargetCm = -BIG_NUMBER, AutoInsertionStartReachCm = -BIG_NUMBER;
 	float LastAutoCameraDistanceCm = -BIG_NUMBER, LastAutoForkTipRemainingCm = -BIG_NUMBER;
 	float AutoApproachLastProgressDistanceCm = -BIG_NUMBER, AutoApproachLastProgressTime = -BIG_NUMBER;
 	bool bLastAutoApproachBlocked = false;
@@ -340,11 +373,12 @@ private:
 	bool bSavedLastValidVisionArtifact = false, bSavedFirstVisionFailureArtifact = false;
 	TArray<FColor> LastSuccessfulVisionPixels;
 	int32 OpeningStableFrames = 0, AlignmentStableFrames = 0;
+	int32 LastStableOpeningVisionFrame = -1, LastStableAlignmentVisionFrame = -1;
 	int32 LastVisionCandidateCount = -1;
 	TArray<FVisionCandidateDebug> VisionCandidates;
 	TArray<FString> VisionPairDiagnostics;
 	/** Fine-resolution masks are HUD diagnostics only; source pixels remain unchanged in the render target. */
-	TArray<uint8> VisionMask, VisionRegionMask, VisionBodyMask;
+	TArray<uint8> VisionMask, VisionRegionMask, VisionRgbBodyMask, VisionHsvBodyMask, VisionQuadTreeBodyMask, VisionBodyMask;
 	TArray<int32> VisionCoarseLabels;
 	TArray<FIntRect> VisionSubdivisionCells;
 	TArray<int32> VisionSubdivisionDepths;
@@ -355,7 +389,8 @@ private:
 	FString LastVisionStageStatus = TEXT("not processed");
 	int32 VisionDebugViewMode = 0;
 	bool bSensorOcclusionDiagnosticHideForks = false;
-	int32 LastVisionFrameNumber = 0;
+	int32 LastVisionFrameNumber = 0, LastProcessedSensorFrameId = -1;
+	int32 AutoPickupAttemptId = 0, LastVisionSuccessSensorFrameId = -1, FirstVisionFailureAfterSuccessSensorFrameId = -1;
 	bool bLastVisionReadSucceeded = false;
 	bool bLastVisionHadValidPair = false;
 	float LastVisionProcessTime = -BIG_NUMBER;
@@ -364,6 +399,14 @@ private:
 	FString LastPixelReadStatus = TEXT("미처리");
 	float LastAlignmentLateralErrorCm = -BIG_NUMBER;
 	float LastAlignmentLiftCorrectionCm = -BIG_NUMBER;
+	float LastMeasuredOpeningBottomCm = -BIG_NUMBER, LastMeasuredOpeningTopCm = -BIG_NUMBER, LastAllowedForkTopMinCm = -BIG_NUMBER, LastAllowedForkTopMaxCm = -BIG_NUMBER, LastForkTopLocalCm = -BIG_NUMBER, LastHeightTargetLiftCm = -BIG_NUMBER;
+	bool bPreApproachHeightAlignment = false;
+	int32 InvalidHeightRangeVisionFrames = 0;
+	float LastVisionTotalMs = 0.f, LastVisionMaxMs = 0.f;
+	float LastVisionRgbReadMs = 0.f, LastVisionDepthReadMs = 0.f, LastVisionCoarseMs = 0.f, LastVisionFineMs = 0.f, LastVisionPairMs = 0.f;
+	FString LastAutoFailureReason;
+	int32 LastAutoFailureSensorFrameId = -1;
+	float LastAutoFailureTime = -BIG_NUMBER;
 	float LastAutoInsertionTravelCm = -BIG_NUMBER;
 	bool bLastAutoDriveBlocked = false;
 	bool bLastPhysicalPalletContact = false;
@@ -373,6 +416,7 @@ private:
 	FString AutoPickupStatus = TEXT("Idle");
 	int32 PalletSensorDisplayMode = 0;
 	int32 DepthDebugViewMode = 0;
+	bool bDetailedSensorDiagnostics = false;
 	bool bCameraOrbiting = false, bWasDriving = false;
 	float LastCollisionLogTime = -BIG_NUMBER;
 	float LastActuatorLogTime = -BIG_NUMBER;
@@ -397,6 +441,7 @@ private:
 	void TogglePalletSensorCapture();
 	void ToggleVisionDebugView();
 	void ToggleDepthDebugView();
+	void ToggleDetailedSensorDiagnostics();
 	void ToggleAutoApproachStraightDiagnostic();
 	void ToggleSensorOcclusionDiagnostic();
 	void ToggleLidarDebug();
@@ -409,6 +454,7 @@ private:
 	void SetAutoPickupState(EAutoPickupState NewState, const FString& Status);
 	void CancelAutoPickup(const FString& Reason, bool bFailure);
 	bool HasPhysicalPalletLift(float& OutPalletRiseCm) const;
+	bool ComputeAutoInsertionGeometry(const FOpeningDetection& Detection, float& OutForkTipToFrontCm, float& OutRemainingForkAdvanceCm, float& OutReachRemainingCm, float& OutChassisAdvanceCm, float& OutLateralErrorCm, float& OutLiftCorrectionCm) const;
 	void ClearAutomaticCommands();
 	bool IsAutoPickupMotionActive() const;
 	float GetForkTipAheadOfSensorCm() const;

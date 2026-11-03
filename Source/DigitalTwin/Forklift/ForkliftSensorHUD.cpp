@@ -23,6 +23,15 @@ void AForkliftSensorHUD::DrawHUD()
 	// This panel is independent of V preview and K collision debug. It is drawn
 	// only to the player HUD, never into the sensor render target.
 	TArray<FString> Diagnostics; Forklift->GetAutoPickupDiagnosticLines(Diagnostics);
+	if (!Forklift->IsDetailedSensorDiagnostics() && Diagnostics.Num() > 15)
+	{
+		// Basic panel keeps current gates visible; J retains every pair/plane/mask
+		// diagnostic without allowing the right panel to run offscreen.
+		TArray<FString> Basic; const int32 HeadCount=FMath::Min(10,Diagnostics.Num());
+		for(int32 I=0;I<HeadCount;++I) Basic.Add(Diagnostics[I]);
+		for(int32 I=FMath::Max(HeadCount,Diagnostics.Num()-6);I<Diagnostics.Num();++I) Basic.Add(Diagnostics[I]);
+		Diagnostics=MoveTemp(Basic);
+	}
 	const float PanelWidth = 430.f, LineHeight = 20.f, PanelHeight = 30.f + Diagnostics.Num() * LineHeight;
 	const float PanelX = Canvas->SizeX - PanelWidth - 18.f, PanelY = Canvas->SizeY - PanelHeight - 18.f;
 	DrawRect(FLinearColor(.02f, .02f, .02f, .82f), PanelX, PanelY, PanelWidth, PanelHeight);
@@ -33,26 +42,44 @@ void AForkliftSensorHUD::DrawHUD()
 	if (!SensorImage || Mode == 0) return;
 
 	const float Aspect = static_cast<float>(SensorImage->SizeX) / FMath::Max(1, SensorImage->SizeY);
-	const float Width = Mode == 1 ? Canvas->SizeX * .30f : Canvas->SizeX * .88f;
+	const float Width = Mode == 1 ? Canvas->SizeX * .30f : Canvas->SizeX * .43f;
 	const float Height = Width / Aspect;
-	const float X = Mode == 1 ? Canvas->SizeX - Width - 24.f : (Canvas->SizeX - Width) * .5f;
-	const float Y = Mode == 1 ? 24.f : (Canvas->SizeY - Height) * .5f;
+	// V presents the matched pair vertically on the left.  The diagnostics panel
+	// remains on the right, so neither image hides the automatic-state reasons.
+	const float DepthX = 24.f, DepthY = 88.f;
+	const float X = DepthX;
+	const float Y = DepthY + Height + 16.f;
 	const int32 DebugView = Forklift->GetVisionDebugViewMode();
 	const int32 DepthView = Forklift->GetDepthDebugViewMode();
-	const bool bDepthView = DepthView != 0 && Forklift->IsDepthFrameValid();
+	const bool bDepthView = false; // U configures the left depth presentation; right remains RGB.
+	// V always presents the synchronized raw depth beside RGB.  This visualization
+	// uses a fixed sensor range, not per-frame normalization, and never feeds the
+	// displayed colours back into RGB-D measurement.
+	const int32 DW=SensorImage->SizeX,DH=SensorImage->SizeY; const TArray<float>& Depth=Forklift->GetLatestDepthCm(); const float MinD=Forklift->GetDepthMinimumCm(),MaxD=Forklift->GetDepthMaximumCm();
+	DrawRect(FLinearColor(.12f,0.f,.18f,1.f),DepthX,DepthY,Width,Height);
+	if (Forklift->IsDepthFrameValid()) for (int32 PY=0;PY<DH;PY+=4) for (int32 PX=0;PX<DW;PX+=4) if (Depth.IsValidIndex(PY*DW+PX))
+	{
+		const float D=Depth[PY*DW+PX]; const bool bFinite=FMath::IsFinite(D)&&D>0.f; const bool bInRange=bFinite&&D>=MinD&&D<=MaxD; const float N=bInRange?FMath::Clamp((D-MinD)/FMath::Max(1.f,MaxD-MinD),0.f,1.f):0.f;
+		// Purple means a sensor-invalid value only. Cyan is nearer than display
+		// range; orange is farther than range.  They never enter auto control.
+		const FLinearColor C=!bFinite?FLinearColor(.55f,0.f,.8f,1.f):(D<MinD?FLinearColor(0.f,.75f,1.f,1.f):(D>MaxD?FLinearColor(1.f,.28f,.05f,1.f):(DepthView==2?FLinearColor(1.f-N,N,.15f,1.f):FLinearColor(N,N,N,1.f))));
+		DrawRect(C,DepthX+Width*PX/DW,DepthY+Height*PY/DH,Width*4.f/DW+1.f,Height*4.f/DH+1.f);
+	}
+	DrawRect(FLinearColor::White,DepthX,DepthY,Width,1.f); DrawRect(FLinearColor::White,DepthX,DepthY+Height-1.f,Width,1.f); DrawRect(FLinearColor::White,DepthX,DepthY,1.f,Height); DrawRect(FLinearColor::White,DepthX+Width-1.f,DepthY,1.f,Height);
+	const float DepthAge=Forklift->GetWorld()?FMath::Max(0.f,Forklift->GetWorld()->GetTimeSeconds()-Forklift->GetDepthFrameTimestampSeconds()):-1.f;
+	DrawText(FString::Printf(TEXT("SceneDepth %d/%d %s age %.2fs | %.0f..%.0fcm | purple=invalid cyan=near orange=far"),Forklift->GetDepthFrameId(),Forklift->GetSensorFrameId(),Forklift->IsDepthFrameValid()?TEXT("synced"):TEXT("invalid"),DepthAge,MinD,MaxD),FLinearColor::White,DepthX+8.f,DepthY+8.f,nullptr,.52f);
 	const bool bMaskView = DebugView != 0 && Forklift->GetVisionMaskWidth() > 0;
 	if (!bMaskView || bDepthView) DrawTexture(SensorImage, X, Y, Width, Height, 0.f, 0.f, 1.f, 1.f, FLinearColor::White, BLEND_Opaque);
 	else
 	{
 		DrawRect(FLinearColor::Black, X, Y, Width, Height);
-		const TArray<uint8>& Mask = DebugView == 1 ? Forklift->GetVisionRegionMask() : (DebugView == 2 ? Forklift->GetVisionBodyMask() : Forklift->GetVisionMask()); const int32 MW = Forklift->GetVisionMaskWidth(), MH = Forklift->GetVisionMaskHeight();
+		const TArray<uint8>& Mask = DebugView == 1 ? Forklift->GetVisionRegionMask() : (DebugView == 2 ? Forklift->GetVisionRgbBodyMask() : (DebugView == 3 ? Forklift->GetVisionBodyMask() : Forklift->GetVisionMask())); const int32 MW = Forklift->GetVisionMaskWidth(), MH = Forklift->GetVisionMaskHeight();
 		// A 2x decimated canvas rendering keeps this diagnostic view cheap while
 		// still revealing whether forks/shadows merge the opening regions.
 		for (int32 MY = 0; MY < MH; MY += 2) for (int32 MX = 0; MX < MW; MX += 2) if (Mask.IsValidIndex(MY * MW + MX) && Mask[MY * MW + MX]) DrawRect(FLinearColor::White, X + Width * MX / MW, Y + Height * MY / MH, Width * 2.f / MW + 1.f, Height * 2.f / MH + 1.f);
 	}
 	if (bDepthView)
 	{
-		const TArray<float>& Depth = Forklift->GetLatestDepthCm(); const int32 DW=SensorImage->SizeX,DH=SensorImage->SizeY; const float MinD=Forklift->GetDepthMinimumCm(),MaxD=Forklift->GetDepthMaximumCm();
 		for (int32 PY=0;PY<DH;PY+=4) for (int32 PX=0;PX<DW;PX+=4) if (Depth.IsValidIndex(PY*DW+PX))
 		{
 			const float D=Depth[PY*DW+PX]; const float N=FMath::Clamp((D-MinD)/FMath::Max(1.f,MaxD-MinD),0.f,1.f);
@@ -68,7 +95,7 @@ void AForkliftSensorHUD::DrawHUD()
 	const float CX = X + Width * .5f, CY = Y + Height * .5f;
 	DrawLine(CX - 12.f, CY, CX + 12.f, CY, FLinearColor::Green, 1.5f);
 	DrawLine(CX, CY - 12.f, CX, CY + 12.f, FLinearColor::Green, 1.5f);
-	DrawText(bDepthView ? (DepthView==1 ? TEXT("RGB-D normalized SceneDepth (U: RGB/depth/edges)") : TEXT("RGB with SceneDepth edges (U: RGB/depth/edges)")) : (bMaskView ? (DebugView == 1 ? TEXT("Colour-region mask (O: source/region/body/opening)") : (DebugView == 2 ? TEXT("Object body mask (O: source/region/body/opening)") : TEXT("Opening mask (O: source/region/body/opening)"))) : TEXT("Pallet sensor preview (O: source/region/body/opening)")), FLinearColor::White, X + 8.f, Y + 8.f, nullptr, .8f);
+	DrawText(bMaskView ? (DebugView == 1 ? TEXT("Colour-region mask (O: source/region/RGB body/depth body/opening)") : (DebugView == 2 ? TEXT("RGB body before depth/refinement") : (DebugView == 3 ? TEXT("Depth/refined body") : TEXT("Opening components")))) : TEXT("RGB sensor preview (O overlays, U depth palette)"), FLinearColor::White, X + 8.f, Y + 8.f, nullptr, .8f);
 	// Coarse grid and body region are player-HUD diagnostics only.
 	const int32 GridX = Forklift->GetVisionCoarseGridColumns(), GridY = Forklift->GetVisionCoarseGridRows();
 	const TArray<int32>& Labels = Forklift->GetVisionCoarseLabels();
@@ -111,13 +138,21 @@ void AForkliftSensorHUD::DrawHUD()
 	const FOpeningDetection& Detection = Forklift->GetOpeningDetection();
 	if (Detection.bValid)
 	{
+		const FLinearColor OpeningColor = Detection.bDepthValid ? FLinearColor::Yellow : FLinearColor(1.f,.45f,.05f,1.f);
 		const float SX = Width / FMath::Max(1, SensorImage->SizeX), SY = Height / FMath::Max(1, SensorImage->SizeY);
-		const auto DrawOpening = [this, X, Y, SX, SY](const FVector2D& Center, const FVector2D& Extent)
+		const auto DrawOpening = [this, X, Y, SX, SY, OpeningColor](const FVector2D& Center, const FVector2D& Extent)
 		{
 			const float BX = X + (Center.X - Extent.X) * SX, BY = Y + (Center.Y - Extent.Y) * SY, BW = Extent.X * 2.f * SX, BH = Extent.Y * 2.f * SY;
-			DrawRect(FLinearColor::Yellow, BX, BY, BW, 1.5f); DrawRect(FLinearColor::Yellow, BX, BY + BH, BW, 1.5f); DrawRect(FLinearColor::Yellow, BX, BY, 1.5f, BH); DrawRect(FLinearColor::Yellow, BX + BW, BY, 1.5f, BH);
+			DrawRect(OpeningColor, BX, BY, BW, 1.5f); DrawRect(OpeningColor, BX, BY + BH, BW, 1.5f); DrawRect(OpeningColor, BX, BY, 1.5f, BH); DrawRect(OpeningColor, BX + BW, BY, 1.5f, BH);
 		};
 		DrawOpening(Detection.LeftCenter, Detection.LeftExtent); DrawOpening(Detection.RightCenter, Detection.RightExtent);
-		DrawText(FString::Printf(TEXT("OPENINGS: %.2f  dist %.0fcm lateral %.1fcm"), Detection.Confidence, Detection.EstimatedDistanceCm, Detection.EstimatedLateralCm), FLinearColor::Yellow, X + 8.f, Y + 28.f, nullptr, .75f);
+		const auto DrawDepthOpening = [this, DepthX, DepthY, Width, Height, SensorImage, OpeningColor](const FVector2D& Center, const FVector2D& Extent)
+		{
+			const float SX=Width/FMath::Max(1,SensorImage->SizeX), SY=Height/FMath::Max(1,SensorImage->SizeY); const float BX=DepthX+(Center.X-Extent.X)*SX,BY=DepthY+(Center.Y-Extent.Y)*SY,BW=Extent.X*2.f*SX,BH=Extent.Y*2.f*SY;
+			DrawRect(OpeningColor,BX,BY,BW,1.5f);DrawRect(OpeningColor,BX,BY+BH,BW,1.5f);DrawRect(OpeningColor,BX,BY,1.5f,BH);DrawRect(OpeningColor,BX+BW,BY,1.5f,BH);
+		};
+		DrawDepthOpening(Detection.LeftCenter, Detection.LeftExtent); DrawDepthOpening(Detection.RightCenter, Detection.RightExtent);
+		const FString OpeningLabel = Detection.bDepthValid ? FString::Printf(TEXT("VERIFIED RGB-D: %.2f dist %.0fcm lateral %.1fcm"), Detection.Confidence, Detection.EstimatedDistanceCm, Detection.EstimatedLateralCm) : FString::Printf(TEXT("RGB candidate only: %.2f — front depth missing"), Detection.Confidence);
+		DrawText(OpeningLabel, OpeningColor, X + 8.f, Y + 28.f, nullptr, .68f);
 	}
 }

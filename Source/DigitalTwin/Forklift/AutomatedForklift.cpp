@@ -404,6 +404,7 @@ void AAutomatedForklift::SetupPlayerInputComponent(UInputComponent* Input)
 	Input->BindKey(EKeys::U, IE_Pressed, this, &AAutomatedForklift::ToggleDepthDebugView);
 	Input->BindKey(EKeys::P, IE_Pressed, this, &AAutomatedForklift::ToggleAutoApproachStraightDiagnostic);
 	Input->BindKey(EKeys::I, IE_Pressed, this, &AAutomatedForklift::ToggleSensorOcclusionDiagnostic);
+	Input->BindKey(EKeys::J, IE_Pressed, this, &AAutomatedForklift::ToggleDetailedSensorDiagnostics);
 	Input->BindKey(EKeys::L, IE_Pressed, this, &AAutomatedForklift::ToggleLidarDebug);
 }
 void AAutomatedForklift::LogInputInvocation(const TCHAR* InputName, float Value)
@@ -433,8 +434,8 @@ void AAutomatedForklift::ToggleCollisionDebug()
 }
 void AAutomatedForklift::TogglePalletSensorDisplay()
 {
-	PalletSensorDisplayMode = (PalletSensorDisplayMode + 1) % 3;
-	UE_LOG(LogTemp, Warning, TEXT("[R16HD_SENSOR] V display mode=%d (0=off, 1=preview, 2=large) captureActive=%d"), PalletSensorDisplayMode, bPalletSensorCaptureActive);
+	PalletSensorDisplayMode = PalletSensorDisplayMode == 0 ? 1 : 0;
+	UE_LOG(LogTemp, Warning, TEXT("[R16HD_SENSOR] V paired RGB+Depth display=%d captureActive=%d"), PalletSensorDisplayMode, bPalletSensorCaptureActive);
 }
 void AAutomatedForklift::TogglePalletSensorCapture()
 {
@@ -443,13 +444,18 @@ void AAutomatedForklift::TogglePalletSensorCapture()
 }
 void AAutomatedForklift::ToggleVisionDebugView()
 {
-	VisionDebugViewMode = (VisionDebugViewMode + 1) % 4;
-	UE_LOG(LogTemp, Warning, TEXT("[R16HD_VISION] O debug view=%d (0=source, 1=colour region, 2=body, 3=opening)"), VisionDebugViewMode);
+	VisionDebugViewMode = (VisionDebugViewMode + 1) % 5;
+	UE_LOG(LogTemp, Warning, TEXT("[R16HD_VISION] O debug view=%d (0=source, 1=colour region, 2=RGB body, 3=depth/refined body, 4=opening)"), VisionDebugViewMode);
 }
 void AAutomatedForklift::ToggleDepthDebugView()
 {
 	DepthDebugViewMode = (DepthDebugViewMode + 1) % 3;
 	UE_LOG(LogTemp, Warning, TEXT("[R16HD_RGBD] U depth debug=%d (0=RGB, 1=normalized depth, 2=RGB+depth edges)"), DepthDebugViewMode);
+}
+void AAutomatedForklift::ToggleDetailedSensorDiagnostics()
+{
+	bDetailedSensorDiagnostics = !bDetailedSensorDiagnostics;
+	UE_LOG(LogTemp, Warning, TEXT("[R16HD_VISION] J detailed HUD=%d"), bDetailedSensorDiagnostics);
 }
 void AAutomatedForklift::ToggleAutoApproachStraightDiagnostic()
 {
@@ -734,6 +740,41 @@ float AAutomatedForklift::GetForkTipAheadOfSensorCm() const
 	return FVector::DotProduct((LeftTip + RightTip) * .5f - PalletSensorCapture->GetComponentLocation(), PalletSensorCapture->GetForwardVector());
 }
 
+bool AAutomatedForklift::ComputeAutoInsertionGeometry(const FOpeningDetection& Detection, float& OutForkTipToFrontCm, float& OutRemainingForkAdvanceCm, float& OutReachRemainingCm, float& OutChassisAdvanceCm, float& OutLateralErrorCm, float& OutLiftCorrectionCm) const
+{
+	OutForkTipToFrontCm = OutRemainingForkAdvanceCm = OutReachRemainingCm = OutChassisAdvanceCm = OutLateralErrorCm = OutLiftCorrectionCm = -BIG_NUMBER;
+	if (!Detection.bDepthValid || !ForkCarriage || !LeftForkCollision || !RightForkCollision) return false;
+	const FTransform ForkFrame = ForkCarriage->GetComponentTransform();
+	const auto ToFork = [&ForkFrame](const FVector& World) { return ForkFrame.InverseTransformPosition(World); };
+	const FVector LeftTip = ToFork(LeftForkCollision->GetComponentTransform().TransformPosition(FVector(LeftForkCollision->GetScaledBoxExtent().X, 0.f, 0.f)));
+	const FVector RightTip = ToFork(RightForkCollision->GetComponentTransform().TransformPosition(FVector(RightForkCollision->GetScaledBoxExtent().X, 0.f, 0.f)));
+	const FVector LeftTop = ToFork(LeftForkCollision->GetComponentTransform().TransformPosition(FVector(0.f, 0.f, LeftForkCollision->GetScaledBoxExtent().Z)));
+	const FVector RightTop = ToFork(RightForkCollision->GetComponentTransform().TransformPosition(FVector(0.f, 0.f, RightForkCollision->GetScaledBoxExtent().Z)));
+	const FVector TipMid = (LeftTip + RightTip) * .5f;
+	const float ForkTopZ = (LeftTop.Z + RightTop.Z) * .5f;
+
+	// All values here are ForkCarriage-local centimetres.  The optical-axis
+	// SceneDepth was already unprojected into this frame by
+	// UpdateDepthForOpeningDetection, so there is no camera-axis/reach-axis mix.
+	OutForkTipToFrontCm = Detection.OpeningCenterInForkCm.X - TipMid.X;
+	OutRemainingForkAdvanceCm = FMath::Max(0.f, OutForkTipToFrontCm + AutoRequiredInsertionCm);
+	OutReachRemainingCm = FMath::Max(0.f, Dimensions.ReachTravelCm - ReachCm);
+	OutChassisAdvanceCm = FMath::Max(0.f, OutRemainingForkAdvanceCm - OutReachRemainingCm);
+	OutLateralErrorCm = Detection.OpeningCenterInForkCm.Y - TipMid.Y;
+	const float LeftHeight = Detection.LeftMeasuredOpeningHeightCm > 1.f ? Detection.LeftMeasuredOpeningHeightCm : (Detection.MeasuredOpeningHeightCm > 1.f ? Detection.MeasuredOpeningHeightCm : VisionKnownOpeningHeightCm);
+	const float RightHeight = Detection.RightMeasuredOpeningHeightCm > 1.f ? Detection.RightMeasuredOpeningHeightCm : (Detection.MeasuredOpeningHeightCm > 1.f ? Detection.MeasuredOpeningHeightCm : VisionKnownOpeningHeightCm);
+	const FVector LeftCenter = Detection.LeftMeasuredOpeningHeightCm > 1.f ? Detection.LeftOpeningCenterInForkCm : Detection.OpeningCenterInForkCm;
+	const FVector RightCenter = Detection.RightMeasuredOpeningHeightCm > 1.f ? Detection.RightOpeningCenterInForkCm : Detection.OpeningCenterInForkCm;
+	// Fork-top bounds are evaluated in the same moving carriage frame as the
+	// actual tine collision shapes.  Intersect both apertures; do not average a
+	// narrow/noisy opening into a range the other tine cannot enter.
+	const float AllowedMin = FMath::Max(LeftCenter.Z - LeftHeight*.5f + AutoForkOpeningBottomClearanceCm + Dimensions.ForkThicknessCm, RightCenter.Z - RightHeight*.5f + AutoForkOpeningBottomClearanceCm + Dimensions.ForkThicknessCm);
+	const float AllowedMax = FMath::Min(LeftCenter.Z + LeftHeight*.5f - AutoForkOpeningBottomClearanceCm, RightCenter.Z + RightHeight*.5f - AutoForkOpeningBottomClearanceCm);
+	const float DesiredForkTopZ = AllowedMin <= AllowedMax ? (AllowedMin + AllowedMax) * .5f : ForkTopZ;
+	OutLiftCorrectionCm = DesiredForkTopZ - ForkTopZ;
+	return true;
+}
+
 void AAutomatedForklift::ClearAutomaticCommands()
 {
 	AutoDriveInput = AutoSteerInput = AutoLiftInput = AutoReachInput = AutoSideShiftInput = 0.f;
@@ -741,6 +782,7 @@ void AAutomatedForklift::ClearAutomaticCommands()
 void AAutomatedForklift::SetAutoPickupState(EAutoPickupState NewState, const FString& Status)
 {
 	AutoPickupState = NewState; AutoPickupStatus = Status; AutoPickupStateElapsed = 0.f;
+	if (NewState == EAutoPickupState::Aligning) { AlignmentStableFrames = 0; LastStableAlignmentVisionFrame = -1; }
 	if (NewState == EAutoPickupState::Approaching && GetWorld())
 	{
 		AutoApproachStartLocation = GetActorLocation();
@@ -748,7 +790,24 @@ void AAutomatedForklift::SetAutoPickupState(EAutoPickupState NewState, const FSt
 		LastAutoApproachTravelCm = 0.f;
 		LastAutoCameraDistanceCm = OpeningDetection.EstimatedDistanceCm;
 		LastAutoForkTipRemainingCm = OpeningDetection.EstimatedDistanceCm - GetForkTipAheadOfSensorCm();
-		AutoApproachRequiredTravelCm = FMath::Max(0.f, LastAutoForkTipRemainingCm - AutoApproachForkTipClearanceCm);
+		// The chassis is not driven to a magic camera/fork clearance.  It only
+		// closes the distance that the remaining reach stroke cannot cover after
+		// the requested physical insertion depth has been reserved.
+		float TipToFront, RemainingAdvance, ReachRemaining, ChassisAdvance, Lateral, LiftCorrection;
+		if (ComputeAutoInsertionGeometry(OpeningDetection, TipToFront, RemainingAdvance, ReachRemaining, ChassisAdvance, Lateral, LiftCorrection))
+		{
+			LastAutoForkTipRemainingCm = TipToFront;
+			AutoRequiredForkAdvanceCm = RemainingAdvance;
+			AutoChassisAdvanceNeededCm = ChassisAdvance;
+			AutoApproachRequiredTravelCm = ChassisAdvance;
+		}
+		else { AutoRequiredForkAdvanceCm = AutoChassisAdvanceNeededCm = AutoApproachRequiredTravelCm = -BIG_NUMBER; }
+		AutoApproachPlannedTravelCm = FMath::Max(0.f, AutoChassisAdvanceNeededCm);
+		AutoApproachTravelBudgetCm = AutoApproachPlannedTravelCm + 35.f;
+		AutoApproachStartForward = GetActorForwardVector();
+		AutoApproachReplanCount = 0;
+		AutoReachTargetCm = -BIG_NUMBER;
+		AutoInsertionStartReachCm = -BIG_NUMBER;
 		AutoApproachLastProgressDistanceCm = OpeningDetection.EstimatedDistanceCm;
 		AutoApproachLastProgressTime = GetWorld()->GetTimeSeconds();
 		bLastAutoApproachBlocked = false;
@@ -761,6 +820,12 @@ void AAutomatedForklift::SetAutoPickupState(EAutoPickupState NewState, const FSt
 void AAutomatedForklift::CancelAutoPickup(const FString& Reason, bool bFailure)
 {
 	ClearAutomaticCommands();
+	if (bFailure)
+	{
+		LastAutoFailureReason = Reason;
+		LastAutoFailureSensorFrameId = SensorFrameId;
+		LastAutoFailureTime = GetWorld() ? GetWorld()->GetTimeSeconds() : -BIG_NUMBER;
+	}
 	SetAutoPickupState(bFailure ? EAutoPickupState::Failed : EAutoPickupState::Stopped, Reason);
 }
 void AAutomatedForklift::ToggleAutoPickup()
@@ -768,12 +833,18 @@ void AAutomatedForklift::ToggleAutoPickup()
 	LastButtonInput = TEXT("시작"); LastButtonClickTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
 	if (AutoPickupState == EAutoPickupState::Detecting || AutoPickupState == EAutoPickupState::Approaching || AutoPickupState == EAutoPickupState::Aligning || AutoPickupState == EAutoPickupState::Inserting || AutoPickupState == EAutoPickupState::Lifting) { LastButtonInput = TEXT("중지"); CancelAutoPickup(TEXT("사용자가 작업 중지 버튼을 선택"), false); return; }
 	if (!bPalletSensorCaptureActive) { SetAutoPickupState(EAutoPickupState::Failed, TEXT("카메라 캡처가 꺼져 있음 — N 키 또는 설정 확인 필요")); return; }
-	if (LiftCm > 3.f || ReachCm > 3.f) { SetAutoPickupState(EAutoPickupState::Failed, TEXT("수동 초기화 필요 — 포크 하강 및 리치 후퇴")); return; }
+	// Start always permits RGB-D observation.  A non-zero fork height is a
+	// measurement/alignment problem, not a reason to suppress the camera path.
+	// If a fork is already inside or touching an object, later safety gates hold
+	// motion and report that condition rather than lowering blindly.
+	if (ReachCm > 3.f) UE_LOG(LogTemp, Warning, TEXT("[R16HD_AUTO_PICK] partial-reach restart: currentReach=%.1fcm; remaining insertion will be recomputed"), ReachCm);
+	++AutoPickupAttemptId;
 	ClearAutomaticCommands();
+	LastAutoFailureReason.Reset(); LastAutoFailureSensorFrameId = -1; LastAutoFailureTime = -BIG_NUMBER;
 	bSavedLastValidVisionArtifact = bSavedFirstVisionFailureArtifact = false; LastSuccessfulVisionPixels.Reset();
 	LastTrackedOpeningDetection = FOpeningDetection(); LastTrackedOpeningTime = -BIG_NUMBER; LastTrackedActorLocation = FVector::ZeroVector; LastTrackedOpeningSeparationPx = 0.f; LockedTargetMissFrames = 0;
-	FilteredApproachLateralCm = PreviousApproachLateralCm = AutoApproachHeadingErrorRad = 0.f; LastAutoApproachTravelForHeadingCm = 0.f; LastAutoYawDeltaDeg = AutoApproachAccumulatedYawDeg = 0.f; bApproachSteeringInDeadband = false;
-	OpeningStableFrames = AlignmentStableFrames = 0; LastVisionCandidateCount = -1; LastVisionFrameNumber = 0; LastVisionProcessTime = -BIG_NUMBER; bLastVisionReadSucceeded = bLastVisionHadValidPair = false; LastPixelReadStatus = TEXT("카메라 프레임 대기"); LastAlignmentLateralErrorCm = LastAlignmentLiftCorrectionCm = LastAutoInsertionTravelCm = LastAutoApproachTravelCm = LastAutoCameraDistanceCm = LastAutoForkTipRemainingCm = AutoApproachRequiredTravelCm = LastPhysicalPalletRiseCm = AutoRequiredForwardTravelCm = AutoMaximumForwardTravelCm = -BIG_NUMBER; bLastAutoDriveBlocked = bLastAutoApproachBlocked = bLastPhysicalPalletContact = false;
+	FilteredApproachLateralCm = PreviousApproachLateralCm = AutoApproachHeadingErrorRad = 0.f; LastAutoApproachTravelForHeadingCm = 0.f; LastAutoYawDeltaDeg = AutoApproachAccumulatedYawDeg = 0.f; bApproachSteeringInDeadband = false; LastStableOpeningVisionFrame = LastStableAlignmentVisionFrame = -1; InvalidHeightRangeVisionFrames = 0; LastVisionTotalMs = LastVisionMaxMs = 0.f;
+	OpeningStableFrames = AlignmentStableFrames = 0; LastVisionCandidateCount = -1; LastVisionFrameNumber = 0; LastProcessedSensorFrameId = -1; LastVisionSuccessSensorFrameId = FirstVisionFailureAfterSuccessSensorFrameId = -1; LastVisionProcessTime = -BIG_NUMBER; bLastVisionReadSucceeded = bLastVisionHadValidPair = false; LastPixelReadStatus = TEXT("카메라 프레임 대기"); LastAlignmentLateralErrorCm = LastAlignmentLiftCorrectionCm = LastMeasuredOpeningBottomCm = LastMeasuredOpeningTopCm = LastAllowedForkTopMinCm = LastAllowedForkTopMaxCm = LastForkTopLocalCm = LastHeightTargetLiftCm = LastAutoInsertionTravelCm = LastAutoApproachTravelCm = LastAutoCameraDistanceCm = LastAutoForkTipRemainingCm = AutoApproachRequiredTravelCm = AutoApproachPlannedTravelCm = AutoApproachTravelBudgetCm = AutoRequiredForkAdvanceCm = AutoChassisAdvanceNeededCm = AutoReachTargetCm = AutoInsertionStartReachCm = LastPhysicalPalletRiseCm = AutoRequiredForwardTravelCm = AutoMaximumForwardTravelCm = -BIG_NUMBER; bPreApproachHeightAlignment = false; AutoApproachReplanCount = 0; bLastAutoDriveBlocked = bLastAutoApproachBlocked = bLastPhysicalPalletContact = false;
 	SetAutoPickupState(EAutoPickupState::Detecting, TEXT("시작 버튼 입력됨 — 안정적인 삽입구 쌍 영상 대기 중"));
 }
 
@@ -791,22 +862,34 @@ void AAutomatedForklift::GetAutoPickupDiagnosticLines(TArray<FString>& OutLines)
 	const auto AgeText = [Now](float Time) { return Time <= -BIG_NUMBER * .5f ? FString(TEXT("미측정")) : FString::Printf(TEXT("%.1fs"), FMath::Max(0.f, Now - Time)); };
 	const auto ValueText = [](float Value, const TCHAR* Unit) { return Value <= -BIG_NUMBER * .5f ? FString(TEXT("미측정")) : FString::Printf(TEXT("%.1f%s"), Value, Unit); };
 	OutLines.Add(FString::Printf(TEXT("상태: %s"), *AutoPickupStateToString(AutoPickupState)));
+	OutLines.Add(FString::Printf(TEXT("시도: #%d / 센서 frame %d / 분석 frame %d / 성공 %d / 첫실패 %d"), AutoPickupAttemptId, SensorFrameId, LastProcessedSensorFrameId, LastVisionSuccessSensorFrameId, FirstVisionFailureAfterSuccessSensorFrameId));
 	OutLines.Add(FString::Printf(TEXT("버튼: %s (%s 전)"), *LastButtonInput, *AgeText(LastButtonClickTime)));
 	OutLines.Add(FString::Printf(TEXT("단계: %.1fs — %s"), AutoPickupStateElapsed, *AutoPickupStatus));
 	OutLines.Add(FString::Printf(TEXT("영상: 캡처 %s / RT %s / 처리 #%d (%s 전) / 픽셀 %s"), bPalletSensorCaptureActive ? TEXT("켜짐") : TEXT("꺼짐"), PalletSensorRenderTarget ? TEXT("유효") : TEXT("없음"), LastVisionFrameNumber, *AgeText(LastVisionProcessTime), *LastPixelReadStatus));
 	OutLines.Add(FString::Printf(TEXT("Depth: %s / frame %d / 유효픽셀 %d / 범위 %s..%s / %s"), bDepthFrameValid ? TEXT("수신됨") : TEXT("미수신"), DepthFrameId, DepthValidPixelCount, *ValueText(DepthObservedMinimumCm,TEXT("cm")), *ValueText(DepthObservedMaximumCm,TEXT("cm")), *LastDepthReadStatus));
 	OutLines.Add(FString::Printf(TEXT("탐색: 16x16 색상 영역 병합 / 원본 2px 정밀 / 후보 ROI 시작 %s"), LastVisionSearchStartY >= 0 ? *FString::FromInt(LastVisionSearchStartY * 2) : TEXT("미측정")));
 	OutLines.Add(FString::Printf(TEXT("인식: 후보 %s / 쌍 %s / 신뢰도 %s / 안정 %d/3"), LastVisionCandidateCount >= 0 ? *FString::FromInt(LastVisionCandidateCount) : TEXT("미측정"), bLastVisionHadValidPair ? TEXT("유효") : TEXT("없음"), OpeningDetection.TimestampSeconds > -BIG_NUMBER * .5f ? *FString::Printf(TEXT("%.2f"), OpeningDetection.Confidence) : TEXT("미측정"), OpeningStableFrames));
+	OutLines.Add(FString::Printf(TEXT("Gates: RGB pair=%s | depth/front=%s | tracked=%s | height range=%s | motion=%s"), bLastVisionHadValidPair ? TEXT("valid") : TEXT("missing"), OpeningDetection.bDepthValid ? TEXT("valid") : TEXT("missing"), LastTrackedOpeningDetection.bValid ? TEXT("locked") : TEXT("none"), LastAllowedForkTopMinCm <= LastAllowedForkTopMaxCm ? TEXT("feasible") : TEXT("re-measure"), IsAutoPickupMotionActive() ? TEXT("permitted") : TEXT("held")));
+	OutLines.Add(FString::Printf(TEXT("Depth pixels: valid=%d invalid=%d below=%d above=%d"), DepthValidPixelCount, DepthInvalidPixelCount, DepthBelowRangePixelCount, DepthAboveRangePixelCount));
+	OutLines.Add(FString::Printf(TEXT("Vision ms: total %.1f rgb %.1f depth %.1f coarse %.1f fine %.1f max %.1f"), LastVisionTotalMs, LastVisionRgbReadMs, LastVisionDepthReadMs, LastVisionCoarseMs, LastVisionFineMs, LastVisionMaxMs));
+	if (!LastAutoFailureReason.IsEmpty()) OutLines.Add(FString::Printf(TEXT("Last auto failure: frame %d age %s — %s"), LastAutoFailureSensorFrameId, *AgeText(LastAutoFailureTime), *LastAutoFailureReason));
+	const bool bObservationFresh = OpeningDetection.bValid && OpeningDetection.bDepthValid && OpeningDetection.TimestampSeconds > -BIG_NUMBER*.5f && Now-OpeningDetection.TimestampSeconds <= VisionMaximumFrameAgeSeconds;
+	OutLines.Add(FString::Printf(TEXT("관측: %s / 현재 프레임 경과 %s / 마지막 잠금 경과 %s"), bObservationFresh ? TEXT("현재 RGB-D") : TEXT("오래됨/미측정"), *AgeText(OpeningDetection.TimestampSeconds), *AgeText(LastTrackedOpeningTime)));
 	OutLines.Add(FString::Printf(TEXT("검출 단계: %s"), *LastVisionStageStatus));
 	if (VisionPairDiagnostics.IsEmpty()) OutLines.Add(TEXT("쌍 판정: 미측정 또는 후보 부족"));
 	else for (int32 Index = FMath::Max(0, VisionPairDiagnostics.Num()-2); Index < VisionPairDiagnostics.Num(); ++Index) OutLines.Add(VisionPairDiagnostics[Index]);
 	OutLines.Add(FString::Printf(TEXT("정렬: 좌우 %s / 높이 %s / 명령 E/Q %.2f Z/C %.2f / 실제 높이 %.1f 좌우 %.1f"), *ValueText(LastAlignmentLateralErrorCm, TEXT("cm")), *ValueText(LastAlignmentLiftCorrectionCm, TEXT("cm")), LiftInput, SideShiftInput, LiftCm, SideShiftCm));
-	OutLines.Add(FString::Printf(TEXT("접근: 명령 W/S %.2f 조향 %.2f / 실제속도 %.1fcm/s / 이동 %s / 목표 %s / 차단 %s"), LastAppliedDriveInput, LastAppliedSteerInput, CurrentForwardSpeedCmPerSec, *ValueText(LastAutoApproachTravelCm, TEXT("cm")), *ValueText(AutoApproachRequiredTravelCm, TEXT("cm")), bLastAutoApproachBlocked ? TEXT("예") : TEXT("아니오")));
-	OutLines.Add(FString::Printf(TEXT("거리: 카메라 %s / 포크끝 잔여 %s / 접근 목표 %.1fcm"), *ValueText(LastAutoCameraDistanceCm, TEXT("cm")), *ValueText(LastAutoForkTipRemainingCm, TEXT("cm")), AutoApproachForkTipClearanceCm));
+	OutLines.Add(FString::Printf(TEXT("접근: 명령 W/S %.2f 조향 %.2f / 실제속도 %.1fcm/s / 누적 %s / 시작계획 %s / 현재잔여 %s / 한계 %s / 재계획 %d / 차단 %s"), LastAppliedDriveInput, LastAppliedSteerInput, CurrentForwardSpeedCmPerSec, *ValueText(LastAutoApproachTravelCm, TEXT("cm")), *ValueText(AutoApproachPlannedTravelCm, TEXT("cm")), *ValueText(AutoApproachRequiredTravelCm, TEXT("cm")), *ValueText(AutoApproachTravelBudgetCm, TEXT("cm")), AutoApproachReplanCount, bLastAutoApproachBlocked ? TEXT("예") : TEXT("아니오")));
+	const float ReachRemaining = FMath::Max(0.f, Dimensions.ReachTravelCm - ReachCm);
+	OutLines.Add(FString::Printf(TEXT("거리: 카메라 %s / 포크끝-전면 %s"), *ValueText(LastAutoCameraDistanceCm, TEXT("cm")), *ValueText(LastAutoForkTipRemainingCm, TEXT("cm"))));
+	OutLines.Add(FString::Printf(TEXT("계획: 필요 포크전진 %s (잔여+삽입) / R/F 잔여 %.1fcm / 차체 추가접근 %s"), *ValueText(AutoRequiredForkAdvanceCm, TEXT("cm")), ReachRemaining, *ValueText(AutoChassisAdvanceNeededCm, TEXT("cm"))));
+	OutLines.Add(FString::Printf(TEXT("정렬 RGB-D: 좌우 %s / 높이 %s / 전면방향 %.1fdeg (허용 %.1fdeg) / 포크폭 %.1f < 입구 %.1f-여유 %.1f"), *ValueText(LastAlignmentLateralErrorCm, TEXT("cm")), *ValueText(LastAlignmentLiftCorrectionCm, TEXT("cm")), OpeningDetection.bDepthValid ? FMath::RadiansToDegrees(OpeningDetection.FrontYawErrorRad) : -999.f, AutoDirectionToleranceDeg, Dimensions.ForkWidthCm, VisionKnownOpeningWidthCm, AutoForkOpeningSideClearanceCm * 2.f));
+	OutLines.Add(FString::Printf(TEXT("좌표: RGB-D 현재 ForkCarriage local=(X %.1f,Y %.1f,Z %.1f) / 삽입깊이 진행 %s / 남은 %s"), OpeningDetection.bDepthValid ? OpeningDetection.OpeningCenterInForkCm.X : -999.f, OpeningDetection.bDepthValid ? OpeningDetection.OpeningCenterInForkCm.Y : -999.f, OpeningDetection.bDepthValid ? OpeningDetection.OpeningCenterInForkCm.Z : -999.f, *ValueText(LastAutoInsertionTravelCm, TEXT("cm")), *ValueText(AutoRequiredForkAdvanceCm > -BIG_NUMBER*.5f && LastAutoInsertionTravelCm > -BIG_NUMBER*.5f ? FMath::Max(0.f, AutoRequiredForkAdvanceCm-LastAutoInsertionTravelCm) : -BIG_NUMBER, TEXT("cm"))));
+	OutLines.Add(FString::Printf(TEXT("높이: 포크상단 local %s / 입구 하·상 %s..%s / 허용 포크상단 %s..%s / 목표 인양 %s / E/Q %.2f"), *ValueText(LastForkTopLocalCm,TEXT("cm")), *ValueText(LastMeasuredOpeningBottomCm,TEXT("cm")), *ValueText(LastMeasuredOpeningTopCm,TEXT("cm")), *ValueText(LastAllowedForkTopMinCm,TEXT("cm")), *ValueText(LastAllowedForkTopMaxCm,TEXT("cm")), *ValueText(LastHeightTargetLiftCm,TEXT("cm")), LastAppliedLiftInput));
 	OutLines.Add(FString::Printf(TEXT("RGB-D: frame %d %s / mono %.1fcm / front Z %.1fcm ray %.1fcm / hole contrast %.1fcm yaw %.3frad"), DepthFrameId, OpeningDetection.bDepthValid ? TEXT("valid") : TEXT("invalid"), OpeningDetection.MonocularDistanceCm, OpeningDetection.FrontOpticalDepthCm, OpeningDetection.FrontRayDistanceCm, OpeningDetection.DepthOpeningContrastCm, OpeningDetection.FrontYawErrorRad));
 	OutLines.Add(FString::Printf(TEXT("추적: 목표 1 / 재탐색 %d회 / 마지막 유효 %s 전 / 좌우 필터 %.1fcm / 영상 기울기 %.3frad(조향 미사용)"), LockedTargetMissFrames, *AgeText(LastTrackedOpeningTime), FilteredApproachLateralCm, AutoApproachHeadingErrorRad));
 	OutLines.Add(FString::Printf(TEXT("조향: P 직진진단 %s / 이번 Tick %.2fdeg / 접근 누적 %.2fdeg"), bAutoApproachStraightDiagnostic ? TEXT("ON") : TEXT("OFF"), LastAutoYawDeltaDeg, AutoApproachAccumulatedYawDeg));
-	OutLines.Add(FString::Printf(TEXT("삽입: 명령 W/S %.2f / 이동 %s / 목표 %s / 차단 %s"), LastAppliedDriveInput, *ValueText(LastAutoInsertionTravelCm, TEXT("cm")), *ValueText(AutoRequiredForwardTravelCm, TEXT("cm")), bLastAutoDriveBlocked ? TEXT("예") : TEXT("아니오")));
+	OutLines.Add(FString::Printf(TEXT("삽입: R/F 명령 %.2f / 실제 리치 %s / 목표 %s / 차단 %s"), LastAppliedReachInput, *ValueText(LastAutoInsertionTravelCm, TEXT("cm")), *ValueText(AutoReachTargetCm, TEXT("cm")), bLastAutoDriveBlocked ? TEXT("예") : TEXT("아니오")));
 	OutLines.Add(LastCollisionHitExpireTime > Now ? FString::Printf(TEXT("최근 실제 충돌: %s ↔ %s / 표시 %.1fs 남음"), *GetNameSafe(LastBlockingComponent.Get()), *GetNameSafe(LastCollisionHit.GetComponent()), FMath::Max(0.f, LastCollisionHitExpireTime-Now)) : TEXT("최근 실제 충돌: 없음 (화면 와이어는 이전 표시일 수 있음)"));
 	OutLines.Add(FString::Printf(TEXT("인양: 명령 E/Q %.2f / 파레트 접촉 %s / 상승 %s"), LastAppliedLiftInput, bLastPhysicalPalletContact ? TEXT("확인") : TEXT("미확인"), *ValueText(LastPhysicalPalletRiseCm, TEXT("cm"))));
 }
@@ -958,6 +1041,12 @@ void AAutomatedForklift::SaveVisionTransitionArtifacts(const TArray<FColor>& Pix
 		FFileHelper::SaveArrayToFile(Bytes, *FPaths::Combine(Root, Prefix + TEXT("_") + Suffix + TEXT(".ppm")));
 	};
 	SavePpm(TEXT("source"), PalletSensorWidthPx, PalletSensorHeightPx, Pixels);
+	if (LatestDepthCm.Num() == PalletSensorWidthPx * PalletSensorHeightPx)
+	{
+		TArray<FColor> DepthImage; DepthImage.SetNumUninitialized(LatestDepthCm.Num());
+		for (int32 Index=0; Index<LatestDepthCm.Num(); ++Index) { const float D=LatestDepthCm[Index]; const bool bValid=FMath::IsFinite(D)&&D>=DepthMinimumCm&&D<=DepthMaximumCm; const uint8 V=bValid?static_cast<uint8>(255.f*FMath::Clamp((D-DepthMinimumCm)/FMath::Max(1.f,DepthMaximumCm-DepthMinimumCm),0.f,1.f)):0; DepthImage[Index]=bValid?FColor(V,V,V):FColor(120,0,180); }
+		SavePpm(TEXT("scene_depth"), PalletSensorWidthPx, PalletSensorHeightPx, DepthImage);
+	}
 	const int32 MW = VisionMaskWidth, MH = VisionMaskHeight;
 	const auto SaveMask = [&SavePpm, MW, MH](const FString& Name, const TArray<uint8>& Mask, const FColor& On)
 	{
@@ -966,13 +1055,12 @@ void AAutomatedForklift::SaveVisionTransitionArtifacts(const TArray<FColor>& Pix
 		for (int32 Index=0; Index<Mask.Num(); ++Index) Image[Index] = Mask[Index] ? On : FColor::Black;
 		SavePpm(Name, MW, MH, Image);
 	};
-	if (bValidFrame)
-	{
-		SaveMask(TEXT("region"), VisionRegionMask, FColor(60, 150, 255));
-		SaveMask(TEXT("body"), VisionBodyMask, FColor(255, 90, 60));
-		SaveMask(TEXT("openings"), VisionMask, FColor::White);
-	}
-	else if (VisionCoarseColumns > 0 && VisionCoarseRows > 0 && VisionCoarseLabels.Num() == VisionCoarseColumns * VisionCoarseRows)
+	SaveMask(TEXT("rgb_body"), VisionRgbBodyMask, FColor(255, 180, 60));
+	SaveMask(TEXT("hsv_body"), VisionHsvBodyMask, FColor(80, 220, 255));
+	SaveMask(TEXT("depth_refined_body"), VisionBodyMask, FColor(255, 90, 60));
+	SaveMask(TEXT("quadtree_refined_body"), VisionQuadTreeBodyMask, FColor(180, 80, 255));
+	SaveMask(TEXT("openings"), VisionMask, FColor::White);
+	if (!bValidFrame && VisionCoarseColumns > 0 && VisionCoarseRows > 0 && VisionCoarseLabels.Num() == VisionCoarseColumns * VisionCoarseRows)
 	{
 		TArray<FColor> Coarse; Coarse.SetNumUninitialized(VisionCoarseLabels.Num());
 		for (int32 Index=0; Index<Coarse.Num(); ++Index) { const int32 Label=VisionCoarseLabels[Index]; Coarse[Index] = Label < 0 ? FColor::Black : FLinearColor::MakeFromHSV8(static_cast<uint8>((Label*67)%255), 200, 255).ToFColor(false); }
@@ -986,7 +1074,7 @@ void AAutomatedForklift::SaveVisionTransitionArtifacts(const TArray<FColor>& Pix
 
 bool AAutomatedForklift::ReadSynchronizedDepthFrame()
 {
-	bDepthFrameValid = false; DepthValidPixelCount = 0; DepthObservedMinimumCm = DepthObservedMaximumCm = -BIG_NUMBER;
+	bDepthFrameValid = false; DepthValidPixelCount = 0; DepthInvalidPixelCount = DepthBelowRangePixelCount = DepthAboveRangePixelCount = 0; DepthObservedMinimumCm = DepthObservedMaximumCm = -BIG_NUMBER;
 	if (!PalletSensorDepthRenderTarget || !PalletSensorCapture || !PalletSensorDepthCapture || SensorFrameId <= 0) return false;
 	const bool bSamePose = PalletSensorCapture->GetComponentTransform().Equals(DepthFrameCameraTransform, .01f);
 	if (!bSamePose) { LastDepthReadStatus = TEXT("synchronization rejected: capture poses differ"); return false; }
@@ -1014,12 +1102,15 @@ bool AAutomatedForklift::ReadSynchronizedDepthFrame()
 		// Unreal cm; DeviceDepth is intentionally not used here.
 		const float Depth = Raw[Index].R.GetFloat();
 		LatestDepthCm[Index] = Depth;
-		if (FMath::IsFinite(Depth) && Depth >= DepthMinimumCm && Depth <= DepthMaximumCm) { ++DepthValidPixelCount; DepthObservedMinimumCm = DepthObservedMinimumCm <= -BIG_NUMBER*.5f ? Depth : FMath::Min(DepthObservedMinimumCm,Depth); DepthObservedMaximumCm = DepthObservedMaximumCm <= -BIG_NUMBER*.5f ? Depth : FMath::Max(DepthObservedMaximumCm,Depth); }
+		if (!FMath::IsFinite(Depth) || Depth <= 0.f) { ++DepthInvalidPixelCount; continue; }
+		if (Depth < DepthMinimumCm) { ++DepthBelowRangePixelCount; continue; }
+		if (Depth > DepthMaximumCm) { ++DepthAboveRangePixelCount; continue; }
+		++DepthValidPixelCount; DepthObservedMinimumCm = DepthObservedMinimumCm <= -BIG_NUMBER*.5f ? Depth : FMath::Min(DepthObservedMinimumCm,Depth); DepthObservedMaximumCm = DepthObservedMaximumCm <= -BIG_NUMBER*.5f ? Depth : FMath::Max(DepthObservedMaximumCm,Depth);
 	}
 	DepthFrameId = SensorFrameId;
 	LastDepthReadTime = GetWorld() ? GetWorld()->GetTimeSeconds() : -BIG_NUMBER;
 	bDepthFrameValid = DepthValidPixelCount > Raw.Num() / 100;
-	LastDepthReadStatus = FString::Printf(TEXT("depth read %s: %d/%d valid, range %.1f..%.1f cm"), bDepthFrameValid ? TEXT("succeeded") : TEXT("no valid values"), DepthValidPixelCount, Raw.Num(), DepthObservedMinimumCm, DepthObservedMaximumCm);
+	LastDepthReadStatus = FString::Printf(TEXT("depth read %s: %d/%d valid, invalid=%d below=%d above=%d range %.1f..%.1f cm"), bDepthFrameValid ? TEXT("succeeded") : TEXT("no valid values"), DepthValidPixelCount, Raw.Num(), DepthInvalidPixelCount, DepthBelowRangePixelCount, DepthAboveRangePixelCount, DepthObservedMinimumCm, DepthObservedMaximumCm);
 	return bDepthFrameValid;
 }
 
@@ -1061,6 +1152,21 @@ void AAutomatedForklift::UpdateDepthForOpeningDetection()
 	OpeningDetection.EstimatedDistanceCm=Optical; // control uses front plane Z, not hole/rear depth
 	OpeningDetection.EstimatedLateralCm=LocalToFork.Y;
 	OpeningDetection.EstimatedHeightCm=LocalToFork.Z;
+	OpeningDetection.OpeningCenterInForkCm=LocalToFork;
+	const float AverageHalfHeightPx=(OpeningDetection.LeftExtent.Y+OpeningDetection.RightExtent.Y)*.5f;
+	const float AverageHalfWidthPx=(OpeningDetection.LeftExtent.X+OpeningDetection.RightExtent.X)*.5f;
+	OpeningDetection.MeasuredOpeningHeightCm=FMath::Max(0.f,2.f*AverageHalfHeightPx*Optical/Focal);
+	OpeningDetection.MeasuredOpeningWidthCm=FMath::Max(0.f,2.f*AverageHalfWidthPx*Optical/Focal);
+	const auto ReconstructOpening = [&](const FVector2D& Pixel, const FVector2D& Extent, FVector& OutCenter, float& OutHeight, float& OutWidth)
+	{
+		const float PX = (Pixel.X-W*.5f)/Focal, PY = (Pixel.Y-H*.5f)/Focal;
+		const FVector Point(Optical, PX*Optical, -PY*Optical);
+		OutCenter = ForkCarriage ? ForkCarriage->GetComponentTransform().InverseTransformPosition(DepthFrameCameraTransform.TransformPosition(Point)) : Point;
+		OutHeight = FMath::Max(0.f, 2.f*Extent.Y*Optical/Focal);
+		OutWidth = FMath::Max(0.f, 2.f*Extent.X*Optical/Focal);
+	};
+	ReconstructOpening(OpeningDetection.LeftCenter, OpeningDetection.LeftExtent, OpeningDetection.LeftOpeningCenterInForkCm, OpeningDetection.LeftMeasuredOpeningHeightCm, OpeningDetection.LeftMeasuredOpeningWidthCm);
+	ReconstructOpening(OpeningDetection.RightCenter, OpeningDetection.RightExtent, OpeningDetection.RightOpeningCenterInForkCm, OpeningDetection.RightMeasuredOpeningHeightCm, OpeningDetection.RightMeasuredOpeningWidthCm);
 	// A real plane fit needs more non-collinear front samples; depth variation
 	// across symmetric opening borders is retained as a confidence diagnostic.
 	const float LeftDepth=DepthAt(FMath::RoundToInt(OpeningDetection.LeftCenter.X-OpeningDetection.LeftExtent.X-5),FMath::RoundToInt(OpeningDetection.LeftCenter.Y));
@@ -1071,18 +1177,37 @@ void AAutomatedForklift::UpdateDepthForOpeningDetection()
 void AAutomatedForklift::ProcessOpeningVision()
 {
 	if (!PalletSensorRenderTarget || !GetWorld()) return;
-	if (!(AutoPickupState == EAutoPickupState::Detecting || AutoPickupState == EAutoPickupState::Approaching || AutoPickupState == EAutoPickupState::Aligning || AutoPickupState == EAutoPickupState::Inserting)) return;
+	const bool bAutoNeedsAnalysis = AutoPickupState == EAutoPickupState::Detecting || AutoPickupState == EAutoPickupState::Approaching || AutoPickupState == EAutoPickupState::Aligning || AutoPickupState == EAutoPickupState::Inserting;
+	const bool bPreviewNeedsAnalysis = PalletSensorDisplayMode != 0;
+	if (!bAutoNeedsAnalysis && !bPreviewNeedsAnalysis) return;
 	VisionProcessElapsed += GetWorld()->GetDeltaSeconds(); if (VisionProcessElapsed < VisionProcessIntervalSeconds) return; VisionProcessElapsed = 0.f;
+	if (SensorFrameId <= 0 || SensorFrameId == LastProcessedSensorFrameId) { LastPixelReadStatus = SensorFrameId <= 0 ? TEXT("capture frame not available") : TEXT("waiting for next capture frame"); return; }
+	LastProcessedSensorFrameId = SensorFrameId;
+	const double VisionStartSeconds = FPlatformTime::Seconds();
 	++LastVisionFrameNumber; LastVisionProcessTime = GetWorld()->GetTimeSeconds(); LastVisionCandidateCount = -1; bLastVisionHadValidPair = false; OpeningDetection = FOpeningDetection(); VisionCandidates.Reset(); VisionPairDiagnostics.Reset(); VisionSubdivisionCells.Reset(); VisionSubdivisionDepths.Reset(); LastVisionFailureReason.Reset(); LastVisionStageStatus = TEXT("RGB coarse/merge pending");
 	FTextureRenderTargetResource* Resource = PalletSensorRenderTarget->GameThread_GetRenderTargetResource(); TArray<FColor> Pixels;
 	if (!Resource || !Resource->ReadPixels(Pixels) || Pixels.Num() != PalletSensorWidthPx * PalletSensorHeightPx) { bLastVisionReadSucceeded = false; LastPixelReadStatus = TEXT("read failed"); LastVisionFailureReason = TEXT("Camera render target pixels unavailable"); return; }
+	LastVisionRgbReadMs = static_cast<float>((FPlatformTime::Seconds()-VisionStartSeconds)*1000.0);
 	bLastVisionReadSucceeded = true; LastPixelReadStatus = TEXT("RGB read succeeded");
 	// RGB diagnostics deliberately continue without depth.  Automatic motion
 	// later requires bDepthValid, but coarse regions/candidates remain visible
 	// so a depth transport failure cannot hide the RGB diagnosis.
+	const double DepthReadStartSeconds = FPlatformTime::Seconds();
 	const bool bDepthAvailable = ReadSynchronizedDepthFrame();
+	LastVisionDepthReadMs = static_cast<float>((FPlatformTime::Seconds()-DepthReadStartSeconds)*1000.0);
+	const double CoarseStartSeconds = FPlatformTime::Seconds();
 	const int32 W=PalletSensorWidthPx,H=PalletSensorHeightPx,Step=2,SW=W/Step,SH=H/Step;
-	const auto Feature=[](const FColor& C){const float S=FMath::Max(1.f,static_cast<float>(C.R+C.G+C.B));return FVector(C.R/S,C.G/S,C.B/S);};
+	// HSV chroma is intentionally independent of value: a cast shadow changes V
+	// far more than H/S.  Low-saturation pixels carry no unstable hue signal and
+	// are resolved by luminance, RGB edges and depth later in the pipeline.
+	const auto Feature=[](const FColor& C)
+	{
+		const float R=C.R/255.f,G=C.G/255.f,B=C.B/255.f, Hi=FMath::Max3(R,G,B), Lo=FMath::Min3(R,G,B), Delta=Hi-Lo;
+		const float Sat=Hi>SMALL_NUMBER ? Delta/Hi : 0.f;
+		float Hue=0.f;
+		if (Sat>.08f) { if (Hi==R) Hue=FMath::Fmod((G-B)/FMath::Max(Delta,SMALL_NUMBER),6.f); else if (Hi==G) Hue=(B-R)/FMath::Max(Delta,SMALL_NUMBER)+2.f; else Hue=(R-G)/FMath::Max(Delta,SMALL_NUMBER)+4.f; Hue*=PI/3.f; }
+		return Sat>.08f ? FVector(FMath::Cos(Hue)*Sat,FMath::Sin(Hue)*Sat,Sat) : FVector::ZeroVector;
+	};
 	const auto Bright=[](const FColor& C){return (C.R*.2126f+C.G*.7152f+C.B*.0722f)/255.f;};
 	const auto Similar=[this](const FVector&A,float AL,const FVector&B,float BL,float CD,float LD){return FVector::Dist(A,B)<=CD&&FMath::Abs(AL-BL)<=LD;};
 	// 1) 16x16 colour distribution analysis. Each cell retains a representative
@@ -1096,6 +1221,7 @@ void AAutomatedForklift::ProcessOpeningVision()
 	// scoring colour, luminance, texture, size and spatial adjacency.
 	TArray<FRegion> CandidateRegions=Regions; TSet<uint64> UsedMergePairs;
 	for(int32 Pass=0;Pass<32;++Pass){int32 BA=INDEX_NONE,BB=INDEX_NONE;uint64 BestKey=0;float BestMerge=0.f;for(int32 A=0;A<Regions.Num();++A)for(int32 B=A+1;B<Regions.Num();++B){const uint64 Key=(static_cast<uint64>(A)<<32)|static_cast<uint32>(B);if(UsedMergePairs.Contains(Key))continue;const FRegion&AReg=Regions[A],&BReg=Regions[B];const bool Adjacent=!(AReg.B.Max.X<BReg.B.Min.X-1||BReg.B.Max.X<AReg.B.Min.X-1||AReg.B.Max.Y<BReg.B.Min.Y-1||BReg.B.Max.Y<AReg.B.Min.Y-1);if(!Adjacent)continue;const float Colour=1.f-FMath::Clamp(FVector::Dist(AReg.C,BReg.C)/VisionCoarseColorDistance,0.f,1.f),Light=1.f-FMath::Clamp(FMath::Abs(AReg.L-BReg.L)/VisionCoarseBrightnessDistance,0.f,1.f),Texture=1.f-FMath::Clamp(FMath::Abs(AReg.T-BReg.T)/.20f,0.f,1.f),Size=FMath::Min(AReg.Count,BReg.Count)/static_cast<float>(FMath::Max(AReg.Count,BReg.Count));const float Score=(Colour+Light+Texture+Size)*.25f;if(Score>BestMerge){BestMerge=Score;BA=A;BB=B;BestKey=Key;}}if(BA==INDEX_NONE||BestMerge<.58f)break;UsedMergePairs.Add(BestKey);const FRegion&AReg=Regions[BA],&BReg=Regions[BB];FRegion M;M.Label=CandidateRegions.Num();M.Count=AReg.Count+BReg.Count;M.C=(AReg.C*AReg.Count+BReg.C*BReg.Count)/M.Count;M.L=(AReg.L*AReg.Count+BReg.L*BReg.Count)/M.Count;M.T=(AReg.T*AReg.Count+BReg.T*BReg.Count)/M.Count;M.B=FIntRect(FMath::Min(AReg.B.Min.X,BReg.B.Min.X),FMath::Min(AReg.B.Min.Y,BReg.B.Min.Y),FMath::Max(AReg.B.Max.X,BReg.B.Max.X),FMath::Max(AReg.B.Max.Y,BReg.B.Max.Y));Regions.Add(M);CandidateRegions.Add(M);VisionPairDiagnostics.Add(FString::Printf(TEXT("merge proposal %d: score %.2f, %d cells"),M.Label,BestMerge,M.Count));}
+	LastVisionCoarseMs = static_cast<float>((FPlatformTime::Seconds()-CoarseStartSeconds)*1000.0);
 	// Once a pair has been locked, preserve a *search* region around the last
 	// observed pair.  This uses only previous image measurements; it is not a
 	// synthetic detection and all opening boundaries below are still re-read
@@ -1111,33 +1237,101 @@ void AAutomatedForklift::ProcessOpeningVision()
 		const int32 MinPY = FMath::Clamp(FMath::FloorToInt(Centre.Y - Extent.Y * Expand - VisionFineSearchPaddingPx * 2), 0, H - 1);
 		const int32 MaxPY = FMath::Clamp(FMath::CeilToInt(Centre.Y + Extent.Y * Expand + VisionFineSearchPaddingPx * 2), MinPY + 1, H);
 		FRegion Tracking; Tracking.Label = -100 - LockedTargetMissFrames; Tracking.B = FIntRect(MinPX * CW / W, MinPY * CH / H, FMath::Max(MinPX * CW / W + 1, MaxPX * CW / W), FMath::Max(MinPY * CH / H + 1, MaxPY * CH / H));
-		for (int32 PY=MinPY; PY<MaxPY; PY+=4) for (int32 PX=MinPX; PX<MaxPX; PX+=4) { Tracking.C += Feature(Pixels[PY*W+PX]); Tracking.L += Bright(Pixels[PY*W+PX]); ++Tracking.Count; }
+		// Do not average the opening interiors, floor or rear background into the
+		// tracked body's representative colour.  Sample only just outside the
+		// previously measured opening edges in this *current* RGB frame.
+		for (const FVector2D& OpeningCenter : {LastTrackedOpeningDetection.LeftCenter, LastTrackedOpeningDetection.RightCenter})
+		{
+			const FVector2D OpeningExtent = OpeningCenter == LastTrackedOpeningDetection.LeftCenter ? LastTrackedOpeningDetection.LeftExtent : LastTrackedOpeningDetection.RightExtent;
+			for (int32 Row=-2; Row<=2; ++Row) for (int32 Side : {-1, 1})
+			{
+				const int32 PX=FMath::Clamp(FMath::RoundToInt(OpeningCenter.X+Side*(OpeningExtent.X+6.f)),MinPX,MaxPX-1), PY=FMath::Clamp(FMath::RoundToInt(OpeningCenter.Y+Row*OpeningExtent.Y*.35f),MinPY,MaxPY-1);
+				Tracking.C += Feature(Pixels[PY*W+PX]); Tracking.L += Bright(Pixels[PY*W+PX]); ++Tracking.Count;
+			}
+		}
 		Tracking.C /= FMath::Max(1, Tracking.Count); Tracking.L /= FMath::Max(1, Tracking.Count); CandidateRegions.Add(Tracking);
 		VisionPairDiagnostics.Add(FString::Printf(TEXT("tracked ROI: %dx%d px, miss %d"), MaxPX-MinPX, MaxPY-MinPY, LockedTargetMissFrames));
 	}
-	float Best=0.f;FVector2D BestLC=FVector2D::ZeroVector,BestRC=FVector2D::ZeroVector,BestLE=FVector2D::ZeroVector,BestRE=FVector2D::ZeroVector;TArray<uint8> BestRegion,BestBody,BestOpen;FIntRect BestBounds;
-	for(const FRegion&R:CandidateRegions){if(R.Count<2)continue;FIntRect B(R.B.Min.X*W/CW,R.B.Min.Y*H/CH,R.B.Max.X*W/CW,R.B.Max.Y*H/CH);B.Min.X=FMath::Max(0,B.Min.X-VisionFineSearchPaddingPx);B.Min.Y=FMath::Max(0,B.Min.Y-VisionFineSearchPaddingPx);B.Max.X=FMath::Min(W,B.Max.X+VisionFineSearchPaddingPx);B.Max.Y=FMath::Min(H,B.Max.Y+VisionFineSearchPaddingPx);const int32 LX=B.Min.X/Step,RX=FMath::Min(SW,B.Max.X/Step),TY=B.Min.Y/Step,BY=FMath::Min(SH,B.Max.Y/Step);TArray<uint8> Reg;Reg.SetNumZeroed(SW*SH);for(int32 Y=TY;Y<BY;++Y)for(int32 X=LX;X<RX;++X){const FColor&C=Pixels[(Y*Step)*W+X*Step];if(Similar(Feature(C),Bright(C),R.C,R.L,VisionFineColorDistance,VisionFineBrightnessDistance))Reg[Y*SW+X]=1;}
+	// A full-resolution body/opening pass is expensive.  During tracking, execute
+	// the measured ROI first and defer the global proposals to a bounded fallback
+	// set.  This prevents dozens of full-size temporary masks from stalling motion.
+	TArray<FRegion> FineCandidates;
+	for (const FRegion& Candidate : CandidateRegions) if (Candidate.Label < 0 && Candidate.Count >= 2) FineCandidates.Add(Candidate);
+	const bool bHaveTrackedRoi = FineCandidates.Num() > 0;
+	const bool bDoGlobalFallback = !bHaveTrackedRoi || LockedTargetMissFrames > 0 || (SensorFrameId % 5) == 0;
+	for (const FRegion& Candidate : CandidateRegions)
+	{
+		if (!bDoGlobalFallback || Candidate.Label < 0 || Candidate.Count < 2 || FineCandidates.Num() >= VisionMaximumFineRegions) continue;
+		FineCandidates.Add(Candidate);
+	}
+	LastVisionCandidateCount = FineCandidates.Num();
+	const double FineStartSeconds = FPlatformTime::Seconds();
+	float Best=0.f;int32 TotalOpeningComponents=0, UsableOpeningComponents=0, TestedOpeningPairs=0;FVector2D BestLC=FVector2D::ZeroVector,BestRC=FVector2D::ZeroVector,BestLE=FVector2D::ZeroVector,BestRE=FVector2D::ZeroVector;TArray<uint8> BestRegion,BestBody,BestOpen;FIntRect BestBounds;
+	for(const FRegion&R:FineCandidates){if(R.Count<2)continue;FIntRect B(R.B.Min.X*W/CW,R.B.Min.Y*H/CH,R.B.Max.X*W/CW,R.B.Max.Y*H/CH);B.Min.X=FMath::Max(0,B.Min.X-VisionFineSearchPaddingPx);B.Min.Y=FMath::Max(0,B.Min.Y-VisionFineSearchPaddingPx);B.Max.X=FMath::Min(W,B.Max.X+VisionFineSearchPaddingPx);B.Max.Y=FMath::Min(H,B.Max.Y+VisionFineSearchPaddingPx);const int32 LX=B.Min.X/Step,RX=FMath::Min(SW,B.Max.X/Step),TY=B.Min.Y/Step,BY=FMath::Min(SH,B.Max.Y/Step);TArray<uint8> Reg;Reg.SetNumZeroed(SW*SH);for(int32 Y=TY;Y<BY;++Y)for(int32 X=LX;X<RX;++X){const FColor&C=Pixels[(Y*Step)*W+X*Step];if(Similar(Feature(C),Bright(C),R.C,R.L,VisionFineColorDistance,VisionFineBrightnessDistance))Reg[Y*SW+X]=1;}VisionRgbBodyMask=Reg;VisionHsvBodyMask=Reg;VisionMaskWidth=SW;VisionMaskHeight=SH;
 		// RGB proposes the body.  Depth then removes only pixels that are clearly
 		// behind/in front of that surface, preventing similarly coloured floor or
 		// rear scene from being merged into the pallet body.
-		TArray<float> BodyDepths; if (bDepthAvailable) for(int32 Y=TY;Y<BY;++Y)for(int32 X=LX;X<RX;++X)if(Reg[Y*SW+X]){const float D=LatestDepthCm[(Y*Step)*W+X*Step];if(FMath::IsFinite(D)&&D>=DepthMinimumCm&&D<=DepthMaximumCm)BodyDepths.Add(D);} float BodyDepth=-1.f; if(BodyDepths.Num()>=12){BodyDepths.Sort();BodyDepth=BodyDepths[BodyDepths.Num()/2];for(int32 Y=TY;Y<BY;++Y)for(int32 X=LX;X<RX;++X)if(Reg[Y*SW+X]&&FMath::Abs(LatestDepthCm[(Y*Step)*W+X*Step]-BodyDepth)>VisionDepthBodyContinuityCm)Reg[Y*SW+X]=0;}
+		TArray<float> BodyDepths; if (bDepthAvailable) for(int32 Y=TY;Y<BY;++Y)for(int32 X=LX;X<RX;++X)if(Reg[Y*SW+X]){const float D=LatestDepthCm[(Y*Step)*W+X*Step];if(FMath::IsFinite(D)&&D>=DepthMinimumCm&&D<=DepthMaximumCm)BodyDepths.Add(D);} float BodyDepth=-1.f; if(BodyDepths.Num()>=12){BodyDepths.Sort();BodyDepth=BodyDepths[BodyDepths.Num()/2];int32 SurfaceSupport=0;for(const float D:BodyDepths)if(FMath::Abs(D-BodyDepth)<=VisionDepthBodyContinuityCm)++SurfaceSupport;const bool bRepresentativeSurface=SurfaceSupport*100>=BodyDepths.Num()*55;if(bRepresentativeSurface)for(int32 Y=TY;Y<BY;++Y)for(int32 X=LX;X<RX;++X)if(Reg[Y*SW+X]&&FMath::Abs(LatestDepthCm[(Y*Step)*W+X*Step]-BodyDepth)>VisionDepthBodyContinuityCm)Reg[Y*SW+X]=0;else { BodyDepth=-1.f; if(VisionPairDiagnostics.Num()<48)VisionPairDiagnostics.Add(FString::Printf(TEXT("region %d depth skipped: mixed surface support %d/%d"),R.Label,SurfaceSupport,BodyDepths.Num())); }}
 		// 2) Actual 2x2 refinement on original pixels, bounded by depth and budget.
-		TFunction<void(FIntRect,int32)> Split=[&](FIntRect Cell,int32 Depth){if(VisionSubdivisionCells.Num()>=VisionMaximumFineCells)return;VisionSubdivisionCells.Add(Cell);VisionSubdivisionDepths.Add(Depth);if(Depth>=VisionMaximumSubdivisionDepth||Cell.Width()<=VisionMinimumSubdivisionCellPx||Cell.Height()<=VisionMinimumSubdivisionCellPx)return;FVector Mean=FVector::ZeroVector;float MeanL=0.f;int32 N=0;for(int32 Y=Cell.Min.Y;Y<Cell.Max.Y;Y+=4)for(int32 X=Cell.Min.X;X<Cell.Max.X;X+=4){Mean+=Feature(Pixels[Y*W+X]);MeanL+=Bright(Pixels[Y*W+X]);++N;}Mean/=FMath::Max(1,N);MeanL/=FMath::Max(1,N);float Var=0.f;for(int32 Y=Cell.Min.Y;Y<Cell.Max.Y;Y+=5)for(int32 X=Cell.Min.X;X<Cell.Max.X;X+=5)Var+=FVector::Dist(Feature(Pixels[Y*W+X]),Mean)+FMath::Abs(Bright(Pixels[Y*W+X])-MeanL);if(Var/FMath::Max(1,N/2)<.10f)return;const int32 MX=(Cell.Min.X+Cell.Max.X)/2,MY=(Cell.Min.Y+Cell.Max.Y)/2;Split(FIntRect(Cell.Min.X,Cell.Min.Y,MX,MY),Depth+1);Split(FIntRect(MX,Cell.Min.Y,Cell.Max.X,MY),Depth+1);Split(FIntRect(Cell.Min.X,MY,MX,Cell.Max.Y),Depth+1);Split(FIntRect(MX,MY,Cell.Max.X,Cell.Max.Y),Depth+1);};Split(B,0);
-		TArray<uint8> Open;Open.SetNumZeroed(SW*SH);for(int32 Y=TY;Y<BY;++Y)for(int32 X=LX;X<RX;++X)if(!Reg[Y*SW+X]){const FColor&C=Pixels[(Y*Step)*W+X*Step];const bool bRgbContrast=FVector::Dist(Feature(C),R.C)+FMath::Abs(Bright(C)-R.L)>=VisionOpeningMinimumContrast;const float D=bDepthAvailable?LatestDepthCm[(Y*Step)*W+X*Step]:-1.f;const bool bDepthRecess=BodyDepth>0.f&&FMath::IsFinite(D)&&D-BodyDepth>=VisionDepthOpeningContrastCm;Open[Y*SW+X]=(bRgbContrast&&(!bDepthAvailable||bDepthRecess))?1:0;}
+		const int32 SubdivisionStart=VisionSubdivisionCells.Num();TFunction<void(FIntRect,int32)> Split=[&](FIntRect Cell,int32 Depth){if(VisionSubdivisionCells.Num()>=VisionMaximumFineCells)return;VisionSubdivisionCells.Add(Cell);VisionSubdivisionDepths.Add(Depth);if(Depth>=VisionMaximumSubdivisionDepth||Cell.Width()<=VisionMinimumSubdivisionCellPx||Cell.Height()<=VisionMinimumSubdivisionCellPx)return;FVector Mean=FVector::ZeroVector;float MeanL=0.f;int32 N=0;for(int32 Y=Cell.Min.Y;Y<Cell.Max.Y;Y+=4)for(int32 X=Cell.Min.X;X<Cell.Max.X;X+=4){Mean+=Feature(Pixels[Y*W+X]);MeanL+=Bright(Pixels[Y*W+X]);++N;}Mean/=FMath::Max(1,N);MeanL/=FMath::Max(1,N);float Var=0.f;for(int32 Y=Cell.Min.Y;Y<Cell.Max.Y;Y+=5)for(int32 X=Cell.Min.X;X<Cell.Max.X;X+=5)Var+=FVector::Dist(Feature(Pixels[Y*W+X]),Mean)+FMath::Abs(Bright(Pixels[Y*W+X])-MeanL);if(Var/FMath::Max(1,N/2)<.10f)return;const int32 MX=(Cell.Min.X+Cell.Max.X)/2,MY=(Cell.Min.Y+Cell.Max.Y)/2;Split(FIntRect(Cell.Min.X,Cell.Min.Y,MX,MY),Depth+1);Split(FIntRect(MX,Cell.Min.Y,Cell.Max.X,MY),Depth+1);Split(FIntRect(Cell.Min.X,MY,MX,Cell.Max.Y),Depth+1);Split(FIntRect(MX,MY,Cell.Max.X,Cell.Max.Y),Depth+1);};Split(B,0);
+		// The quadtree is not merely debug output: every subdivided cell is
+		// re-evaluated from the original render-target pixels and replaces the
+		// coarse body decision at the corresponding Step=2 samples.  Mixed edge
+		// cells therefore change the downstream opening components/pairs.
+		for(int32 CellIndex=SubdivisionStart;CellIndex<VisionSubdivisionCells.Num();++CellIndex){if(VisionSubdivisionDepths[CellIndex]<=0)continue;const FIntRect&Cell=VisionSubdivisionCells[CellIndex];const int32 CX0=FMath::Clamp(Cell.Min.X/Step,LX,RX),CX1=FMath::Clamp((Cell.Max.X+Step-1)/Step,LX,RX),CY0=FMath::Clamp(Cell.Min.Y/Step,TY,BY),CY1=FMath::Clamp((Cell.Max.Y+Step-1)/Step,TY,BY);for(int32 Y=CY0;Y<CY1;++Y)for(int32 X=CX0;X<CX1;++X){int32 BodyVotes=0,Samples=0;for(int32 PY=Y*Step;PY<FMath::Min(H,Y*Step+Step);++PY)for(int32 PX=X*Step;PX<FMath::Min(W,X*Step+Step);++PX){const FColor&PC=Pixels[PY*W+PX];const float PD=bDepthAvailable?LatestDepthCm[PY*W+PX]:BodyDepth;const bool bColour=Similar(Feature(PC),Bright(PC),R.C,R.L,VisionFineColorDistance,VisionFineBrightnessDistance);const bool bDepthOK=BodyDepth<=0.f||!FMath::IsFinite(PD)||FMath::Abs(PD-BodyDepth)<=VisionDepthBodyContinuityCm;if(bColour&&bDepthOK)++BodyVotes;++Samples;}Reg[Y*SW+X]=(BodyVotes*2>=Samples)?1:0;}}VisionQuadTreeBodyMask=Reg;
+		TArray<uint8> Open;Open.SetNumZeroed(SW*SH);for(int32 Y=TY;Y<BY;++Y)for(int32 X=LX;X<RX;++X)if(!Reg[Y*SW+X]){const FColor&C=Pixels[(Y*Step)*W+X*Step];const bool bRgbContrast=FVector::Dist(Feature(C),R.C)+FMath::Abs(Bright(C)-R.L)>=VisionOpeningMinimumContrast;const float D=bDepthAvailable?LatestDepthCm[(Y*Step)*W+X*Step]:-1.f;const bool bDepthContradiction=BodyDepth>0.f&&FMath::IsFinite(D)&&D<BodyDepth-VisionDepthOpeningContrastCm*.5f;/* Depth supports a recess, but cannot erase a real RGB opening merely because it sees a crossrail at the front. */Open[Y*SW+X]=(bRgbContrast&&!bDepthContradiction)?1:0;}
+		// Retain the current candidate stages even when pair validation later
+		// fails; this makes the first failure artifact inspectable rather than
+		// leaving only a stale last-success mask on the HUD/disk.
+		VisionRegionMask=Reg; VisionBodyMask=Reg; VisionMask=Open; VisionMaskWidth=SW; VisionMaskHeight=SH; VisionBodyBounds=FIntRect(LX,TY,RX,BY);
 		struct FC{FVector2D C,E;int32 A,Contact;bool Edge;};TArray<FC> Cs;TArray<uint8> Work=Open;
-		for(int32 Seed=0;Seed<Work.Num();++Seed)if(Work[Seed]){Queue.Reset();Queue.Add(Seed);Work[Seed]=0;int32 MinX=SW,MaxX=0,MinY=SH,MaxY=0;for(int32 I=0;I<Queue.Num();++I){const int32 P=Queue[I],X=P%SW,Y=P/SW;MinX=FMath::Min(MinX,X);MaxX=FMath::Max(MaxX,X);MinY=FMath::Min(MinY,Y);MaxY=FMath::Max(MaxY,Y);for(int32 DY=-1;DY<=1;++DY)for(int32 DX=-1;DX<=1;++DX){const int32 NX=X+DX,NY=Y+DY;if(NX>=LX&&NX<RX&&NY>=TY&&NY<BY&&Work[NY*SW+NX]){Work[NY*SW+NX]=0;Queue.Add(NY*SW+NX);}}}int32 Contact=0;for(int32 X=MinX;X<=MaxX;++X){Contact+=Reg[FMath::Max(TY,MinY-1)*SW+X];Contact+=Reg[FMath::Min(BY-1,MaxY+1)*SW+X];}for(int32 Y=MinY;Y<=MaxY;++Y){Contact+=Reg[Y*SW+FMath::Max(LX,MinX-1)];Contact+=Reg[Y*SW+FMath::Min(RX-1,MaxX+1)];}const float BW=(MaxX-MinX+1)*Step,BH=(MaxY-MinY+1)*Step;const bool Edge=MinX<=0||MaxX>=SW-1||MinY<=0||MaxY>=SH-1;if(Queue.Num()>=12&&BW>=12&&BH>=8&&Contact>=2&&!Edge)Cs.Add({FVector2D((MinX+MaxX+1)*Step*.5f,(MinY+MaxY+1)*Step*.5f),FVector2D(BW*.5f,BH*.5f),Queue.Num(),Contact,Edge});}
-		for(int32 A=0;A<Cs.Num();++A)for(int32 D=A+1;D<Cs.Num();++D){FC L=Cs[A],RR=Cs[D];if(L.C.X>RR.C.X)Swap(L,RR);const float Sep=RR.C.X-L.C.X,Width=L.E.X+RR.E.X,HD=FMath::Abs(L.C.Y-RR.C.Y),SD=FMath::Abs(L.E.X-RR.E.X)/FMath::Max(1.f,FMath::Max(L.E.X,RR.E.X)),Ratio=Sep/FMath::Max(1.f,Width),Expected=VisionKnownOpeningCenterSpacingCm/FMath::Max(1.f,VisionKnownOpeningWidthCm),MaxHD=FMath::Max(12.f,(L.E.Y+RR.E.Y)*.75f);const bool Good=SD<=.55f&&HD<=MaxHD&&Ratio>=.35f&&Ratio<=4.5f;const float Score=FMath::Clamp(((1.f-SD)+(1.f-HD/MaxHD)+(1.f-FMath::Abs(Ratio-Expected)/Expected)+FMath::Min(1.f,(L.Contact+RR.Contact)/12.f))*.25f,0.f,1.f);VisionPairDiagnostics.Add(FString::Printf(TEXT("region %d: pair contact %d/%d score %.2f%s"),R.Label,L.Contact,RR.Contact,Score,Good?TEXT(""):TEXT(" rejected")));if(Good&&Score>=MinimumOpeningConfidence&&Score>Best){Best=Score;BestLC=L.C;BestRC=RR.C;BestLE=L.E;BestRE=RR.E;BestRegion=Reg;BestBody=Reg;BestOpen=Open;BestBounds=FIntRect(LX,TY,RX,BY);}}
+		for(int32 Seed=0;Seed<Work.Num();++Seed)if(Work[Seed]){Queue.Reset();Queue.Add(Seed);Work[Seed]=0;int32 MinX=SW,MaxX=0,MinY=SH,MaxY=0;for(int32 I=0;I<Queue.Num();++I){const int32 P=Queue[I],X=P%SW,Y=P/SW;MinX=FMath::Min(MinX,X);MaxX=FMath::Max(MaxX,X);MinY=FMath::Min(MinY,Y);MaxY=FMath::Max(MaxY,Y);for(int32 DY=-1;DY<=1;++DY)for(int32 DX=-1;DX<=1;++DX){const int32 NX=X+DX,NY=Y+DY;if(NX>=LX&&NX<RX&&NY>=TY&&NY<BY&&Work[NY*SW+NX]){Work[NY*SW+NX]=0;Queue.Add(NY*SW+NX);}}}int32 Contact=0;for(int32 X=MinX;X<=MaxX;++X){Contact+=Reg[FMath::Max(TY,MinY-1)*SW+X];Contact+=Reg[FMath::Min(BY-1,MaxY+1)*SW+X];}for(int32 Y=MinY;Y<=MaxY;++Y){Contact+=Reg[Y*SW+FMath::Max(LX,MinX-1)];Contact+=Reg[Y*SW+FMath::Min(RX-1,MaxX+1)];}const float BW=(MaxX-MinX+1)*Step,BH=(MaxY-MinY+1)*Step;const bool Edge=MinX<=0||MaxX>=SW-1||MinY<=0||MaxY>=SH-1;const bool bRoiClipped=MinX<=LX||MaxX>=RX-1||MinY<=TY||MaxY>=BY-1;++TotalOpeningComponents;const bool bUsable=Queue.Num()>=12&&BW>=12&&BH>=8&&Contact>=2&&!Edge;if(bUsable){++UsableOpeningComponents;if(bRoiClipped&&VisionPairDiagnostics.Num()<48)VisionPairDiagnostics.Add(FString::Printf(TEXT("region %d opening touches ROI boundary; retained for expanded/global search"),R.Label));Cs.Add({FVector2D((MinX+MaxX+1)*Step*.5f,(MinY+MaxY+1)*Step*.5f),FVector2D(BW*.5f,BH*.5f),Queue.Num(),Contact,Edge});}else if(VisionPairDiagnostics.Num()<48)VisionPairDiagnostics.Add(FString::Printf(TEXT("region %d opening reject: area=%d size=%.0fx%.0f contact=%d edge=%d"),R.Label,Queue.Num(),BW,BH,Contact,Edge));}
+		// Depth geometry rejects dark regions painted on the floor.  The four
+		// material-border samples are unprojected to world space; a floor patch has
+		// a normal close to world up, while a pallet front is approximately vertical.
+		const float GeometryFocal=W/(2.f*FMath::Tan(FMath::DegreesToRadians(PalletSensorFieldOfViewDeg*.5f)));
+		const auto PixelToWorld=[&](int32 PX,int32 PY,FVector& Out)->bool
+		{
+			if (!bDepthAvailable) return false; PX=FMath::Clamp(PX,0,W-1); PY=FMath::Clamp(PY,0,H-1);
+			const float D=LatestDepthCm[PY*W+PX]; if (!FMath::IsFinite(D)||D<DepthMinimumCm||D>DepthMaximumCm) return false;
+			const FVector CameraPoint(D,(PX-W*.5f)*D/GeometryFocal,-(PY-H*.5f)*D/GeometryFocal);
+			Out=DepthFrameCameraTransform.TransformPosition(CameraPoint); return true;
+		};
+		const auto IsFloorPatch=[&](const FC& Candidate,float& OutUpDot,bool& bFrontMeasured)->bool
+		{
+			OutUpDot=0.f; bFrontMeasured=false; FVector Left,Right,Top,Bottom;
+			const int32 X0=FMath::RoundToInt(Candidate.C.X-Candidate.E.X-5.f), X1=FMath::RoundToInt(Candidate.C.X+Candidate.E.X+5.f), Y0=FMath::RoundToInt(Candidate.C.Y-Candidate.E.Y-5.f), Y1=FMath::RoundToInt(Candidate.C.Y+Candidate.E.Y+5.f), MX=FMath::RoundToInt(Candidate.C.X), MY=FMath::RoundToInt(Candidate.C.Y);
+			if (!PixelToWorld(X0,MY,Left)||!PixelToWorld(X1,MY,Right)||!PixelToWorld(MX,Y0,Top)||!PixelToWorld(MX,Y1,Bottom)) return false;
+			bFrontMeasured=true;
+			const FVector Normal=FVector::CrossProduct(Right-Left,Bottom-Top).GetSafeNormal();
+			if (Normal.IsNearlyZero()) return false; OutUpDot=FMath::Abs(FVector::DotProduct(Normal,FVector::UpVector)); return OutUpDot>.65f;
+		};
+		TArray<FC> FrontComponents; FrontComponents.Reserve(Cs.Num());
+		for (const FC& Candidate : Cs)
+		{
+			float UpDot=0.f; bool bFrontMeasured=false;
+			if (!bDepthAvailable || !IsFloorPatch(Candidate,UpDot,bFrontMeasured) && !bFrontMeasured) { if(VisionPairDiagnostics.Num()<48) VisionPairDiagnostics.Add(FString::Printf(TEXT("region %d opening reject: no valid front-rim depth"),R.Label)); }
+			else if (IsFloorPatch(Candidate,UpDot,bFrontMeasured)) { if(VisionPairDiagnostics.Num()<48) VisionPairDiagnostics.Add(FString::Printf(TEXT("region %d opening reject: depth front is floor plane upDot %.2f"),R.Label,UpDot)); }
+			else FrontComponents.Add(Candidate);
+		}
+		Cs=MoveTemp(FrontComponents);
+		for(int32 A=0;A<Cs.Num();++A)for(int32 D=A+1;D<Cs.Num();++D){++TestedOpeningPairs;FC L=Cs[A],RR=Cs[D];if(L.C.X>RR.C.X)Swap(L,RR);const float Sep=RR.C.X-L.C.X,Width=L.E.X+RR.E.X,HD=FMath::Abs(L.C.Y-RR.C.Y),SD=FMath::Abs(L.E.X-RR.E.X)/FMath::Max(1.f,FMath::Max(L.E.X,RR.E.X)),Ratio=Sep/FMath::Max(1.f,Width),Expected=VisionKnownOpeningCenterSpacingCm/FMath::Max(1.f,VisionKnownOpeningWidthCm),MaxHD=FMath::Max(12.f,(L.E.Y+RR.E.Y)*.75f);const bool Good=SD<=.55f&&HD<=MaxHD&&Ratio>=.35f&&Ratio<=4.5f;const float Score=FMath::Clamp(((1.f-SD)+(1.f-HD/MaxHD)+(1.f-FMath::Abs(Ratio-Expected)/Expected)+FMath::Min(1.f,(L.Contact+RR.Contact)/12.f))*.25f,0.f,1.f);VisionPairDiagnostics.Add(FString::Printf(TEXT("region %d pair: contact %d/%d widthDiff %.2f level %.1f/%.1f ratio %.2f score %.2f%s"),R.Label,L.Contact,RR.Contact,SD,HD,MaxHD,Ratio,Score,Good?TEXT(""):TEXT(" rejected")));if(Good&&Score>=MinimumOpeningConfidence&&Score>Best){Best=Score;BestLC=L.C;BestRC=RR.C;BestLE=L.E;BestRE=RR.E;BestRegion=Reg;BestBody=Reg;BestOpen=Open;BestBounds=FIntRect(LX,TY,RX,BY);}}
 	}
 	if(Best<MinimumOpeningConfidence)
 	{
 		++LockedTargetMissFrames;
-		LastVisionStageStatus=FString::Printf(TEXT("fine regions=%d; opening components/pairs=%d; depth=%s"), CandidateRegions.Num(), VisionPairDiagnostics.Num(), bDepthAvailable?TEXT("available"):TEXT("unavailable"));
+		if (LastVisionSuccessSensorFrameId >= 0 && FirstVisionFailureAfterSuccessSensorFrameId < 0) FirstVisionFailureAfterSuccessSensorFrameId = SensorFrameId;
+		LastVisionFineMs = static_cast<float>((FPlatformTime::Seconds()-FineStartSeconds)*1000.0);
+		LastVisionTotalMs = static_cast<float>((FPlatformTime::Seconds()-VisionStartSeconds)*1000.0); LastVisionMaxMs = FMath::Max(LastVisionMaxMs, LastVisionTotalMs);
+		LastVisionStageStatus=FString::Printf(TEXT("fine regions=%d/%d; opening components=%d usable=%d pairs=%d; depth=%s"), FineCandidates.Num(), CandidateRegions.Num(), TotalOpeningComponents, UsableOpeningComponents, TestedOpeningPairs, bDepthAvailable?TEXT("available"):TEXT("unavailable"));
 		LastVisionFailureReason=FString::Printf(TEXT("No verified opening pair (%s; tracked target miss %d; full/coarse search retained)"), *LastVisionStageStatus, LockedTargetMissFrames);
 	if (bSavedLastValidVisionArtifact && !bSavedFirstVisionFailureArtifact) { SaveVisionTransitionArtifacts(LastSuccessfulVisionPixels, true); SaveVisionTransitionArtifacts(Pixels, false); bSavedFirstVisionFailureArtifact = true; }
 		UE_LOG(LogTemp, Warning, TEXT("[R16HD_AUTO_VISION] target=locked frame=%d result=failed misses=%d lastAge=%.2fs reason=%s"), LastVisionFrameNumber, LockedTargetMissFrames, LastTrackedOpeningTime > -BIG_NUMBER*.5f ? GetWorld()->GetTimeSeconds()-LastTrackedOpeningTime : -1.f, *LastVisionFailureReason);
 		return;
 	}
-	VisionRegionMask=MoveTemp(BestRegion);VisionBodyMask=MoveTemp(BestBody);VisionMask=MoveTemp(BestOpen);VisionMaskWidth=SW;VisionMaskHeight=SH;VisionBodyBounds=BestBounds;LastVisionCandidateCount=2;VisionCandidates.Add({BestLC,BestLE,0,true,false,TEXT("selected opening")});VisionCandidates.Add({BestRC,BestRE,0,true,false,TEXT("selected opening")});
+	LastVisionFineMs = static_cast<float>((FPlatformTime::Seconds()-FineStartSeconds)*1000.0);
+	LastVisionTotalMs = static_cast<float>((FPlatformTime::Seconds()-VisionStartSeconds)*1000.0); LastVisionMaxMs = FMath::Max(LastVisionMaxMs, LastVisionTotalMs);
+	VisionRegionMask=MoveTemp(BestRegion);VisionBodyMask=MoveTemp(BestBody);VisionMask=MoveTemp(BestOpen);VisionMaskWidth=SW;VisionMaskHeight=SH;VisionBodyBounds=BestBounds;VisionCandidates.Add({BestLC,BestLE,0,true,false,TEXT("selected opening")});VisionCandidates.Add({BestRC,BestRE,0,true,false,TEXT("selected opening")});
 	const float Sep=BestRC.X-BestLC.X,Focal=W/(2.f*FMath::Tan(FMath::DegreesToRadians(PalletSensorFieldOfViewDeg*.5f)));OpeningDetection.bValid=true;OpeningDetection.Confidence=Best;OpeningDetection.TimestampSeconds=GetWorld()->GetTimeSeconds();bLastVisionHadValidPair=true;OpeningDetection.LeftCenter=BestLC;OpeningDetection.RightCenter=BestRC;OpeningDetection.LeftExtent=BestLE;OpeningDetection.RightExtent=BestRE;OpeningDetection.EstimatedDistanceCm=VisionKnownOpeningCenterSpacingCm*Focal/FMath::Max(1.f,Sep);OpeningDetection.MonocularDistanceCm=OpeningDetection.EstimatedDistanceCm;const float CenterX=(BestLC.X+BestRC.X)*.5f;OpeningDetection.EstimatedLateralCm=PalletSensorLateralOffsetFromCenterCm+(CenterX-W*.5f)*OpeningDetection.EstimatedDistanceCm/Focal;if (bDepthAvailable) UpdateDepthForOpeningDetection(); if (!OpeningDetection.bDepthValid || FMath::Abs(OpeningDetection.FrontOpticalDepthCm-OpeningDetection.MonocularDistanceCm)>DepthRgbDisagreementCm) { LastVisionFailureReason=FString::Printf(TEXT("RGB pair valid; depth unavailable/discordant — automatic motion held: mono %.1fcm depth %s"),OpeningDetection.MonocularDistanceCm,OpeningDetection.bDepthValid ? *FString::Printf(TEXT("%.1fcm"),OpeningDetection.FrontOpticalDepthCm) : TEXT("unmeasured")); }
 	// Reject a discontinuous candidate rather than silently switching targets.
 	if ((AutoPickupState == EAutoPickupState::Approaching || AutoPickupState == EAutoPickupState::Aligning) && LastTrackedOpeningDetection.bValid)
@@ -1168,7 +1362,7 @@ void AAutomatedForklift::ProcessOpeningVision()
 			return;
 		}
 	}
-	LastVisionStageStatus=FString::Printf(TEXT("RGB body/opening/pair accepted; depth %s"), OpeningDetection.bDepthValid?TEXT("front verified"):TEXT("not usable for control")); LastTrackedOpeningDetection=OpeningDetection; LastTrackedOpeningTime=OpeningDetection.TimestampSeconds; LastTrackedActorLocation=GetActorLocation(); LastTrackedOpeningSeparationPx=Sep; LockedTargetMissFrames=0;
+	LastVisionStageStatus=FString::Printf(TEXT("RGB body/opening/pair accepted; depth %s"), OpeningDetection.bDepthValid?TEXT("front verified"):TEXT("not usable for control")); LastTrackedOpeningDetection=OpeningDetection; LastTrackedOpeningTime=OpeningDetection.TimestampSeconds; LastTrackedActorLocation=GetActorLocation(); LastTrackedOpeningSeparationPx=Sep; LockedTargetMissFrames=0; LastVisionSuccessSensorFrameId=SensorFrameId; FirstVisionFailureAfterSuccessSensorFrameId=-1;
 	LastSuccessfulVisionPixels = Pixels; bSavedLastValidVisionArtifact = true; bSavedFirstVisionFailureArtifact = false;
 	UE_LOG(LogTemp, Log, TEXT("[R16HD_AUTO_VISION] target=locked frame=%d pair=(%.0f,%.0f)-(%.0f,%.0f) dist=%.1f lateral=%.1f confidence=%.2f"), LastVisionFrameNumber, BestLC.X, BestLC.Y, BestRC.X, BestRC.Y, OpeningDetection.EstimatedDistanceCm, OpeningDetection.EstimatedLateralCm, Best);
 }
@@ -1189,7 +1383,7 @@ void AAutomatedForklift::UpdateAutoPickup(float DeltaSeconds)
 	ClearAutomaticCommands();
 	AutoPickupStateElapsed += DeltaSeconds;
 	const bool bFresh = OpeningDetection.bValid && OpeningDetection.bDepthValid && GetWorld()->GetTimeSeconds() - OpeningDetection.TimestampSeconds <= VisionMaximumFrameAgeSeconds;
-	if (AutoPickupState == EAutoPickupState::Detecting) { if (bFresh) ++OpeningStableFrames; else OpeningStableFrames = 0; AutoPickupStatus = !OpeningDetection.bValid ? FString::Printf(TEXT("RGB 삽입구 후보 %d개 — 유효한 쌍 없음"), LastVisionCandidateCount) : (!OpeningDetection.bDepthValid ? FString::Printf(TEXT("RGB 쌍은 확인됨 — Depth 대기/실패: %s"), *LastDepthReadStatus) : FString::Printf(TEXT("삽입구 쌍 확인 — 안정 프레임 %d/3"), OpeningStableFrames)); if (OpeningStableFrames >= 3) { LockedOpeningDetection = OpeningDetection; SetAutoPickupState(EAutoPickupState::Approaching, TEXT("안정적인 RGB-D 삽입구 쌍 잠금 — 차체 접근 및 방향 정렬 시작")); } else if (AutoPickupStateElapsed > 5.f) CancelAutoPickup(OpeningDetection.bValid && !OpeningDetection.bDepthValid ? TEXT("RGB 쌍은 있으나 유효한 SceneDepth가 없음 — 자동 제어 보류") : TEXT("유효한 두 삽입구를 찾지 못함 — 수동 접근 위치 조정 필요"), true); return; }
+	if (AutoPickupState == EAutoPickupState::Detecting) { if (bFresh) { if (LastStableOpeningVisionFrame != LastVisionFrameNumber) { ++OpeningStableFrames; LastStableOpeningVisionFrame = LastVisionFrameNumber; } } else { OpeningStableFrames = 0; LastStableOpeningVisionFrame = -1; } AutoPickupStatus = !OpeningDetection.bValid ? FString::Printf(TEXT("RGB 삽입구 후보 %d개 — 유효한 쌍 없음"), LastVisionCandidateCount) : (!OpeningDetection.bDepthValid ? FString::Printf(TEXT("RGB 쌍은 확인됨 — Depth 대기/실패: %s"), *LastDepthReadStatus) : FString::Printf(TEXT("삽입구 쌍 확인 — 서로 다른 프레임 안정 %d/3"), OpeningStableFrames)); if (OpeningStableFrames >= 3) { LockedOpeningDetection = OpeningDetection; bPreApproachHeightAlignment = true; SetAutoPickupState(EAutoPickupState::Aligning, TEXT("안정 RGB-D 쌍 잠금 — 차체 정지 상태에서 포크 높이·좌우 사전 정렬")); } else if (AutoPickupStateElapsed > 5.f) CancelAutoPickup(OpeningDetection.bValid && !OpeningDetection.bDepthValid ? TEXT("RGB 쌍은 있으나 유효한 SceneDepth가 없음 — 자동 제어 보류") : TEXT("유효한 두 삽입구를 찾지 못함 — 수동 접근 위치 조정 필요"), true); return; }
 	if (AutoPickupState == EAutoPickupState::Approaching)
 	{
 		if (!bFresh)
@@ -1206,19 +1400,44 @@ void AAutomatedForklift::UpdateAutoPickup(float DeltaSeconds)
 		// than making its delayed value cross zero on a later frame.
 		if (AutoPickupStateElapsed < .15f || FMath::Abs(RawLateral-FilteredApproachLateralCm)>10.f || RawLateral*FilteredApproachLateralCm<0.f && FMath::Abs(RawLateral)>3.f) FilteredApproachLateralCm = RawLateral;
 		else FilteredApproachLateralCm = FMath::Lerp(FilteredApproachLateralCm, RawLateral, .35f);
-		const float ForkTipAhead = GetForkTipAheadOfSensorCm();
-		const float ForkTipRemaining = OpeningDetection.EstimatedDistanceCm - ForkTipAhead;
+		float ForkTipRemaining, RemainingAdvance, ReachRemaining, ChassisAdvance, ForkLateralError, ForkLiftCorrection;
+		if (!ComputeAutoInsertionGeometry(OpeningDetection, ForkTipRemaining, RemainingAdvance, ReachRemaining, ChassisAdvance, ForkLateralError, ForkLiftCorrection))
+		{
+			CancelAutoPickup(TEXT("접근 기하 계산 실패 — 현재 ForkCarriage RGB-D 좌표 미측정"), true); return;
+		}
+		AutoRequiredForkAdvanceCm = RemainingAdvance;
+		AutoChassisAdvanceNeededCm = ChassisAdvance;
+		AutoApproachRequiredTravelCm = ChassisAdvance;
 		LastAutoCameraDistanceCm = OpeningDetection.EstimatedDistanceCm;
 		LastAutoForkTipRemainingCm = ForkTipRemaining;
-		LastAutoApproachTravelCm = FVector::Dist(GetActorLocation(), AutoApproachStartLocation);
-		const bool bAtApproachDistance = ForkTipRemaining <= AutoApproachForkTipClearanceCm;
-		const bool bWithinForkRange = FMath::Abs(FilteredApproachLateralCm) <= Dimensions.ForkSideShiftCm + AutoApproachLateralToleranceCm;
-		if (bAtApproachDistance && bWithinForkRange) { SetAutoPickupState(EAutoPickupState::Aligning, TEXT("차체 접근 완료 — 포크 높이·좌우 정렬 시작")); return; }
-		// The travel budget is derived from this detection, not a fixed 260 cm
-		// limit.  A pallet initially visible at 339 cm legitimately needs more
-		// than 260 cm of chassis travel before the fork tips reach its front.
-		const float ApproachTravelLimit = AutoApproachRequiredTravelCm + 35.f;
-		if (ForkTipRemaining < -10.f || LastAutoApproachTravelCm > ApproachTravelLimit) { CancelAutoPickup(TEXT("접근 거리 범위를 벗어남"), true); return; }
+		LastAutoApproachTravelCm = FVector::DotProduct(GetActorLocation() - AutoApproachStartLocation, AutoApproachStartForward);
+		const float DirectionErrorDeg = FMath::Abs(FMath::RadiansToDegrees(OpeningDetection.FrontYawErrorRad));
+		const bool bDirectionNeedsChassis = DirectionErrorDeg > AutoDirectionToleranceDeg;
+		const bool bChassisCloseEnough = AutoChassisAdvanceNeededCm <= AutoChassisApproachToleranceCm;
+		const bool bWithinForkRange = FMath::Abs(ForkLateralError) <= Dimensions.ForkSideShiftCm + AutoApproachLateralToleranceCm;
+		if (bChassisCloseEnough && bWithinForkRange && !bDirectionNeedsChassis)
+		{
+			SetAutoPickupState(EAutoPickupState::Aligning, TEXT("차체 접근 완료 — R/F 행정과 포크 높이·좌우 정렬 시작"));
+			return;
+		}
+		// Movement beyond this plan means either the observation changed or a
+		// physical obstacle/sweep prevented the predicted approach.  Stop rather
+		// than converting the old 14 cm fixed target into an overrun.
+		// A fresh RGB-D observation can require a genuine replan (for example
+		// after direction correction), but only then do we rebase the travel
+		// origin/budget.  Cumulative travel is never compared with a decreasing
+		// "current remaining" distance.
+		if (AutoChassisAdvanceNeededCm > FMath::Max(5.f, AutoApproachTravelBudgetCm - LastAutoApproachTravelCm))
+		{
+			AutoApproachStartLocation = GetActorLocation(); AutoApproachStartForward = GetActorForwardVector();
+			AutoApproachPlannedTravelCm = AutoChassisAdvanceNeededCm; AutoApproachTravelBudgetCm = AutoApproachPlannedTravelCm + 35.f;
+			LastAutoApproachTravelCm = 0.f; ++AutoApproachReplanCount;
+			UE_LOG(LogTemp, Warning, TEXT("[R16HD_AUTO_APPROACH] replan=%d remaining=%.1fcm reason=fresh RGB-D geometry changed"), AutoApproachReplanCount, AutoChassisAdvanceNeededCm);
+		}
+		if (ForkTipRemaining < -AutoRequiredInsertionCm || LastAutoApproachTravelCm > AutoApproachTravelBudgetCm)
+		{
+			CancelAutoPickup(TEXT("접근 계획 범위 초과 — 포크끝/리치/삽입량 재측정 필요"), true); return;
+		}
 		if (FMath::Abs(FilteredApproachLateralCm) <= AutoApproachLateralDeadbandCm) bApproachSteeringInDeadband = true;
 		else if (FMath::Abs(FilteredApproachLateralCm) >= AutoApproachLateralHysteresisCm) bApproachSteeringInDeadband = false;
 		const float TravelDelta = LastAutoApproachTravelCm - LastAutoApproachTravelForHeadingCm;
@@ -1230,53 +1449,137 @@ void AAutomatedForklift::UpdateAutoPickup(float DeltaSeconds)
 		const float HeadingSteer = OpeningDetection.bDepthValid ? FMath::Clamp(-OpeningDetection.FrontYawErrorRad * AutoApproachHeadingSteerGain, -.12f, .12f) : 0.f;
 		const float DesiredSteer = bAutoApproachStraightDiagnostic ? 0.f : FMath::Clamp(LateralSteer + HeadingSteer, -AutoApproachMaximumSteer, AutoApproachMaximumSteer);
 		AutoSteerInput = FMath::FInterpConstantTo(LastAppliedSteerInput, DesiredSteer, DeltaSeconds, AutoApproachSteerRatePerSecond);
-		const float NearScale = FMath::Clamp(ForkTipRemaining / 90.f, .35f, 1.f);
+		const float NearScale = FMath::Clamp(AutoChassisAdvanceNeededCm / 90.f, .25f, 1.f);
 		AutoDriveInput = AutoApproachSpeedScale * NearScale;
 		const float Now = GetWorld()->GetTimeSeconds();
 		if (OpeningDetection.EstimatedDistanceCm < AutoApproachLastProgressDistanceCm - 4.f) { AutoApproachLastProgressDistanceCm = OpeningDetection.EstimatedDistanceCm; AutoApproachLastProgressTime = Now; }
 		bLastAutoApproachBlocked = AutoPickupStateElapsed > 1.0f && LastAutoApproachTravelCm < 2.f;
-		AutoPickupStatus = FString::Printf(TEXT("접근 중 — 카메라 %.0fcm, 포크끝 잔여 %.0fcm, 실제 이동 %.1f/%.1fcm, 조향 %.2f"), OpeningDetection.EstimatedDistanceCm, ForkTipRemaining, LastAutoApproachTravelCm, AutoApproachRequiredTravelCm, AutoSteerInput);
+		AutoPickupStatus = FString::Printf(TEXT("접근 중 — 필요 포크전진 %.0fcm, R/F 잔여 %.0fcm, 차체 추가 %.0fcm, 방향 %.1fdeg"), AutoRequiredForkAdvanceCm, ReachRemaining, AutoChassisAdvanceNeededCm, DirectionErrorDeg);
 		UE_LOG(LogTemp, Log, TEXT("[R16HD_AUTO_APPROACH] rawLat=%.2f filteredLat=%.2f heading=%.3frad lateralCmd=%.3f headingCmd=%.3f steer=%.3f yaw=%.3f travel=%.1f dist=%.1f"), RawLateral, FilteredApproachLateralCm, AutoApproachHeadingErrorRad, LateralSteer, HeadingSteer, AutoSteerInput, LastAutoYawDeltaDeg, LastAutoApproachTravelCm, OpeningDetection.EstimatedDistanceCm);
 		if (bLastAutoApproachBlocked) CancelAutoPickup(TEXT("접근 명령은 적용됐으나 차체가 이동하지 않음 — Sweep/충돌 로그 확인 필요"), true);
 		else if (LastAutoApproachTravelCm > 35.f && Now - AutoApproachLastProgressTime > 2.5f) CancelAutoPickup(TEXT("차체는 이동했지만 영상 거리 갱신이 없음 — 같은 목표 재인식 필요"), true);
-		else { const float ExpectedSeconds = FMath::Max(3.f, AutoApproachRequiredTravelCm / FMath::Max(1.f, Motion.ForwardSpeedCmPerSec * AutoApproachSpeedScale) + 2.f); if (AutoPickupStateElapsed > ExpectedSeconds) CancelAutoPickup(TEXT("접근 시간 예산 초과 — 실제 이동/영상 거리 진단 확인 필요"), true); }
+		else
+		{
+			// Time is a diagnostic guard derived from *remaining* chassis distance
+			// and the current commanded (decelerated) speed.  It cannot fail a
+			// moving approach merely because its original range estimate was wrong.
+			const float CommandSpeed = FMath::Max(1.f, Motion.ForwardSpeedCmPerSec * FMath::Abs(AutoDriveInput));
+			const float DynamicBudget = FMath::Max(4.f, AutoChassisAdvanceNeededCm / CommandSpeed + 3.f);
+			if (AutoPickupStateElapsed > DynamicBudget && Now - AutoApproachLastProgressTime > 1.5f)
+				CancelAutoPickup(TEXT("접근 진행 정지 — 실제 이동/깊이 거리 갱신이 계획과 일치하지 않음"), true);
+		}
 		return;
 	}
 	if (AutoPickupState == EAutoPickupState::Aligning)
 	{
-		if (!bFresh || OpeningDetection.EstimatedDistanceCm < 70.f || OpeningDetection.EstimatedDistanceCm > 260.f) { CancelAutoPickup(TEXT("영상 거리 또는 신뢰도가 범위를 벗어남 — 수동 접근 위치 조정 필요"), true); return; }
-		const float LateralError = OpeningDetection.EstimatedLateralCm - SideShiftCm;
-		const float Focal = PalletSensorWidthPx / (2.f * FMath::Tan(FMath::DegreesToRadians(PalletSensorFieldOfViewDeg * .5f)));
-		const float OpeningCenterY = (OpeningDetection.LeftCenter.Y + OpeningDetection.RightCenter.Y) * .5f;
-		// Downscreen means lower in the camera image.  Moving the carriage down
-		// (negative lift) moves the opening toward the calibrated target row.
-		const float LiftCorrection = -(OpeningCenterY - PalletSensorHeightPx * AutoTargetOpeningCenterYRatio) * OpeningDetection.EstimatedDistanceCm / Focal;
+		if (!bFresh) { CancelAutoPickup(TEXT("정렬 중 현재 RGB-D 측정 상실 — 오래된 구멍 좌표로 포크를 움직이지 않음"), true); return; }
+		const float DirectionErrorDeg = FMath::Abs(FMath::RadiansToDegrees(OpeningDetection.FrontYawErrorRad));
+		if (DirectionErrorDeg > AutoDirectionToleranceDeg) { SetAutoPickupState(EAutoPickupState::Approaching, TEXT("전면 방향 오차는 사이드시프트로 보정 불가 — 차체 방향 재정렬")); return; }
+		const float UsableOpeningWidth = VisionKnownOpeningWidthCm - 2.f * AutoForkOpeningSideClearanceCm;
+		if (Dimensions.ForkWidthCm > UsableOpeningWidth) { CancelAutoPickup(FString::Printf(TEXT("포크 폭 %.1fcm이 입구 유효폭 %.1fcm보다 큼"), Dimensions.ForkWidthCm, UsableOpeningWidth), true); return; }
+		float ForkTipToFront, RemainingAdvance, ReachRemaining, ChassisAdvance, LateralError, LiftCorrection;
+		if (!ComputeAutoInsertionGeometry(OpeningDetection, ForkTipToFront, RemainingAdvance, ReachRemaining, ChassisAdvance, LateralError, LiftCorrection))
+		{
+			CancelAutoPickup(TEXT("정렬 기하 계산 실패 — 현재 ForkCarriage 좌표 미측정"), true); return;
+		}
 		LastAlignmentLateralErrorCm = LateralError; LastAlignmentLiftCorrectionCm = LiftCorrection;
-		if (FMath::Abs(OpeningDetection.EstimatedLateralCm) > Dimensions.ForkSideShiftCm) { SetAutoPickupState(EAutoPickupState::Approaching, TEXT("포크 좌우 행정을 초과 — 차체 접근·방향 정렬로 복귀")); return; }
+		const float LeftHeightCm = OpeningDetection.LeftMeasuredOpeningHeightCm > 1.f ? OpeningDetection.LeftMeasuredOpeningHeightCm : (OpeningDetection.MeasuredOpeningHeightCm > 1.f ? OpeningDetection.MeasuredOpeningHeightCm : VisionKnownOpeningHeightCm);
+		const float RightHeightCm = OpeningDetection.RightMeasuredOpeningHeightCm > 1.f ? OpeningDetection.RightMeasuredOpeningHeightCm : (OpeningDetection.MeasuredOpeningHeightCm > 1.f ? OpeningDetection.MeasuredOpeningHeightCm : VisionKnownOpeningHeightCm);
+		const FVector LeftOpening = OpeningDetection.LeftMeasuredOpeningHeightCm > 1.f ? OpeningDetection.LeftOpeningCenterInForkCm : OpeningDetection.OpeningCenterInForkCm;
+		const FVector RightOpening = OpeningDetection.RightMeasuredOpeningHeightCm > 1.f ? OpeningDetection.RightOpeningCenterInForkCm : OpeningDetection.OpeningCenterInForkCm;
+		const float LeftBottom = LeftOpening.Z - LeftHeightCm * .5f, LeftTop = LeftOpening.Z + LeftHeightCm * .5f;
+		const float RightBottom = RightOpening.Z - RightHeightCm * .5f, RightTop = RightOpening.Z + RightHeightCm * .5f;
+		LastMeasuredOpeningBottomCm = FMath::Max(LeftBottom, RightBottom);
+		LastMeasuredOpeningTopCm = FMath::Min(LeftTop, RightTop);
+		// Fork top: bottom clearance and its physical thickness occupy the lower
+		// aperture limit; the upper clearance occupies the upper limit once.
+		LastAllowedForkTopMinCm = LastMeasuredOpeningBottomCm + AutoForkOpeningBottomClearanceCm + Dimensions.ForkThicknessCm;
+		LastAllowedForkTopMaxCm = LastMeasuredOpeningTopCm - AutoForkOpeningBottomClearanceCm;
+		LastForkTopLocalCm = (LastAllowedForkTopMinCm + LastAllowedForkTopMaxCm) * .5f - LiftCorrection;
+		LastHeightTargetLiftCm = LiftCm + LiftCorrection;
+		if (LastAllowedForkTopMinCm > LastAllowedForkTopMaxCm)
+		{
+			if (LastStableAlignmentVisionFrame != LastVisionFrameNumber) { ++InvalidHeightRangeVisionFrames; LastStableAlignmentVisionFrame=LastVisionFrameNumber; }
+			AutoPickupStatus=FString::Printf(TEXT("입구 높이 범위 역전 재측정 %d/3 — 하단 %.1f 상단 %.1f, 포크/여유 필요 %.1f"),InvalidHeightRangeVisionFrames,LastMeasuredOpeningBottomCm,LastMeasuredOpeningTopCm,Dimensions.ForkThicknessCm+2.f*AutoForkOpeningBottomClearanceCm);
+			if (InvalidHeightRangeVisionFrames >= 3) CancelAutoPickup(TEXT("서로 다른 RGB-D 프레임 3개에서 삽입구 높이가 포크 두께와 여유를 수용하지 못함"), true);
+			return;
+		}
+		InvalidHeightRangeVisionFrames=0;
+		if (FMath::Abs(LateralError) > Dimensions.ForkSideShiftCm) { SetAutoPickupState(EAutoPickupState::Approaching, TEXT("포크 좌우 행정을 초과 — 차체 접근·방향 정렬로 복귀")); return; }
 		if (LiftCm + LiftCorrection < -AutoVerticalToleranceCm || LiftCm + LiftCorrection > RequiredLiftStrokeCm + AutoVerticalToleranceCm) { CancelAutoPickup(TEXT("포크 인양 범위를 벗어남 — 수동 높이 조정 필요"), true); return; }
 		AutoSideShiftInput = FMath::IsNearlyZero(LateralError, 1.2f) ? 0.f : FMath::Sign(LateralError) * .7f;
 		AutoLiftInput = FMath::IsNearlyZero(LiftCorrection, AutoVerticalToleranceCm) ? 0.f : FMath::Sign(LiftCorrection) * .15f;
-		if (FMath::Abs(LateralError) <= 1.2f && FMath::Abs(LiftCorrection) <= AutoVerticalToleranceCm) ++AlignmentStableFrames; else AlignmentStableFrames = 0;
-		AutoPickupStatus = FString::Printf(TEXT("정렬 중 — 좌우 %.1fcm, 높이 %.1fcm"), LateralError, LiftCorrection);
+		if (FMath::Abs(LateralError) <= 1.2f && FMath::Abs(LiftCorrection) <= AutoVerticalToleranceCm) { if (LastStableAlignmentVisionFrame != LastVisionFrameNumber) { ++AlignmentStableFrames; LastStableAlignmentVisionFrame = LastVisionFrameNumber; } } else { AlignmentStableFrames = 0; LastStableAlignmentVisionFrame = -1; }
+		AutoPickupStatus = FString::Printf(TEXT("정렬 중 — 포크기준 좌우 %.1fcm, 높이 %.1fcm, 방향 %.1fdeg"), LateralError, LiftCorrection, DirectionErrorDeg);
 		if (AlignmentStableFrames >= 3)
 		{
 			AutoSideShiftInput = AutoLiftInput = 0.f; LockedOpeningDetection = OpeningDetection;
-			const FVector LeftTip = LeftForkCollision->GetComponentTransform().TransformPosition(FVector(LeftForkCollision->GetScaledBoxExtent().X, 0.f, 0.f));
-			const FVector RightTip = RightForkCollision->GetComponentTransform().TransformPosition(FVector(RightForkCollision->GetScaledBoxExtent().X, 0.f, 0.f));
-			const float ForkTipAheadOfCameraCm = FVector::DotProduct((LeftTip + RightTip) * .5f - PalletSensorCapture->GetComponentLocation(), PalletSensorCapture->GetForwardVector());
-			const float ApproachToPalletFrontCm = LockedOpeningDetection.EstimatedDistanceCm - ForkTipAheadOfCameraCm;
-			if (ApproachToPalletFrontCm < 5.f || ApproachToPalletFrontCm > AutoMaximumApproachTravelCm)
+			if (bPreApproachHeightAlignment)
 			{
-				CancelAutoPickup(FString::Printf(TEXT("영상 거리 %.0fcm와 포크 끝 오프셋 %.0fcm가 맞지 않음 — 수동 접근 위치 조정 필요"), LockedOpeningDetection.EstimatedDistanceCm, ForkTipAheadOfCameraCm), true); return;
+				bPreApproachHeightAlignment = false;
+				SetAutoPickupState(EAutoPickupState::Approaching, TEXT("포크 높이·좌우 사전 정렬 안정 — 차체 접근 시작")); return;
 			}
-			AutoRequiredForwardTravelCm = ApproachToPalletFrontCm + AutoRequiredInsertionCm;
-			AutoMaximumForwardTravelCm = ApproachToPalletFrontCm + AutoMaximumInsertionCm;
-			AutoInsertionStartLocation = GetActorLocation();
-			SetAutoPickupState(EAutoPickupState::Inserting, FString::Printf(TEXT("정렬 완료 — 전면까지 %.0fcm, 목표 삽입 깊이 %.0fcm"), ApproachToPalletFrontCm, AutoRequiredInsertionCm));
+			float ForkTipToPalletFrontCm, ReachNeededCm, ReachAvailableCm, ChassisNeeded, VerifiedLateral, VerifiedLift;
+			if (!ComputeAutoInsertionGeometry(LockedOpeningDetection, ForkTipToPalletFrontCm, ReachNeededCm, ReachAvailableCm, ChassisNeeded, VerifiedLateral, VerifiedLift)) { CancelAutoPickup(TEXT("삽입 전 최종 기하 검증 실패"), true); return; }
+			if (ReachNeededCm > ReachAvailableCm + AutoChassisApproachToleranceCm)
+			{
+				SetAutoPickupState(EAutoPickupState::Approaching, FString::Printf(TEXT("R/F 잔여 %.1fcm < 필요 %.1fcm — 차체 %.1fcm 추가 접근"), ReachAvailableCm, ReachNeededCm, ReachNeededCm-ReachAvailableCm)); return;
+			}
+			AutoRequiredForkAdvanceCm = ReachNeededCm;
+			AutoReachTargetCm = FMath::Clamp(ReachCm + ReachNeededCm, 0.f, Dimensions.ReachTravelCm);
+			AutoInsertionStartReachCm = ReachCm;
+			AutoRequiredForwardTravelCm = ReachNeededCm;
+			AutoMaximumForwardTravelCm = FMath::Min(ReachAvailableCm, FMath::Max(ReachNeededCm, ForkTipToPalletFrontCm + AutoMaximumInsertionCm));
+			SetAutoPickupState(EAutoPickupState::Inserting, FString::Printf(TEXT("정렬 완료 — 차체 정지, R/F %.1fcm 전진 후 물리 인양"), ReachNeededCm));
 		}
 		if (AutoPickupStateElapsed > 6.f) CancelAutoPickup(TEXT("인양·좌우 정렬이 안정화되지 않음"), true); return;
 	}
-	if (AutoPickupState == EAutoPickupState::Inserting) { AutoDriveInput = AutoInsertSpeedScale; const float Travel = FVector::Dist(GetActorLocation(), AutoInsertionStartLocation); LastAutoInsertionTravelCm = Travel; bLastAutoDriveBlocked = AutoPickupStateElapsed > 1.f && FMath::Abs(CurrentForwardSpeedCmPerSec) < 2.f; AutoPickupStatus = bLastAutoDriveBlocked ? TEXT("삽입 중 — 전진 명령은 있으나 실제 이동 없음") : FString::Printf(TEXT("삽입 중 — 실제 전진 %.1f / 목표 %.1fcm"), Travel, AutoRequiredForwardTravelCm); if (Travel >= AutoRequiredForwardTravelCm) { AutoLiftStartCm = LiftCm; bool bBaselineSet = false; for (TActorIterator<AWoodPallet> It(GetWorld()); It; ++It) { AutoLiftPalletStartZ = (*It)->GetActorLocation().Z; bBaselineSet = true; break; } if (!bBaselineSet) for (TActorIterator<APallet> It(GetWorld()); It; ++It) { AutoLiftPalletStartZ = (*It)->GetActorLocation().Z; break; } SetAutoPickupState(EAutoPickupState::Lifting, TEXT("영상 거리+포크 끝 오프셋 기준 삽입 깊이 도달 — 물리 접촉 인양 시작")); } else if (Travel > AutoMaximumForwardTravelCm || AutoPickupStateElapsed > 12.f || bLastAutoDriveBlocked) CancelAutoPickup(TEXT("삽입이 막혔거나 거리/시간 한계 도달"), true); return; }
+	if (AutoPickupState == EAutoPickupState::Inserting)
+	{
+		// The chassis stays still here.  R/F alone advances the real fork
+		// collision bodies; the dynamic pallet is not pre-blocked, so its lift
+		// remains a physical contact result rather than an attachment shortcut.
+		AutoDriveInput = 0.f;
+		AutoSteerInput = 0.f;
+		AutoReachInput = AutoInsertSpeedScale;
+		const float Travel = FMath::Max(0.f, ReachCm - AutoInsertionStartReachCm);
+		LastAutoInsertionTravelCm = Travel;
+		// Before the tips have entered, losing the newly observed target is not
+		// an occlusion and must stop the operation.  After a short verified entry,
+		// the fork/camera may hide the openings; only the prevalidated straight
+		// path and measured reach are then allowed, never a stale image position.
+		const bool bFreshInsertObservation = bFresh;
+		const bool bExpectedForkOcclusion = Travel >= FMath::Min(5.f, AutoRequiredForkAdvanceCm * .20f) && LockedOpeningDetection.bDepthValid;
+		if (!bFreshInsertObservation && !bExpectedForkOcclusion)
+		{
+			CancelAutoPickup(TEXT("삽입 전/중 현재 관측 상실 — 검증된 가림 조건을 만족하지 않아 정지"), true); return;
+		}
+		if (bFreshInsertObservation)
+		{
+			float TipToFront, RemainingAdvance, ReachRemaining, ChassisAdvance, LateralError, LiftCorrection;
+			if (!ComputeAutoInsertionGeometry(OpeningDetection, TipToFront, RemainingAdvance, ReachRemaining, ChassisAdvance, LateralError, LiftCorrection) || FMath::Abs(LateralError) > AutoForkOpeningSideClearanceCm + 1.f || FMath::Abs(LiftCorrection) > AutoVerticalToleranceCm * 2.f)
+			{
+				CancelAutoPickup(TEXT("삽입 중 현재 RGB-D 정렬 오차가 허용 범위를 벗어남"), true); return;
+			}
+		}
+		const bool bReachAtTarget = ReachCm >= AutoReachTargetCm - .5f;
+		bLastAutoDriveBlocked = AutoPickupStateElapsed > 1.f && Travel < 1.f;
+		AutoPickupStatus = bLastAutoDriveBlocked
+			? TEXT("삽입 중 — R/F 명령은 있으나 실제 리치 이동 없음; 접촉 위치/정렬 오차 기록")
+			: FString::Printf(TEXT("삽입 중 — 차체 정지, R/F 실제 %.1f / 목표 %.1fcm"), Travel, AutoRequiredForkAdvanceCm);
+		if (bReachAtTarget)
+		{
+			AutoLiftStartCm = LiftCm; bool bBaselineSet = false;
+			for (TActorIterator<AWoodPallet> It(GetWorld()); It; ++It) { AutoLiftPalletStartZ = (*It)->GetActorLocation().Z; bBaselineSet = true; break; }
+			if (!bBaselineSet) for (TActorIterator<APallet> It(GetWorld()); It; ++It) { AutoLiftPalletStartZ = (*It)->GetActorLocation().Z; break; }
+			SetAutoPickupState(EAutoPickupState::Lifting, TEXT("R/F 삽입 깊이 도달 — 물리 접촉 인양 시작"));
+		}
+		else if (AutoPickupStateElapsed > 10.f || bLastAutoDriveBlocked)
+		{
+			CancelAutoPickup(FString::Printf(TEXT("R/F 삽입 걸림 — 리치 %.1f/%.1fcm, 좌우 %.1fcm, 높이 %.1fcm"), Travel, AutoRequiredForkAdvanceCm, LastAlignmentLateralErrorCm, LastAlignmentLiftCorrectionCm), true);
+		}
+		return;
+	}
 	if (AutoPickupState == EAutoPickupState::Lifting) { AutoLiftInput = AutoLiftSpeedScale; float Rise = 0.f; bLastPhysicalPalletContact = HasPhysicalPalletLift(Rise); LastPhysicalPalletRiseCm = Rise; AutoPickupStatus = bLastPhysicalPalletContact ? TEXT("인양 중 — 파레트 물리 접촉 확인") : TEXT("인양 중 — 파레트 지지 접촉 확인 대기"); if (bLastPhysicalPalletContact) { AutoLiftInput = 0.f; SetAutoPickupState(EAutoPickupState::Complete, FString::Printf(TEXT("파레트 물리 접촉 및 상승 %.1fcm 확인"), Rise)); } else if (LiftCm >= AutoLiftStartCm + AutoTestLiftCm || AutoPickupStateElapsed > 5.f) CancelAutoPickup(TEXT("포크는 상승했으나 파레트 상승을 확인하지 못함"), true); }
 }
 
