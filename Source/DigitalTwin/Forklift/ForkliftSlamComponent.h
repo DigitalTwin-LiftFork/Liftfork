@@ -48,18 +48,39 @@ public:
 	const TMap<FIntPoint, int8>& GetCells() const { return Cells; }
 	FVector2D GetPosition() const { return Position; }
 	float GetYaw() const { return Yaw; }
+	FVector2D GetPredictedPosition(double Now) const;
+	float GetPredictedYaw() const { return FMath::UnwindRadians(Yaw + PendingYaw); }
 	const FString& GetStatus() const { return Status; }
 	float GetConfidence() const { return Confidence; }
 	int32 GetScanCount() const { return ScanCount; }
 	int32 GetMapUpdateCount() const { return MapUpdateCount; }
 		int32 GetMapGeneration() const { return MapGeneration; }
-	bool IsTrackingFresh(double Now) const { return bInitialized && StableScans >= 3 && LastAcceptedScan == LastScan && Now-LastAcceptedScan < .3 && Confidence >= .45f; }
+	/**
+	 * Navigation consumes the compatibility pose accessors below, while scan
+	 * matching owns EstimatedPose.  Keep this gate tied to the latter so a
+	 * merged/legacy cache cannot report an uninitialised pose after SLAM has
+	 * already acquired three good scans.
+	 */
+	bool IsTrackingFresh(double Now) const
+	{
+		return EstimatedPose.bInitialized
+			&& StableScans >= 3
+			&& bLastPoseQualityAccepted
+			&& LastAcceptedScan >= 0.0
+			&& FMath::IsNearlyEqual(LastAcceptedScan, LastScan, KINDA_SMALL_NUMBER)
+			&& Now - LastAcceptedScan < 1.25;
+	}
 	static constexpr float CellCm = 20.f;
 private:
 	UPROPERTY(Transient) TObjectPtr<UForkliftNavigationSensorComponent> Sensor;
 	TMap<FIntPoint, int8> Cells;
+	// Localization features must not be erased by rays passing above low racks.
+	TSet<FIntPoint> LocalizationCells;
 	TMap<FIntPoint,float> MatchField;
-	int32 StableScans = 0;
+	int32 StableScans = 0, MarginalScans = 0;
+    bool bLastPoseQualityAccepted = false;
+    FVector2D MarginalPosition = FVector2D::ZeroVector;
+    float MarginalYaw = 0.f;
 	FVector2D Position = FVector2D::ZeroVector;
 	FVector2D Velocity = FVector2D::ZeroVector;
 	float Yaw = 0.f, PendingYaw = 0.f, Confidence = 0.f;
@@ -73,10 +94,6 @@ private:
 	void UpdateCell(FIntPoint Cell, int32 Delta);
 
 public:
-	UForkliftSlamComponent();
-	virtual void BeginPlay() override;
-	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
-
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="SLAM|Map", meta=(ClampMin="1000.0")) float MapSizeCm = 20000.f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="SLAM|Map", meta=(ClampMin="2.0", ClampMax="50.0")) float MapResolutionCm = 10.f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="SLAM|Map", meta=(ClampMin="1", ClampMax="100")) int32 OccupiedLogOddsThreshold = 3;

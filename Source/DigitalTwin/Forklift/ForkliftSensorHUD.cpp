@@ -15,15 +15,27 @@ void AForkliftSensorHUD::DrawHUD()
 	AAutomatedForklift* Forklift = Cast<AAutomatedForklift>(PlayerOwner->GetPawn());
 	if (!Forklift) return;
 
+	const auto DrawNavigationPanel = [this, Forklift]()
+	{
+		TArray<FString> Lines;
+		Forklift->GetNavigationDiagnosticLines(Lines);
+		const float Width = FMath::Min(510.f, Canvas->SizeX * .43f);
+		const float X = Canvas->SizeX - Width - 18.f, Y = Canvas->SizeY - 180.f;
+		DrawRect(FLinearColor(.015f,.025f,.04f,.94f), X, Y, Width, 164.f);
+		DrawText(TEXT("주행 / 센서 / 복구 상태"), FLinearColor(0.f,.85f,1.f), X+10.f,Y+8.f,nullptr,.85f);
+		for (int32 I=0; I<Lines.Num(); ++I)
+			DrawText(Lines[I], I==Lines.Num()-1 ? FLinearColor::Yellow : FLinearColor::White, X+10.f,Y+32.f+I*20.f,nullptr,.65f);
+	};
 	const bool bRunning = Forklift->GetAutoPickupState() == EAutoPickupState::Detecting || Forklift->GetAutoPickupState() == EAutoPickupState::Approaching || Forklift->GetAutoPickupState() == EAutoPickupState::Aligning || Forklift->GetAutoPickupState() == EAutoPickupState::Inserting || Forklift->GetAutoPickupState() == EAutoPickupState::Lifting;
+
 	const float ButtonY = Canvas->SizeY - 72.f;
 
-		DrawText(Forklift->GetNavigationStatus(), FLinearColor::Yellow, 20.f, 40.f, nullptr, .9f);
 	const FBox2D NavButton=AAutomatedForklift::NavigationButtonRect(Canvas->SizeY);
 	const bool NavActive=Forklift->IsNavigationActive();
 	DrawRect(NavActive ? FLinearColor(.65f,.12f,.08f,.95f) : FLinearColor(.05f,.3f,.55f,.95f),NavButton.Min.X,NavButton.Min.Y,NavButton.GetSize().X,NavButton.GetSize().Y);
-	DrawText(NavActive ? TEXT("자동 탐색 정지") : TEXT("자동 탐색 시작"), FLinearColor::White,NavButton.Min.X+16.f,NavButton.Min.Y+12.f,nullptr,1.f);
-	DrawText(TEXT("목적지 자동 선택 / 수동 입력 시 중지"),FLinearColor::White,24.f,NavButton.Min.Y-20.f,nullptr,.72f);
+
+	DrawText(NavActive ? TEXT("주행 정지") : TEXT("랜덤 순찰 시작"), FLinearColor::White,NavButton.Min.X+16.f,NavButton.Min.Y+12.f,nullptr,1.f);
+	DrawText(TEXT("지도 클릭: 지정 위치 주행 / 시작 버튼: 랜덤 순찰"),FLinearColor::White,24.f,NavButton.Min.Y-20.f,nullptr,.72f);
 
 	DrawRect(bRunning ? FLinearColor(.65f, .18f, .12f, .92f) : FLinearColor(.08f, .32f, .12f, .92f), 24.f, ButtonY, 240.f, 48.f);
 	DrawText(bRunning ? TEXT("작업 중지") : TEXT("파레트 자동 집기"), FLinearColor::White, 40.f, ButtonY + 13.f, nullptr, 1.f);
@@ -50,7 +62,9 @@ void AForkliftSensorHUD::DrawHUD()
 	DrawRect(FLinearColor(.02f, .02f, .02f, .82f), PanelX, PanelY, PanelWidth, PanelHeight);
 	DrawText(TEXT("자동 집기 상태"), FLinearColor(0.f, .85f, .85f, 1.f), PanelX + 10.f, PanelY + 7.f, nullptr, .85f);
 	for (int32 Index = 0; Index < Diagnostics.Num(); ++Index) DrawText(Diagnostics[Index], FLinearColor::White, PanelX + 10.f, PanelY + 28.f + Index * LineHeight, nullptr, .68f);
-		if (const UForkliftSlamComponent* Slam = Forklift->FindComponentByClass<UForkliftSlamComponent>(); Slam && Slam->bShowMap)
+		// The map owns the left preview area only while RGB-D preview is hidden.
+		// This prevents the SLAM map from covering the live depth/RGB pair.
+		if (const UForkliftSlamComponent* Slam = Forklift->FindComponentByClass<UForkliftSlamComponent>(); Slam && Slam->bShowMap && Forklift->GetPalletSensorDisplayMode() == 0)
 	{
 		const float MX = 20.f, MY = 100.f, Size = FMath::Min(300.f, Canvas->SizeY * .40f);
 		const float Scale = Size / 3000.f;
@@ -82,7 +96,7 @@ void AForkliftSensorHUD::DrawHUD()
 		const float CX = MX + Size * .5f, CY = MY + Size * .5f;
 		DrawRect(FLinearColor::Yellow, CX - 3.f, CY - 3.f, 6.f, 6.f);
 		DrawLine(CX, CY, CX + FMath::Sin(Slam->GetYaw()) * 18.f, CY - FMath::Cos(Slam->GetYaw()) * 18.f, FLinearColor::Yellow, 2.f);
-		DrawText(TEXT("LiDAR / 2D local SLAM | 30 m view"), FLinearColor::White, MX, MY - 20.f, nullptr, .8f);
+		DrawText(TEXT("LiDAR / SLAM | 클릭해 탐색된 목표 선택"), FLinearColor::White, MX, MY - 20.f, nullptr, .8f);
 		DrawText(Slam->GetStatus(), FLinearColor::Yellow, MX, MY + Size + 4.f, nullptr, .75f);
 		DrawText(FString::Printf(TEXT("x %.2f m  y %.2f m | match %.0f%%"), Pose.X / 100., Pose.Y / 100., Slam->GetConfidence() * 100.f), FLinearColor::White, MX, MY + Size + 22.f, nullptr, .75f);
 		DrawText(TEXT("M: map  B: reset  L: LiDAR rays"), FLinearColor::White, MX, MY + Size + 40.f, nullptr, .75f);
@@ -92,11 +106,11 @@ void AForkliftSensorHUD::DrawHUD()
 			// Sensor-local preview stays live even when map localization is uncertain.
 			const float LX = MX + Size + 12.f, LY = MY, LS = FMath::Min(160.f, Size);
 			DrawRect(FLinearColor(.02f, .035f, .05f, .95f), LX, LY, LS, LS);
-			DrawText(TEXT("LIVE LiDAR (sensor frame)"), FLinearColor::White, LX, LY - 18.f, nullptr, .65f);
+			DrawText(TEXT("LIVE LiDAR (all elevations)"), FLinearColor::White, LX, LY - 18.f, nullptr, .65f);
 			const float Range = FMath::Max(Sensor->MaximumRangeCm, 1.f);
 			for (const auto& Ray : Sensor->GetLatestScan().Samples)
 			{
-				if (!Ray.bValid || FMath::Abs(Ray.LocalDirection.Z) >= .015f) continue;
+				if (!Ray.bValid) continue;
 				const float PX = LS * .5f + Ray.LocalPointCm.Y / Range * (LS * .48f);
 				const float PY = LS * .5f - Ray.LocalPointCm.X / Range * (LS * .48f);
 				DrawRect(FLinearColor::Green, LX + PX, LY + PY, 2.f, 2.f);
@@ -107,7 +121,7 @@ void AForkliftSensorHUD::DrawHUD()
 
 	UTextureRenderTarget2D* SensorImage = Forklift->GetPalletSensorRenderTarget();
 	const int32 Mode = Forklift->GetPalletSensorDisplayMode();
-	if (!SensorImage || Mode == 0) return;
+	if (!SensorImage || Mode == 0) { DrawNavigationPanel(); return; }
 
 	const float Aspect = static_cast<float>(SensorImage->SizeX) / FMath::Max(1, SensorImage->SizeY);
 
@@ -120,7 +134,6 @@ void AForkliftSensorHUD::DrawHUD()
 	const float Y = DepthY + Height + 16.f;
 	const int32 DebugView = Forklift->GetVisionDebugViewMode();
 	const int32 DepthView = Forklift->GetDepthDebugViewMode();
-	const bool bDepthView = false; // U configures the left depth presentation; right remains RGB.
 	// V always presents the synchronized raw depth beside RGB.  This visualization
 	// uses a fixed sensor range, not per-frame normalization, and never feeds the
 	// displayed colours back into RGB-D measurement.
@@ -138,7 +151,7 @@ void AForkliftSensorHUD::DrawHUD()
 	const float DepthAge=Forklift->GetWorld()?FMath::Max(0.f,Forklift->GetWorld()->GetTimeSeconds()-Forklift->GetDepthFrameTimestampSeconds()):-1.f;
 	DrawText(FString::Printf(TEXT("SceneDepth %d/%d %s age %.2fs | %.0f..%.0fcm | purple=invalid cyan=near orange=far"),Forklift->GetDepthFrameId(),Forklift->GetSensorFrameId(),Forklift->IsDepthFrameValid()?TEXT("synced"):TEXT("invalid"),DepthAge,MinD,MaxD),FLinearColor::White,DepthX+8.f,DepthY+8.f,nullptr,.52f);
 	const bool bMaskView = DebugView != 0 && Forklift->GetVisionMaskWidth() > 0;
-	if (!bMaskView || bDepthView) DrawTexture(SensorImage, X, Y, Width, Height, 0.f, 0.f, 1.f, 1.f, FLinearColor::White, BLEND_Opaque);
+	if (!bMaskView) DrawTexture(SensorImage, X, Y, Width, Height, 0.f, 0.f, 1.f, 1.f, FLinearColor::White, BLEND_Opaque);
 	else
 	{
 		DrawRect(FLinearColor::Black, X, Y, Width, Height);
@@ -147,16 +160,6 @@ void AForkliftSensorHUD::DrawHUD()
 		// A 2x decimated canvas rendering keeps this diagnostic view cheap while
 		// still revealing whether forks/shadows merge the opening regions.
 		for (int32 MY = 0; MY < MH; MY += 2) for (int32 MX = 0; MX < MW; MX += 2) if (Mask.IsValidIndex(MY * MW + MX) && Mask[MY * MW + MX]) DrawRect(FLinearColor::White, X + Width * MX / MW, Y + Height * MY / MH, Width * 2.f / MW + 1.f, Height * 2.f / MH + 1.f);
-	}
-
-	if (bDepthView)
-	{
-		for (int32 PY=0;PY<DH;PY+=4) for (int32 PX=0;PX<DW;PX+=4) if (Depth.IsValidIndex(PY*DW+PX))
-		{
-			const float D=Depth[PY*DW+PX]; const float N=FMath::Clamp((D-MinD)/FMath::Max(1.f,MaxD-MinD),0.f,1.f);
-			if (DepthView==1) DrawRect(FLinearColor(N,N,N,.92f),X+Width*PX/DW,Y+Height*PY/DH,Width*4.f/DW+1.f,Height*4.f/DH+1.f);
-			else if (PX+4<DW && FMath::Abs(D-Depth[PY*DW+PX+4])>18.f) DrawRect(FLinearColor(0.f,1.f,1.f,.9f),X+Width*PX/DW,Y+Height*PY/DH,Width*4.f/DW+1.f,Height*4.f/DH+1.f);
-		}
 	}
 
 	DrawRect(FLinearColor::White, X, Y, Width, 1.f);
@@ -231,4 +234,5 @@ void AForkliftSensorHUD::DrawHUD()
 		DrawText(OpeningLabel, OpeningColor, X + 8.f, Y + 28.f, nullptr, .68f);
 
 	}
+	DrawNavigationPanel();
 }

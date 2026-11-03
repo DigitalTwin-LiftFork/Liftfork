@@ -25,10 +25,6 @@ enum class EAutoPickupState : uint8 { Idle, Detecting, Approaching, Aligning, In
 class UForkliftLocalOccupancyGridComponent;
 class UForkliftSlamComponent;
 class UForkliftGlobalPathPlannerComponent;
-class APallet;
-
-UENUM()
-enum class EAutoPickupState : uint8 { Idle, Detecting, Aligning, Inserting, Lifting, Complete, Stopped, Failed };
 
 
 /** Pixel-space result from the existing pallet sensor render target. */
@@ -174,6 +170,7 @@ public:
 	UPROPERTY(VisibleAnywhere, Category="Replaceable visual slots") TObjectPtr<UStaticMeshComponent> MastOuterVisual;
 	UPROPERTY(VisibleAnywhere, Category="Replaceable visual slots") TObjectPtr<UStaticMeshComponent> MastInnerVisual;
 	UPROPERTY(VisibleAnywhere, Category="Replaceable visual slots") TObjectPtr<UStaticMeshComponent> MastLiftVisual;
+
 	UPROPERTY(VisibleAnywhere, Category="Replaceable visual slots") TObjectPtr<UStaticMeshComponent> LeftForkVisual;
 	UPROPERTY(VisibleAnywhere, Category="Replaceable visual slots") TObjectPtr<UStaticMeshComponent> RightForkVisual;
 	UPROPERTY(VisibleAnywhere, Category="Replaceable visual slots") TObjectPtr<UStaticMeshComponent> UnderframeVisual;
@@ -236,8 +233,6 @@ public:
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Vision|RGB-D") float VisionDepthBodyContinuityCm = 32.f;
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Vision|RGB-D") float VisionDepthOpeningContrastCm = 18.f;
 
-	UPROPERTY(Transient, VisibleAnywhere, Category="Pallet sensor") TObjectPtr<UTextureRenderTarget2D> PalletSensorRenderTarget;
-
 	/** Drawing-verified offsets, converted from the backrest/fork coordinate system; not raw component XYZ. */
 	UPROPERTY(EditAnywhere, Category="Pallet sensor|Drawing dimensions") float PalletSensorHeightAboveForkTopCm = 19.f;
 	UPROPERTY(EditAnywhere, Category="Pallet sensor|Drawing dimensions") float PalletSensorLateralOffsetFromCenterCm = 6.3f;
@@ -293,11 +288,6 @@ public:
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoApproachLateralToleranceCm = 6.f;
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoApproachTimeoutSeconds = 10.f;
 
-	/** Known test-pallet opening geometry. Used only to convert pixel spacing to range; never reads an Actor position. */
-	UPROPERTY(EditAnywhere, Category="Auto pickup|Vision|Known pallet") float VisionKnownOpeningCenterSpacingCm = 60.f;
-	UPROPERTY(EditAnywhere, Category="Auto pickup|Vision|Known pallet") float VisionKnownOpeningWidthCm = 36.f;
-	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoInsertSpeedScale = .20f;
-
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoLiftSpeedScale = .25f;
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoRequiredInsertionCm = 50.f;
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoMaximumInsertionCm = 75.f;
@@ -309,6 +299,7 @@ public:
 	/** One fixed rear-body LiDAR/IMU module. It is intentionally independent of the moving fork camera. */
 	UPROPERTY(VisibleAnywhere, Category="LiDAR") TObjectPtr<UForkliftNavigationSensorComponent> NavigationSensor;
 	UPROPERTY(VisibleAnywhere, Category="LiDAR") TObjectPtr<UStaticMeshComponent> NavigationSensorVisual;
+    UPROPERTY(VisibleAnywhere, Category="LiDAR") TObjectPtr<UStaticMeshComponent> LidarPole7mRebuilt;
 
 	/** Reapplies sizes after editing Dimensions in the Details panel (safe during construction). */
 	virtual void OnConstruction(const FTransform& Transform) override;
@@ -331,8 +322,6 @@ public:
 	int32 GetPalletSensorDisplayMode() const { return PalletSensorDisplayMode; }
 	bool IsDetailedSensorDiagnostics() const { return bDetailedSensorDiagnostics; }
 
-	int32 GetPalletSensorDisplayMode() const { return PalletSensorDisplayMode; }
-
 	const FOpeningDetection& GetOpeningDetection() const { return OpeningDetection; }
 	const TArray<FVisionCandidateDebug>& GetVisionCandidates() const { return VisionCandidates; }
 	const TArray<FString>& GetVisionPairDiagnostics() const { return VisionPairDiagnostics; }
@@ -353,9 +342,6 @@ public:
 	const FIntRect& GetVisionBodyBounds() const { return VisionBodyBounds; }
 	const FString& GetVisionFailureReason() const { return LastVisionFailureReason; }
 
-	int32 GetVisionMaskWidth() const { return VisionMaskWidth; }
-	int32 GetVisionMaskHeight() const { return VisionMaskHeight; }
-
 	int32 GetVisionDebugViewMode() const { return VisionDebugViewMode; }
 	EAutoPickupState GetAutoPickupState() const { return AutoPickupState; }
 	const FString& GetAutoPickupStatus() const { return AutoPickupStatus; }
@@ -364,12 +350,14 @@ public:
 
 	void ToggleAutoPickup();
 
-		void ToggleAutoPickup();
 		bool IsNavigationActive() const { return bNavigationActive; }
 	static FBox2D NavigationButtonRect(float Height) { return FBox2D(FVector2D(24.f,Height-154.f),FVector2D(264.f,Height-112.f)); }
+	static FBox2D SlamMapRect(float Height) { const float Size=FMath::Min(300.f,Height*.40f); return FBox2D(FVector2D(20.f,100.f),FVector2D(20.f+Size,100.f+Size)); }
+	bool SetNavigationGoalFromMapScreen(FVector2D ScreenPosition, float ViewportHeight);
 	void ToggleNavigation();
 	void StopNavigation();
 	const FString& GetNavigationStatus() const { return NavigationStatus; }
+	void GetNavigationDiagnosticLines(TArray<FString>& OutLines) const;
 	const TArray<FVector2D>& GetNavigationRoute() const { return NavigationRoute; }
 	bool HasNavigationGoal() const { return bNavigationGoalSet; }
 	FVector2D GetNavigationGoal() const { return NavigationGoal; }
@@ -377,18 +365,24 @@ public:
 	static FString AutoPickupStateToString(EAutoPickupState State);
 
 private:
+	void BeginNavigationRecovery(const FString& Reason);
+	float NavigationRecoveryStart = -1.f;
+	int32 NavigationRecoveryScan = 0, NavigationRecoveryAttempts = 0;
+	FString NavigationRecoveryReason;
+	TMap<FIntPoint, double> NavigationAvoidUntil;
 		void UpdateNavigation(float Dt);
 		bool PlanNavigationRoute(FVector2D Start);
 	bool SelectExplorationGoal(FVector2D Start);
 	TArray<FVector2D> ExplorationVisited;
+	TMap<FIntPoint,double> ExplorationBlockedUntil;
 	int32 ExplorationBlockedGoals = 0;
 	float NavigationTrackingWaitStart = -1.f;
-	bool bNavigationActive = false, bNavigationGoalSet = false;
+	bool bNavigationActive = false, bNavigationGoalSet = false, bNavigationGoalIsManual = false;
 	int32 NavigationMapGeneration = -1;
 	FVector2D NavigationGoal = FVector2D::ZeroVector, NavigationProgressPosition = FVector2D::ZeroVector;
 	TArray<FVector2D> NavigationRoute;
 	float NavigationReplanTime = 0.f, NavigationProgressTime = 0.f;
-	FString NavigationStatus = TEXT("하단 자동 탐색 시작 버튼을 누르세요");
+	FString NavigationStatus = TEXT("하단 랜덤 순찰 시작 버튼을 누르세요");
 	float DriveInput = 0.f, SteerInput = 0.f, LiftInput = 0.f, ReachInput = 0.f, SideShiftInput = 0.f;
 	/** Automatic commands deliberately use a separate channel. Axis bindings invoke
 	 * their callbacks with zero every frame, so sharing DriveInput would erase a
@@ -453,18 +447,6 @@ private:
 	bool bSensorOcclusionDiagnosticHideForks = false;
 	int32 LastVisionFrameNumber = 0, LastProcessedSensorFrameId = -1;
 	int32 AutoPickupAttemptId = 0, LastVisionSuccessSensorFrameId = -1, FirstVisionFailureAfterSuccessSensorFrameId = -1;
-
-	float VisionProcessElapsed = 0.f, AutoPickupStateElapsed = 0.f, AutoLiftStartCm = 0.f, AutoLiftPalletStartZ = 0.f, AutoRequiredForwardTravelCm = -BIG_NUMBER, AutoMaximumForwardTravelCm = -BIG_NUMBER;
-	FVector AutoInsertionStartLocation = FVector::ZeroVector;
-	int32 OpeningStableFrames = 0, AlignmentStableFrames = 0;
-	int32 LastVisionCandidateCount = -1;
-	TArray<FVisionCandidateDebug> VisionCandidates;
-	TArray<FString> VisionPairDiagnostics;
-	TArray<uint8> VisionMask;
-	int32 VisionMaskWidth = 0, VisionMaskHeight = 0, LastVisionSearchStartY = -1;
-	int32 VisionDebugViewMode = 0;
-	bool bSensorOcclusionDiagnosticHideForks = false;
-	int32 LastVisionFrameNumber = 0;
 
 	bool bLastVisionReadSucceeded = false;
 	bool bLastVisionHadValidPair = false;
@@ -531,11 +513,7 @@ private:
 	void UpdateDepthForOpeningDetection();
 	void SaveVisionTransitionArtifacts(const TArray<FColor>& Pixels, bool bValidFrame);
 
-	void ToggleSensorOcclusionDiagnostic();
-	void ToggleLidarDebug();
 	void ToggleSlamMapDebug();
-	void UpdatePalletSensorSettings();
-	void ProcessOpeningVision();
 
 	void UpdateAutoPickup(float DeltaSeconds);
 	void SetAutoPickupState(EAutoPickupState NewState, const FString& Status);
@@ -546,8 +524,6 @@ private:
 	void ClearAutomaticCommands();
 	bool IsAutoPickupMotionActive() const;
 	float GetForkTipAheadOfSensorCm() const;
-
-	void ClearAutomaticCommands();
 
 	void ConfigureKinematicForkMechanism();
 	void ApplyKinematicForkControls(float DeltaSeconds);
