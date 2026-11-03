@@ -2,6 +2,7 @@
 #include "Forklift/Pallet.h"
 #include "Forklift/WoodPallet.h"
 #include "Forklift/ForkliftNavigationSensorComponent.h"
+#include "Forklift/ForkliftSlamComponent.h"
 #include "Components/BoxComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/SceneComponent.h"
@@ -55,8 +56,12 @@ AAutomatedForklift::AAutomatedForklift()
 	SetRootComponent(BodyCollision);
 	BodyCollision->SetCollisionProfileName(TEXT("Pawn"));
 	BodyCollision->SetCollisionResponseToChannel(ECC_PhysicsBody, ECR_Ignore);
+	
 	NavigationSensor = CreateDefaultSubobject<UForkliftNavigationSensorComponent>(TEXT("RearBodyLidarImu"));
 	NavigationSensor->SetupAttachment(BodyCollision);
+	
+	CreateDefaultSubobject<UForkliftSlamComponent>(TEXT("LidarSlam"));
+
 	// Rear, above the fixed body deck: actor X is vehicle-forward, so negative
 	// X is rear.  This point is outside the 95cm body shell and does not follow
 	// the mast, lift, reach, fork or user camera.
@@ -112,6 +117,7 @@ AAutomatedForklift::AAutomatedForklift()
 	// capture, and editor-style debug primitives are excluded here.
 	PalletSensorCapture->ShowFlags.SetOnScreenDebug(false);
 	PalletSensorCapture->ShowFlags.SetCompositeDebugPrimitives(false);
+
 	PalletSensorRenderTarget = CreateDefaultSubobject<UTextureRenderTarget2D>(TEXT("PalletInsertionSensorRenderTarget"));
 	PalletSensorRenderTarget->RenderTargetFormat = RTF_RGBA8;
 	PalletSensorRenderTarget->ClearColor = FLinearColor::Black;
@@ -132,6 +138,7 @@ AAutomatedForklift::AAutomatedForklift()
 	PalletSensorDepthRenderTarget->ClearColor = FLinearColor::Black;
 	PalletSensorDepthRenderTarget->InitCustomFormat(960, 540, PF_FloatRGBA, false);
 	PalletSensorDepthCapture->TextureTarget = PalletSensorDepthRenderTarget;
+
 	ForkCarriageVisual = CreateVisual(TEXT("ForkCarriageVisual_ReplaceMesh"), ForkCarriage);
 	LeftForkVisual = CreateVisual(TEXT("LeftForkVisual_ReplaceMesh"), ForkCarriage);
 	RightForkVisual = CreateVisual(TEXT("RightForkVisual_ReplaceMesh"), ForkCarriage);
@@ -181,6 +188,13 @@ void AAutomatedForklift::BeginPlay()
 {
 	Super::BeginPlay();
 	bAutoApproachStraightDiagnostic = false; // diagnostics never persist into normal auto pickup
+
+	PalletSensorRenderTarget = NewObject<UTextureRenderTarget2D>(this, NAME_None, RF_Transient);
+	PalletSensorRenderTarget->RenderTargetFormat = RTF_RGBA8;
+	PalletSensorRenderTarget->ClearColor = FLinearColor::Black;
+	PalletSensorRenderTarget->InitAutoFormat(960, 540);
+	PalletSensorCapture->TextureTarget = PalletSensorRenderTarget;
+
 	// The root collision is centred on the actor. Map1 actors authored at floor Z=0 must be lifted to their collision centre.
 	const float MinimumCenterHeight = Dimensions.BodyHeightCm * .5f + 2.f;
 	if (GetActorLocation().Z < MinimumCenterHeight)
@@ -355,6 +369,9 @@ void AAutomatedForklift::UpdateMastVisuals(float ActualLiftCm)
 void AAutomatedForklift::UpdatePalletSensorSettings()
 {
 	if (!PalletSensorCapture || !PalletSensorRenderTarget || !PalletSensorDepthCapture || !PalletSensorDepthRenderTarget) return;
+
+	if (!PalletSensorCapture || !PalletSensorRenderTarget) return;
+
 	// ForkCarriage's local origin is the side-shifting carriage.  The drawing
 	// offsets are referenced to physical fork/backrest geometry, so convert them
 	// here instead of treating 19/6.3/2.6 as arbitrary local XYZ values.
@@ -367,17 +384,21 @@ void AAutomatedForklift::UpdatePalletSensorSettings()
 	PalletSensorCapture->SetRelativeLocation(CarriageLocalLocation);
 	PalletSensorCapture->SetRelativeRotation(PalletSensorRelativeRotation);
 	PalletSensorCapture->FOVAngle = PalletSensorFieldOfViewDeg;
+
 	PalletSensorDepthCapture->SetRelativeLocation(CarriageLocalLocation);
 	PalletSensorDepthCapture->SetRelativeRotation(PalletSensorRelativeRotation);
 	PalletSensorDepthCapture->FOVAngle = PalletSensorFieldOfViewDeg;
+
 	if (PalletSensorRenderTarget->SizeX != PalletSensorWidthPx || PalletSensorRenderTarget->SizeY != PalletSensorHeightPx)
 	{
 		PalletSensorRenderTarget->ResizeTarget(PalletSensorWidthPx, PalletSensorHeightPx);
 	}
+
 	if (PalletSensorDepthRenderTarget->SizeX != PalletSensorWidthPx || PalletSensorDepthRenderTarget->SizeY != PalletSensorHeightPx)
 	{
 		PalletSensorDepthRenderTarget->ResizeTarget(PalletSensorWidthPx, PalletSensorHeightPx);
 	}
+
 }
 
 void AAutomatedForklift::SetupPlayerInputComponent(UInputComponent* Input)
@@ -401,11 +422,21 @@ void AAutomatedForklift::SetupPlayerInputComponent(UInputComponent* Input)
 	Input->BindKey(EKeys::V, IE_Pressed, this, &AAutomatedForklift::TogglePalletSensorDisplay);
 	Input->BindKey(EKeys::N, IE_Pressed, this, &AAutomatedForklift::TogglePalletSensorCapture);
 	Input->BindKey(EKeys::O, IE_Pressed, this, &AAutomatedForklift::ToggleVisionDebugView);
+
 	Input->BindKey(EKeys::U, IE_Pressed, this, &AAutomatedForklift::ToggleDepthDebugView);
 	Input->BindKey(EKeys::P, IE_Pressed, this, &AAutomatedForklift::ToggleAutoApproachStraightDiagnostic);
 	Input->BindKey(EKeys::I, IE_Pressed, this, &AAutomatedForklift::ToggleSensorOcclusionDiagnostic);
 	Input->BindKey(EKeys::J, IE_Pressed, this, &AAutomatedForklift::ToggleDetailedSensorDiagnostics);
 	Input->BindKey(EKeys::L, IE_Pressed, this, &AAutomatedForklift::ToggleLidarDebug);
+
+	Input->BindKey(EKeys::I, IE_Pressed, this, &AAutomatedForklift::ToggleSensorOcclusionDiagnostic);
+	Input->BindKey(EKeys::L, IE_Pressed, this, &AAutomatedForklift::ToggleLidarDebug);
+	if (UForkliftSlamComponent* Slam = FindComponentByClass<UForkliftSlamComponent>())
+	{
+		Input->BindKey(EKeys::M, IE_Pressed, Slam, &UForkliftSlamComponent::ToggleMap);
+		Input->BindKey(EKeys::B, IE_Pressed, Slam, &UForkliftSlamComponent::ResetMap);
+	}
+
 }
 void AAutomatedForklift::LogInputInvocation(const TCHAR* InputName, float Value)
 {
@@ -418,10 +449,17 @@ void AAutomatedForklift::LogInputInvocation(const TCHAR* InputName, float Value)
 			*GetName(), InputName, Value, *GetNameSafe(CarriedPallet), LiftCm, *GetActorLocation().ToString());
 	}
 }
+
 void AAutomatedForklift::Drive(float V) { if (!FMath::IsNearlyZero(V) && AutoPickupState > EAutoPickupState::Idle && AutoPickupState < EAutoPickupState::Complete) CancelAutoPickup(TEXT("수동 전후진 입력"), false); DriveInput = V; LogInputInvocation(TEXT("ForkliftMoveForward(W/S)"), V); } void AAutomatedForklift::Steer(float V) { if (!FMath::IsNearlyZero(V) && AutoPickupState > EAutoPickupState::Idle && AutoPickupState < EAutoPickupState::Complete) CancelAutoPickup(TEXT("수동 조향 입력"), false); SteerInput = V; }
 void AAutomatedForklift::Lift(float V) { if (!FMath::IsNearlyZero(V) && AutoPickupState > EAutoPickupState::Idle && AutoPickupState < EAutoPickupState::Complete) CancelAutoPickup(TEXT("수동 인양 입력"), false); LiftInput = V; LogInputInvocation(TEXT("ForkliftLift(E/Q)"), V); }
 void AAutomatedForklift::Reach(float V) { if (!FMath::IsNearlyZero(V) && AutoPickupState > EAutoPickupState::Idle && AutoPickupState < EAutoPickupState::Complete) CancelAutoPickup(TEXT("수동 리치 입력"), false); ReachInput = V; LogInputInvocation(TEXT("ForkliftReach(R/F)"), V); }
 void AAutomatedForklift::SideShift(float V) { if (!FMath::IsNearlyZero(V) && AutoPickupState > EAutoPickupState::Idle && AutoPickupState < EAutoPickupState::Complete) CancelAutoPickup(TEXT("수동 좌우 이동 입력"), false); SideShiftInput = V; LogInputInvocation(TEXT("ForkliftSideShift(Z/C)"), V); }
+
+void AAutomatedForklift::Drive(float V) { if (!FMath::IsNearlyZero(V) && bNavigationActive) StopNavigation(); if (!FMath::IsNearlyZero(V) && AutoPickupState > EAutoPickupState::Idle && AutoPickupState < EAutoPickupState::Complete) CancelAutoPickup(TEXT("수동 전후진 입력"), false); DriveInput = V; LogInputInvocation(TEXT("ForkliftMoveForward(W/S)"), V); } void AAutomatedForklift::Steer(float V) { if (!FMath::IsNearlyZero(V) && bNavigationActive) StopNavigation(); if (!FMath::IsNearlyZero(V) && AutoPickupState > EAutoPickupState::Idle && AutoPickupState < EAutoPickupState::Complete) CancelAutoPickup(TEXT("수동 조향 입력"), false); SteerInput = V; }
+void AAutomatedForklift::Lift(float V) { if (!FMath::IsNearlyZero(V) && bNavigationActive) StopNavigation(); if (!FMath::IsNearlyZero(V) && AutoPickupState > EAutoPickupState::Idle && AutoPickupState < EAutoPickupState::Complete) CancelAutoPickup(TEXT("수동 인양 입력"), false); LiftInput = V; LogInputInvocation(TEXT("ForkliftLift(E/Q)"), V); }
+void AAutomatedForklift::Reach(float V) { if (!FMath::IsNearlyZero(V) && bNavigationActive) StopNavigation(); if (!FMath::IsNearlyZero(V) && AutoPickupState > EAutoPickupState::Idle && AutoPickupState < EAutoPickupState::Complete) CancelAutoPickup(TEXT("수동 리치 입력"), false); ReachInput = V; LogInputInvocation(TEXT("ForkliftReach(R/F)"), V); }
+void AAutomatedForklift::SideShift(float V) { if (!FMath::IsNearlyZero(V) && bNavigationActive) StopNavigation(); if (!FMath::IsNearlyZero(V) && AutoPickupState > EAutoPickupState::Idle && AutoPickupState < EAutoPickupState::Complete) CancelAutoPickup(TEXT("수동 좌우 이동 입력"), false); SideShiftInput = V; LogInputInvocation(TEXT("ForkliftSideShift(Z/C)"), V); }
+
 void AAutomatedForklift::BeginCameraOrbit() { bCameraOrbiting = true; }
 void AAutomatedForklift::EndCameraOrbit() { bCameraOrbiting = false; }
 void AAutomatedForklift::ResetCamera() { CameraPitchDeg = -24.f; CameraYawDeg = -35.f; CameraDistanceCm = 700.f; CameraBoom->SetRelativeRotation(FRotator(CameraPitchDeg, CameraYawDeg, 0.f)); CameraBoom->TargetArmLength = CameraDistanceCm; }
@@ -434,8 +472,13 @@ void AAutomatedForklift::ToggleCollisionDebug()
 }
 void AAutomatedForklift::TogglePalletSensorDisplay()
 {
+
 	PalletSensorDisplayMode = PalletSensorDisplayMode == 0 ? 1 : 0;
 	UE_LOG(LogTemp, Warning, TEXT("[R16HD_SENSOR] V paired RGB+Depth display=%d captureActive=%d"), PalletSensorDisplayMode, bPalletSensorCaptureActive);
+
+	PalletSensorDisplayMode = (PalletSensorDisplayMode + 1) % 3;
+	UE_LOG(LogTemp, Warning, TEXT("[R16HD_SENSOR] V display mode=%d (0=off, 1=preview, 2=large) captureActive=%d"), PalletSensorDisplayMode, bPalletSensorCaptureActive);
+
 }
 void AAutomatedForklift::TogglePalletSensorCapture()
 {
@@ -444,6 +487,7 @@ void AAutomatedForklift::TogglePalletSensorCapture()
 }
 void AAutomatedForklift::ToggleVisionDebugView()
 {
+
 	VisionDebugViewMode = (VisionDebugViewMode + 1) % 5;
 	UE_LOG(LogTemp, Warning, TEXT("[R16HD_VISION] O debug view=%d (0=source, 1=colour region, 2=RGB body, 3=depth/refined body, 4=opening)"), VisionDebugViewMode);
 }
@@ -461,6 +505,10 @@ void AAutomatedForklift::ToggleAutoApproachStraightDiagnostic()
 {
 	bAutoApproachStraightDiagnostic = !bAutoApproachStraightDiagnostic;
 	UE_LOG(LogTemp, Warning, TEXT("[R16HD_AUTO_APPROACH] straight-diagnostic=%d (P); approach steering is %s"), bAutoApproachStraightDiagnostic, bAutoApproachStraightDiagnostic ? TEXT("disabled") : TEXT("enabled"));
+
+	VisionDebugViewMode = (VisionDebugViewMode + 1) % 2;
+	UE_LOG(LogTemp, Warning, TEXT("[R16HD_VISION] O debug view=%d (0=source, 1=binary mask)"), VisionDebugViewMode);
+
 }
 void AAutomatedForklift::ToggleSensorOcclusionDiagnostic()
 {
@@ -701,6 +749,7 @@ void AAutomatedForklift::InteractWithPallet()
 
 void AAutomatedForklift::ApplyKinematicForkControls(float Dt)
 {
+
 	const bool bAuto = IsAutoPickupMotionActive();
 	LastAppliedLiftInput = bAuto ? AutoLiftInput : LiftInput;
 	LastAppliedReachInput = bAuto ? AutoReachInput : ReachInput;
@@ -709,6 +758,12 @@ void AAutomatedForklift::ApplyKinematicForkControls(float Dt)
 	float DesiredLift = FMath::Clamp(LiftCm + LastAppliedLiftInput * LiftRate * Dt, 0.f, RequiredLiftStrokeCm);
 	float DesiredReach = FMath::Clamp(ReachCm + LastAppliedReachInput * Motion.ReachSpeedCmPerSec * Dt, 0.f, Dimensions.ReachTravelCm);
 	float DesiredSide = FMath::Clamp(SideShiftCm + LastAppliedSideShiftInput * Motion.SideShiftSpeedCmPerSec * Dt, -Dimensions.ForkSideShiftCm, Dimensions.ForkSideShiftCm);
+
+	const float LiftRate = LiftInput >= 0.f ? Motion.UnloadedLiftSpeedCmPerSec : Motion.UnloadedLowerSpeedCmPerSec;
+	float DesiredLift = FMath::Clamp(LiftCm + LiftInput * LiftRate * Dt, 0.f, RequiredLiftStrokeCm);
+	float DesiredReach = FMath::Clamp(ReachCm + ReachInput * Motion.ReachSpeedCmPerSec * Dt, 0.f, Dimensions.ReachTravelCm);
+	float DesiredSide = FMath::Clamp(SideShiftCm + SideShiftInput * Motion.SideShiftSpeedCmPerSec * Dt, -Dimensions.ForkSideShiftCm, Dimensions.ForkSideShiftCm);
+
 	if (IsForkAxisMotionBlockedByFixedObstacle(GetActorUpVector() * (DesiredLift - LiftCm), TEXT("kinematic lift fixed-obstacle sweep"))) DesiredLift = LiftCm;
 	if (IsForkAxisMotionBlockedByFixedObstacle(GetActorForwardVector() * (DesiredReach - ReachCm), TEXT("kinematic reach fixed-obstacle sweep"))) DesiredReach = ReachCm;
 	if (IsForkAxisMotionBlockedByFixedObstacle(GetActorRightVector() * (DesiredSide - SideShiftCm), TEXT("kinematic side-shift fixed-obstacle sweep"))) DesiredSide = SideShiftCm;
@@ -1365,6 +1420,146 @@ void AAutomatedForklift::ProcessOpeningVision()
 	LastVisionStageStatus=FString::Printf(TEXT("RGB body/opening/pair accepted; depth %s"), OpeningDetection.bDepthValid?TEXT("front verified"):TEXT("not usable for control")); LastTrackedOpeningDetection=OpeningDetection; LastTrackedOpeningTime=OpeningDetection.TimestampSeconds; LastTrackedActorLocation=GetActorLocation(); LastTrackedOpeningSeparationPx=Sep; LockedTargetMissFrames=0; LastVisionSuccessSensorFrameId=SensorFrameId; FirstVisionFailureAfterSuccessSensorFrameId=-1;
 	LastSuccessfulVisionPixels = Pixels; bSavedLastValidVisionArtifact = true; bSavedFirstVisionFailureArtifact = false;
 	UE_LOG(LogTemp, Log, TEXT("[R16HD_AUTO_VISION] target=locked frame=%d pair=(%.0f,%.0f)-(%.0f,%.0f) dist=%.1f lateral=%.1f confidence=%.2f"), LastVisionFrameNumber, BestLC.X, BestLC.Y, BestRC.X, BestRC.Y, OpeningDetection.EstimatedDistanceCm, OpeningDetection.EstimatedLateralCm, Best);
+
+	switch (State) { case EAutoPickupState::Idle: return TEXT("대기"); case EAutoPickupState::Detecting: return TEXT("인식 중"); case EAutoPickupState::Aligning: return TEXT("정렬 중"); case EAutoPickupState::Inserting: return TEXT("삽입 중"); case EAutoPickupState::Lifting: return TEXT("인양 중"); case EAutoPickupState::Complete: return TEXT("완료"); case EAutoPickupState::Stopped: return TEXT("중지"); default: return TEXT("실패"); }
+}
+
+void AAutomatedForklift::ClearAutomaticCommands() { DriveInput = SteerInput = LiftInput = ReachInput = SideShiftInput = 0.f; }
+void AAutomatedForklift::SetAutoPickupState(EAutoPickupState NewState, const FString& Status)
+{
+	AutoPickupState = NewState; AutoPickupStatus = Status; AutoPickupStateElapsed = 0.f;
+	UE_LOG(LogTemp, Warning, TEXT("[R16HD_AUTO_PICK] state=%s reason=%s"), *AutoPickupStateToString(NewState), *Status);
+}
+void AAutomatedForklift::CancelAutoPickup(const FString& Reason, bool bFailure)
+{
+	ClearAutomaticCommands();
+	SetAutoPickupState(bFailure ? EAutoPickupState::Failed : EAutoPickupState::Stopped, Reason);
+}
+void AAutomatedForklift::ToggleAutoPickup()
+{
+	StopNavigation();
+	LastButtonInput = TEXT("시작"); LastButtonClickTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+	if (AutoPickupState == EAutoPickupState::Detecting || AutoPickupState == EAutoPickupState::Aligning || AutoPickupState == EAutoPickupState::Inserting || AutoPickupState == EAutoPickupState::Lifting) { LastButtonInput = TEXT("중지"); CancelAutoPickup(TEXT("사용자가 작업 중지 버튼을 선택"), false); return; }
+	if (!bPalletSensorCaptureActive) { SetAutoPickupState(EAutoPickupState::Failed, TEXT("카메라 캡처가 꺼져 있음 — N 키 또는 설정 확인 필요")); return; }
+	if (LiftCm > 3.f || ReachCm > 3.f) { SetAutoPickupState(EAutoPickupState::Failed, TEXT("수동 초기화 필요 — 포크 하강 및 리치 후퇴")); return; }
+	OpeningStableFrames = AlignmentStableFrames = 0; LastVisionCandidateCount = -1; LastVisionFrameNumber = 0; LastVisionProcessTime = -BIG_NUMBER; bLastVisionReadSucceeded = bLastVisionHadValidPair = false; LastPixelReadStatus = TEXT("카메라 프레임 대기"); LastAlignmentLateralErrorCm = LastAlignmentLiftCorrectionCm = LastAutoInsertionTravelCm = LastPhysicalPalletRiseCm = AutoRequiredForwardTravelCm = AutoMaximumForwardTravelCm = -BIG_NUMBER; bLastAutoDriveBlocked = bLastPhysicalPalletContact = false;
+	SetAutoPickupState(EAutoPickupState::Detecting, TEXT("시작 버튼 입력됨 — 안정적인 삽입구 쌍 영상 대기 중"));
+}
+
+void AAutomatedForklift::NotifyAutoPickupButtonClick(bool bInsideButton, const FVector2D& ScreenPosition)
+{
+	LastButtonClickTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+	LastButtonInput = bInsideButton ? TEXT("버튼 영역 클릭") : TEXT("버튼 밖 좌클릭");
+	UE_LOG(LogTemp, Warning, TEXT("[R16HD_AUTO_PICK_UI] forklift=%s click=(%.0f,%.0f) inside=%d state=%s"), *GetName(), ScreenPosition.X, ScreenPosition.Y, bInsideButton, *AutoPickupStateToString(AutoPickupState));
+	if (bInsideButton) ToggleAutoPickup();
+}
+
+void AAutomatedForklift::GetAutoPickupDiagnosticLines(TArray<FString>& OutLines) const
+{
+	OutLines.Reset(); const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+	const auto AgeText = [Now](float Time) { return Time <= -BIG_NUMBER * .5f ? FString(TEXT("미측정")) : FString::Printf(TEXT("%.1fs"), FMath::Max(0.f, Now - Time)); };
+	const auto ValueText = [](float Value, const TCHAR* Unit) { return Value <= -BIG_NUMBER * .5f ? FString(TEXT("미측정")) : FString::Printf(TEXT("%.1f%s"), Value, Unit); };
+	OutLines.Add(FString::Printf(TEXT("상태: %s"), *AutoPickupStateToString(AutoPickupState)));
+	OutLines.Add(FString::Printf(TEXT("버튼: %s (%s 전)"), *LastButtonInput, *AgeText(LastButtonClickTime)));
+	OutLines.Add(FString::Printf(TEXT("단계: %.1fs — %s"), AutoPickupStateElapsed, *AutoPickupStatus));
+	OutLines.Add(FString::Printf(TEXT("영상: 캡처 %s / RT %s / 처리 #%d (%s 전) / 픽셀 %s"), bPalletSensorCaptureActive ? TEXT("켜짐") : TEXT("꺼짐"), PalletSensorRenderTarget ? TEXT("유효") : TEXT("없음"), LastVisionFrameNumber, *AgeText(LastVisionProcessTime), *LastPixelReadStatus));
+	OutLines.Add(FString::Printf(TEXT("이진화: 밝기<58 / 4px 축소 / 동적 ROI 시작 %s"), LastVisionSearchStartY >= 0 ? *FString::FromInt(LastVisionSearchStartY * 4) : TEXT("미측정")));
+	OutLines.Add(FString::Printf(TEXT("인식: 후보 %s / 쌍 %s / 신뢰도 %s / 안정 %d/3"), LastVisionCandidateCount >= 0 ? *FString::FromInt(LastVisionCandidateCount) : TEXT("미측정"), bLastVisionHadValidPair ? TEXT("유효") : TEXT("없음"), OpeningDetection.TimestampSeconds > -BIG_NUMBER * .5f ? *FString::Printf(TEXT("%.2f"), OpeningDetection.Confidence) : TEXT("미측정"), OpeningStableFrames));
+	if (VisionPairDiagnostics.IsEmpty()) OutLines.Add(TEXT("쌍 판정: 미측정 또는 후보 부족"));
+	else for (int32 Index = 0; Index < FMath::Min(2, VisionPairDiagnostics.Num()); ++Index) OutLines.Add(VisionPairDiagnostics[Index]);
+	OutLines.Add(FString::Printf(TEXT("정렬: 좌우 %s / 높이 %s / 명령 E/Q %.2f Z/C %.2f / 실제 높이 %.1f 좌우 %.1f"), *ValueText(LastAlignmentLateralErrorCm, TEXT("cm")), *ValueText(LastAlignmentLiftCorrectionCm, TEXT("cm")), LiftInput, SideShiftInput, LiftCm, SideShiftCm));
+	OutLines.Add(FString::Printf(TEXT("삽입: W/S %.2f / 이동 %s / 목표 %s / 차단 %s"), DriveInput, *ValueText(LastAutoInsertionTravelCm, TEXT("cm")), *ValueText(AutoRequiredForwardTravelCm, TEXT("cm")), bLastAutoDriveBlocked ? TEXT("예") : TEXT("아니오")));
+	OutLines.Add(FString::Printf(TEXT("인양: E/Q %.2f / 파레트 접촉 %s / 상승 %s"), LiftInput, bLastPhysicalPalletContact ? TEXT("확인") : TEXT("미확인"), *ValueText(LastPhysicalPalletRiseCm, TEXT("cm"))));
+}
+
+void AAutomatedForklift::ProcessOpeningVision()
+{
+	if (!PalletSensorRenderTarget || !GetWorld()) return;
+	if (!(AutoPickupState == EAutoPickupState::Detecting || AutoPickupState == EAutoPickupState::Aligning || AutoPickupState == EAutoPickupState::Inserting)) return;
+	VisionProcessElapsed += GetWorld()->GetDeltaSeconds();
+	if (VisionProcessElapsed < VisionProcessIntervalSeconds) return;
+	VisionProcessElapsed = 0.f;
+	++LastVisionFrameNumber; LastVisionProcessTime = GetWorld()->GetTimeSeconds(); LastVisionCandidateCount = -1; bLastVisionHadValidPair = false; OpeningDetection = FOpeningDetection(); VisionCandidates.Reset(); VisionPairDiagnostics.Reset();
+	FTextureRenderTargetResource* Resource = PalletSensorRenderTarget->GameThread_GetRenderTargetResource();
+	TArray<FColor> Pixels;
+	if (!Resource || !Resource->ReadPixels(Pixels) || Pixels.Num() != PalletSensorWidthPx * PalletSensorHeightPx) { OpeningDetection.bValid = false; bLastVisionReadSucceeded = false; LastPixelReadStatus = TEXT("실패"); return; }
+	bLastVisionReadSucceeded = true; LastPixelReadStatus = TEXT("성공");
+	const int32 W = PalletSensorWidthPx, H = PalletSensorHeightPx, Step = 4, SW = W / Step, SH = H / Step;
+	TArray<float> RowLuma; RowLuma.SetNumZeroed(SH);
+	for (int32 Y = 0; Y < SH; ++Y) for (int32 X = 0; X < SW; ++X)
+	{
+		const FColor C = Pixels[(Y * Step) * W + X * Step];
+		RowLuma[Y] += (static_cast<float>(C.R) * .2126f + static_cast<float>(C.G) * .7152f + static_cast<float>(C.B) * .0722f) / SW;
+	}
+	int32 StrongestBoundaryRow = static_cast<int32>(SH * .30f); float StrongestGradient = 0.f;
+	for (int32 Y = static_cast<int32>(SH * .20f); Y < static_cast<int32>(SH * .70f); ++Y)
+	{
+		const float Gradient = FMath::Abs(RowLuma[Y] - RowLuma[Y - 1]); if (Gradient > StrongestGradient) { StrongestGradient = Gradient; StrongestBoundaryRow = Y; }
+	}
+	const int32 SearchTop = FMath::Clamp(FMath::Max(static_cast<int32>(SH * .30f), StrongestBoundaryRow + 2), 0, static_cast<int32>(SH * .65f));
+	LastVisionSearchStartY = SearchTop;
+	TArray<uint8> Dark; Dark.SetNumZeroed(SW * SH);
+	for (int32 Y = SearchTop; Y < SH * 9 / 10; ++Y) for (int32 X = 0; X < SW; ++X)
+	{
+		const FColor C = Pixels[(Y * Step) * W + X * Step];
+		const int32 Luma = (static_cast<int32>(C.R) * 54 + static_cast<int32>(C.G) * 183 + static_cast<int32>(C.B) * 19) >> 8;
+		Dark[Y * SW + X] = Luma < 58 ? 1 : 0;
+	}
+	VisionMask = Dark; VisionMaskWidth = SW; VisionMaskHeight = SH;
+	TArray<uint8> WorkMask = Dark;
+	struct FCandidate { FVector2D C, E; int32 Area; bool bTouchesBoundary; }; TArray<FCandidate> Candidates; TArray<int32> Queue;
+	for (int32 Seed = 0; Seed < WorkMask.Num(); ++Seed) if (WorkMask[Seed])
+	{
+		Queue.Reset(); Queue.Add(Seed); WorkMask[Seed] = 0; int32 MinX = SW, MaxX = 0, MinY = SH, MaxY = 0;
+		for (int32 I = 0; I < Queue.Num(); ++I) { const int32 P = Queue[I], X = P % SW, Y = P / SW; MinX = FMath::Min(MinX, X); MaxX = FMath::Max(MaxX, X); MinY = FMath::Min(MinY, Y); MaxY = FMath::Max(MaxY, Y);
+			for (int32 DY = -1; DY <= 1; ++DY) for (int32 DX = -1; DX <= 1; ++DX) { const int32 NX = X + DX, NY = Y + DY; if (NX >= 0 && NX < SW && NY >= 0 && NY < SH && WorkMask[NY * SW + NX]) { WorkMask[NY * SW + NX] = 0; Queue.Add(NY * SW + NX); } }
+		}
+		const float BW = (MaxX - MinX + 1) * Step, BH = (MaxY - MinY + 1) * Step;
+		const bool bTouchesBoundary = MinX == 0 || MaxX == SW - 1 || MinY <= SearchTop || MaxY >= SH * 9 / 10 - 1;
+		if (Queue.Num() >= 16 && BW >= 18.f && BH >= 10.f && BW / BH >= .5f && BW / BH <= 5.f) Candidates.Add({ FVector2D((MinX + MaxX + 1) * Step * .5f, (MinY + MaxY + 1) * Step * .5f), FVector2D(BW * .5f, BH * .5f), Queue.Num(), bTouchesBoundary });
+	}
+	LastVisionCandidateCount = Candidates.Num(); OpeningDetection.bValid = false; float Best = 0.f; int32 BestA = INDEX_NONE, BestB = INDEX_NONE;
+	for (int32 Index = 0; Index < Candidates.Num(); ++Index) VisionCandidates.Add({ Candidates[Index].C, Candidates[Index].E, Candidates[Index].Area, false, Candidates[Index].bTouchesBoundary, Candidates[Index].bTouchesBoundary ? TEXT("검색 경계와 연결됨 — 자기 가림/그림자 의심") : TEXT("쌍 평가 대기") });
+	for (int32 A = 0; A < Candidates.Num(); ++A) for (int32 B = A + 1; B < Candidates.Num(); ++B)
+	{
+		int32 LeftIndex = A, RightIndex = B; FCandidate L = Candidates[A], R = Candidates[B]; if (L.C.X > R.C.X) { Swap(L, R); Swap(LeftIndex, RightIndex); }
+		const float Separation = R.C.X - L.C.X, AverageWidth = (L.E.X + R.E.X), AverageHeight = (L.E.Y + R.E.Y);
+		const float SizeDifference = FMath::Abs(L.E.X - R.E.X) / FMath::Max(1.f, FMath::Max(L.E.X, R.E.X));
+		const float HeightDelta = FMath::Abs(L.C.Y - R.C.Y);
+		// The known opening-centre spacing versus opening width is scale invariant.
+		// It remains meaningful as the truck approaches, unlike a fixed image fraction.
+		const float SpacingToWidth = Separation / FMath::Max(1.f, AverageWidth);
+		const float MaxHeightDelta = FMath::Max(12.f, AverageHeight * .75f);
+		const bool bSizeOK = SizeDifference <= .45f;
+		const bool bLevelOK = HeightDelta <= MaxHeightDelta;
+		const bool bSpacingOK = SpacingToWidth >= .80f && SpacingToWidth <= 3.20f;
+		const bool bBoundaryOK = !Candidates[LeftIndex].bTouchesBoundary && !Candidates[RightIndex].bTouchesBoundary;
+		const float SizeScore = 1.f - SizeDifference, LevelScore = 1.f - HeightDelta / FMath::Max(1.f, MaxHeightDelta), SpacingScore = 1.f - FMath::Abs(SpacingToWidth - 1.67f) / 1.67f;
+		const float ExpectedSpacingToWidth = VisionKnownOpeningCenterSpacingCm / FMath::Max(1.f, VisionKnownOpeningWidthCm);
+		const float Score = FMath::Clamp((SizeScore + LevelScore + (1.f - FMath::Abs(SpacingToWidth - ExpectedSpacingToWidth) / ExpectedSpacingToWidth)) / 3.f, 0.f, 1.f);
+		const bool bConfidenceOK = Score >= MinimumOpeningConfidence;
+		const bool bPairOK = bSizeOK && bLevelOK && bSpacingOK && bBoundaryOK && bConfidenceOK;
+		const FString Reason = FString::Printf(TEXT("쌍 %d-%d: 폭차 %.0f%% (<=45), 높이차 %.0fpx (<=%.0f), 간격/폭 %.2f (0.80~3.20), 경계 %s, 점수 %.2f (>=%.2f)%s"), LeftIndex + 1, RightIndex + 1, SizeDifference * 100.f, HeightDelta, MaxHeightDelta, SpacingToWidth, bBoundaryOK ? TEXT("정상") : TEXT("접촉"), Score, MinimumOpeningConfidence, bPairOK ? TEXT("") : TEXT(" — 탈락"));
+		VisionPairDiagnostics.Add(Reason);
+		if (bPairOK && Score > Best) { Best = Score; BestA = LeftIndex; BestB = RightIndex; OpeningDetection.LeftCenter = L.C; OpeningDetection.RightCenter = R.C; OpeningDetection.LeftExtent = L.E; OpeningDetection.RightExtent = R.E; }
+	}
+	if (Best >= MinimumOpeningConfidence)
+	{
+		const float Separation = OpeningDetection.RightCenter.X - OpeningDetection.LeftCenter.X;
+		const float Focal = W / (2.f * FMath::Tan(FMath::DegreesToRadians(PalletSensorFieldOfViewDeg * .5f)));
+		OpeningDetection.bValid = true; OpeningDetection.Confidence = Best; OpeningDetection.TimestampSeconds = GetWorld()->GetTimeSeconds();
+		bLastVisionHadValidPair = true;
+		OpeningDetection.EstimatedDistanceCm = VisionKnownOpeningCenterSpacingCm * Focal / FMath::Max(1.f, Separation);
+		const float CenterX = (OpeningDetection.LeftCenter.X + OpeningDetection.RightCenter.X) * .5f;
+		OpeningDetection.EstimatedLateralCm = PalletSensorLateralOffsetFromCenterCm + (CenterX - W * .5f) * OpeningDetection.EstimatedDistanceCm / Focal;
+		if (VisionCandidates.IsValidIndex(BestA)) { VisionCandidates[BestA].bSelected = true; VisionCandidates[BestA].Reason = TEXT("최종 삽입구 쌍 선택"); }
+		if (VisionCandidates.IsValidIndex(BestB)) { VisionCandidates[BestB].bSelected = true; VisionCandidates[BestB].Reason = TEXT("최종 삽입구 쌍 선택"); }
+	}
+	else
+	{
+		for (FVisionCandidateDebug& Candidate : VisionCandidates) Candidate.Reason = VisionPairDiagnostics.IsEmpty() ? TEXT("짝 후보 없음") : TEXT("쌍 조건 탈락 — 아래 쌍 진단 참조");
+	}
+
 }
 
 bool AAutomatedForklift::HasPhysicalPalletLift(float& OutPalletRiseCm) const
@@ -1378,6 +1573,7 @@ bool AAutomatedForklift::HasPhysicalPalletLift(float& OutPalletRiseCm) const
 void AAutomatedForklift::UpdateAutoPickup(float DeltaSeconds)
 {
 	if (AutoPickupState == EAutoPickupState::Idle || AutoPickupState == EAutoPickupState::Stopped || AutoPickupState == EAutoPickupState::Complete || AutoPickupState == EAutoPickupState::Failed) return;
+
 	// Rebuilt every Tick; unlike the manual axis variables these commands cannot
 	// be erased by the input system's per-frame zero-valued axis callbacks.
 	ClearAutomaticCommands();
@@ -1581,6 +1777,46 @@ void AAutomatedForklift::UpdateAutoPickup(float DeltaSeconds)
 		return;
 	}
 	if (AutoPickupState == EAutoPickupState::Lifting) { AutoLiftInput = AutoLiftSpeedScale; float Rise = 0.f; bLastPhysicalPalletContact = HasPhysicalPalletLift(Rise); LastPhysicalPalletRiseCm = Rise; AutoPickupStatus = bLastPhysicalPalletContact ? TEXT("인양 중 — 파레트 물리 접촉 확인") : TEXT("인양 중 — 파레트 지지 접촉 확인 대기"); if (bLastPhysicalPalletContact) { AutoLiftInput = 0.f; SetAutoPickupState(EAutoPickupState::Complete, FString::Printf(TEXT("파레트 물리 접촉 및 상승 %.1fcm 확인"), Rise)); } else if (LiftCm >= AutoLiftStartCm + AutoTestLiftCm || AutoPickupStateElapsed > 5.f) CancelAutoPickup(TEXT("포크는 상승했으나 파레트 상승을 확인하지 못함"), true); }
+
+	AutoPickupStateElapsed += DeltaSeconds;
+	const bool bFresh = OpeningDetection.bValid && GetWorld()->GetTimeSeconds() - OpeningDetection.TimestampSeconds <= VisionMaximumFrameAgeSeconds;
+	if (AutoPickupState == EAutoPickupState::Detecting) { if (bFresh) ++OpeningStableFrames; else OpeningStableFrames = 0; AutoPickupStatus = bFresh ? FString::Printf(TEXT("삽입구 쌍 확인 — 안정 프레임 %d/3"), OpeningStableFrames) : FString::Printf(TEXT("삽입구 후보 %d개 — 유효한 쌍 없음"), LastVisionCandidateCount); if (OpeningStableFrames >= 3) { LockedOpeningDetection = OpeningDetection; SetAutoPickupState(EAutoPickupState::Aligning, TEXT("안정적인 삽입구 쌍 잠금")); } else if (AutoPickupStateElapsed > 5.f) CancelAutoPickup(TEXT("유효한 두 삽입구를 찾지 못함 — 수동 접근 위치 조정 필요"), true); return; }
+	if (AutoPickupState == EAutoPickupState::Aligning)
+	{
+		if (!bFresh || OpeningDetection.EstimatedDistanceCm < 70.f || OpeningDetection.EstimatedDistanceCm > 260.f) { CancelAutoPickup(TEXT("영상 거리 또는 신뢰도가 범위를 벗어남 — 수동 접근 위치 조정 필요"), true); return; }
+		const float LateralError = OpeningDetection.EstimatedLateralCm - SideShiftCm;
+		const float Focal = PalletSensorWidthPx / (2.f * FMath::Tan(FMath::DegreesToRadians(PalletSensorFieldOfViewDeg * .5f)));
+		const float OpeningCenterY = (OpeningDetection.LeftCenter.Y + OpeningDetection.RightCenter.Y) * .5f;
+		// Downscreen means lower in the camera image.  Moving the carriage down
+		// (negative lift) moves the opening toward the calibrated target row.
+		const float LiftCorrection = -(OpeningCenterY - PalletSensorHeightPx * AutoTargetOpeningCenterYRatio) * OpeningDetection.EstimatedDistanceCm / Focal;
+		LastAlignmentLateralErrorCm = LateralError; LastAlignmentLiftCorrectionCm = LiftCorrection;
+		if (FMath::Abs(OpeningDetection.EstimatedLateralCm) > Dimensions.ForkSideShiftCm || LiftCm + LiftCorrection < -AutoVerticalToleranceCm || LiftCm + LiftCorrection > RequiredLiftStrokeCm + AutoVerticalToleranceCm) { CancelAutoPickup(TEXT("정렬 범위 초과 — 수동 접근 위치 조정 필요"), true); return; }
+		SideShiftInput = FMath::IsNearlyZero(LateralError, 1.2f) ? 0.f : FMath::Sign(LateralError) * .7f;
+		LiftInput = FMath::IsNearlyZero(LiftCorrection, AutoVerticalToleranceCm) ? 0.f : FMath::Sign(LiftCorrection) * .15f;
+		if (FMath::Abs(LateralError) <= 1.2f && FMath::Abs(LiftCorrection) <= AutoVerticalToleranceCm) ++AlignmentStableFrames; else AlignmentStableFrames = 0;
+		AutoPickupStatus = FString::Printf(TEXT("정렬 중 — 좌우 %.1fcm, 높이 %.1fcm"), LateralError, LiftCorrection);
+		if (AlignmentStableFrames >= 3)
+		{
+			SideShiftInput = LiftInput = 0.f; LockedOpeningDetection = OpeningDetection;
+			const FVector LeftTip = LeftForkCollision->GetComponentTransform().TransformPosition(FVector(LeftForkCollision->GetScaledBoxExtent().X, 0.f, 0.f));
+			const FVector RightTip = RightForkCollision->GetComponentTransform().TransformPosition(FVector(RightForkCollision->GetScaledBoxExtent().X, 0.f, 0.f));
+			const float ForkTipAheadOfCameraCm = FVector::DotProduct((LeftTip + RightTip) * .5f - PalletSensorCapture->GetComponentLocation(), PalletSensorCapture->GetForwardVector());
+			const float ApproachToPalletFrontCm = LockedOpeningDetection.EstimatedDistanceCm - ForkTipAheadOfCameraCm;
+			if (ApproachToPalletFrontCm < 5.f || ApproachToPalletFrontCm > AutoMaximumApproachTravelCm)
+			{
+				CancelAutoPickup(FString::Printf(TEXT("영상 거리 %.0fcm와 포크 끝 오프셋 %.0fcm가 맞지 않음 — 수동 접근 위치 조정 필요"), LockedOpeningDetection.EstimatedDistanceCm, ForkTipAheadOfCameraCm), true); return;
+			}
+			AutoRequiredForwardTravelCm = ApproachToPalletFrontCm + AutoRequiredInsertionCm;
+			AutoMaximumForwardTravelCm = ApproachToPalletFrontCm + AutoMaximumInsertionCm;
+			AutoInsertionStartLocation = GetActorLocation();
+			SetAutoPickupState(EAutoPickupState::Inserting, FString::Printf(TEXT("정렬 완료 — 전면까지 %.0fcm, 목표 삽입 깊이 %.0fcm"), ApproachToPalletFrontCm, AutoRequiredInsertionCm));
+		}
+		if (AutoPickupStateElapsed > 6.f) CancelAutoPickup(TEXT("인양·좌우 정렬이 안정화되지 않음"), true); return;
+	}
+	if (AutoPickupState == EAutoPickupState::Inserting) { DriveInput = AutoInsertSpeedScale; const float Travel = FVector::Dist(GetActorLocation(), AutoInsertionStartLocation); LastAutoInsertionTravelCm = Travel; bLastAutoDriveBlocked = AutoPickupStateElapsed > 1.f && FMath::Abs(CurrentForwardSpeedCmPerSec) < 2.f; AutoPickupStatus = bLastAutoDriveBlocked ? TEXT("삽입 중 — 전진 명령은 있으나 실제 이동 없음") : FString::Printf(TEXT("삽입 중 — 실제 전진 %.1f / 목표 %.1fcm"), Travel, AutoRequiredForwardTravelCm); if (Travel >= AutoRequiredForwardTravelCm) { DriveInput = 0.f; AutoLiftStartCm = LiftCm; bool bBaselineSet = false; for (TActorIterator<AWoodPallet> It(GetWorld()); It; ++It) { AutoLiftPalletStartZ = (*It)->GetActorLocation().Z; bBaselineSet = true; break; } if (!bBaselineSet) for (TActorIterator<APallet> It(GetWorld()); It; ++It) { AutoLiftPalletStartZ = (*It)->GetActorLocation().Z; break; } SetAutoPickupState(EAutoPickupState::Lifting, TEXT("영상 거리+포크 끝 오프셋 기준 삽입 깊이 도달 — 물리 접촉 인양 시작")); } else if (Travel > AutoMaximumForwardTravelCm || AutoPickupStateElapsed > 12.f || bLastAutoDriveBlocked) CancelAutoPickup(TEXT("삽입이 막혔거나 거리/시간 한계 도달"), true); return; }
+	if (AutoPickupState == EAutoPickupState::Lifting) { LiftInput = AutoLiftSpeedScale; float Rise = 0.f; bLastPhysicalPalletContact = HasPhysicalPalletLift(Rise); LastPhysicalPalletRiseCm = Rise; AutoPickupStatus = bLastPhysicalPalletContact ? TEXT("인양 중 — 파레트 물리 접촉 확인") : TEXT("인양 중 — 파레트 지지 접촉 확인 대기"); if (bLastPhysicalPalletContact) { LiftInput = 0.f; SetAutoPickupState(EAutoPickupState::Complete, FString::Printf(TEXT("파레트 물리 접촉 및 상승 %.1fcm 확인"), Rise)); } else if (LiftCm >= AutoLiftStartCm + AutoTestLiftCm || AutoPickupStateElapsed > 5.f) CancelAutoPickup(TEXT("포크는 상승했으나 파레트 상승을 확인하지 못함"), true); }
+
 }
 
 void AAutomatedForklift::LogInitialDriveOverlaps()
@@ -1598,6 +1834,7 @@ void AAutomatedForklift::EmitDriveDiagnostic(const FVector& StartLocation, const
 void AAutomatedForklift::Tick(float Dt)
 {
 	Super::Tick(Dt);
+
 	// Capture/process first, then create automatic commands before the movement
 	// integration of this same Tick.  Manual axis callbacks may provide zero
 	// every frame; the selected automatic channel remains authoritative only
@@ -1625,6 +1862,11 @@ void AAutomatedForklift::Tick(float Dt)
 	LastAppliedSteerInput = bAutoMotion ? AutoSteerInput : SteerInput;
 	const float Speed = LastAppliedDriveInput >= 0.f ? Motion.ForwardSpeedCmPerSec : Motion.ReverseSpeedCmPerSec;
 	TargetForwardSpeedCmPerSec = LastAppliedDriveInput * Speed;
+
+	UpdateNavigation(Dt);
+	const float Speed = DriveInput >= 0.f ? Motion.ForwardSpeedCmPerSec : Motion.ReverseSpeedCmPerSec;
+	TargetForwardSpeedCmPerSec = DriveInput * Speed;
+
 	const FVector StartLocation = GetActorLocation(); FHitResult DriveHit;
 	FVector DriveDelta = GetActorForwardVector() * TargetForwardSpeedCmPerSec * Dt;
 	float EarliestPartHit = 1.f;
@@ -1644,23 +1886,49 @@ void AAutomatedForklift::Tick(float Dt)
 	FHitResult CarriedLoadHit;
 	if (SweepCarriedPallet(DriveDelta, TEXT("carried pallet drive sweep"), CarriedLoadHit)) EarliestPartHit = FMath::Min(EarliestPartHit, CarriedLoadHit.Time);
 	if (EarliestPartHit < 1.f) DriveDelta *= FMath::Max(0.f, EarliestPartHit - .01f);
+
 	if (!FMath::IsNearlyZero(LastAppliedDriveInput) && EarliestPartHit < 1.f)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[R16HD_COLLISION_FIX_V2] Drive sweep reduced: forklift=%s input=%.2f earliestTime=%.3f resultingDelta=%s"), *GetName(), LastAppliedDriveInput, EarliestPartHit, *DriveDelta.ToString());
+
+	if (!FMath::IsNearlyZero(DriveInput) && EarliestPartHit < 1.f)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[R16HD_COLLISION_FIX_V2] Drive sweep reduced: forklift=%s input=%.2f earliestTime=%.3f resultingDelta=%s"), *GetName(), DriveInput, EarliestPartHit, *DriveDelta.ToString());
+
 	}
 	AddActorWorldOffset(DriveDelta, true, &DriveHit);
 	if (DriveHit.bBlockingHit) RecordCollision(TEXT("body root sweep"), BodyCollision, DriveHit, DriveDelta, true);
 	const FVector EndLocation = GetActorLocation();
 	CurrentForwardSpeedCmPerSec = Dt > SMALL_NUMBER ? FVector::DotProduct((EndLocation - StartLocation) / Dt, GetActorForwardVector()) : 0.f;
+
 	const bool bIsDriving = !FMath::IsNearlyZero(LastAppliedDriveInput); if (bIsDriving && !bWasDriving) LogInitialDriveOverlaps(); if (bIsDriving) EmitDriveDiagnostic(StartLocation, EndLocation, DriveHit); bWasDriving = bIsDriving;
 	const float YawDelta = LastAppliedSteerInput * Motion.SteeringRateDegPerSec * Dt;
 	LastAutoYawDeltaDeg = IsAutoPickupMotionActive() ? YawDelta : 0.f;
 	if (IsAutoPickupMotionActive()) AutoApproachAccumulatedYawDeg += YawDelta;
+
+	const bool bIsDriving = !FMath::IsNearlyZero(DriveInput); if (bIsDriving && !bWasDriving) LogInitialDriveOverlaps(); if (bIsDriving) EmitDriveDiagnostic(StartLocation, EndLocation, DriveHit); bWasDriving = bIsDriving;
+	const float YawDelta = SteerInput * Motion.SteeringRateDegPerSec * Dt;
+
 	if (!WouldForkRotationHitFixedObstacle(YawDelta)) AddActorWorldRotation(FRotator(0.f, YawDelta, 0.f));
 	// Fork axes are deterministic kinematic controls. Their prediction sweeps
 	// use the real separated tine volumes against fixed geometry. The dynamic
 	// pallet is intentionally excluded so physical fork contact can lift it.
 	ApplyKinematicForkControls(Dt);
+
+	// One GPU render target is shared by the preview HUD and future vision code.
+	// No CPU readback is performed in this implementation.
+	if (bPalletSensorCaptureActive && PalletSensorCapture)
+	{
+		PalletSensorCaptureElapsed += Dt;
+		if (PalletSensorCaptureElapsed >= PalletSensorCaptureIntervalSeconds)
+		{
+			PalletSensorCaptureElapsed = 0.f;
+			PalletSensorCapture->CaptureScene();
+		}
+	}
+	ProcessOpeningVision();
+	UpdateAutoPickup(Dt);
+
 	DrawCollisionDebug();
 	DrawPalletSensorDebug();
 }

@@ -13,6 +13,8 @@ UForkliftNavigationSensorComponent::UForkliftNavigationSensorComponent()
 void UForkliftNavigationSensorComponent::BeginPlay()
 {
 	Super::BeginPlay();
+	// Migrate the previous 15 m instance setting for the expanded factory.
+	if (FMath::IsNearlyEqual(MaximumRangeCm, 1500.f)) MaximumRangeCm = 3000.f;
 	if (AActor* Owner = GetOwner()) PrimaryComponentTick.AddPrerequisite(Owner, Owner->PrimaryActorTick);
 	PreviousWorldLocation = GetComponentLocation();
 	PreviousWorldRotation = GetComponentQuat();
@@ -23,7 +25,7 @@ void UForkliftNavigationSensorComponent::TickComponent(float DeltaTime, ELevelTi
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 	UpdateImu();
-	if (bScanEnabled)
+	if (bScanEnabled && ScanIntervalSeconds >= .02f && HorizontalSamples > 0 && VerticalChannels > 0 && MaximumRangeCm > MinimumRangeCm)
 	{
 		ScanElapsedSeconds += DeltaTime;
 		if (ScanElapsedSeconds >= ScanIntervalSeconds)
@@ -48,20 +50,21 @@ void UForkliftNavigationSensorComponent::PerformScan()
 	LatestScan.TimestampSeconds = World->GetTimeSeconds();
 	LatestScan.SensorToBody = GetRelativeTransform();
 	LatestScan.Samples.Reset();
-	LatestScan.Samples.Reserve(HorizontalSamples * VerticalChannels);
+	LatestScan.Samples.Reserve(HorizontalSamples * VerticalChannels + FMath::Clamp(MappingHorizontalSamples,120,720));
 	const FTransform SensorWorld = GetComponentTransform();
-	const float HorizontalStep = HorizontalFieldOfViewDegrees >= 359.99f ? HorizontalFieldOfViewDegrees / HorizontalSamples : HorizontalFieldOfViewDegrees / FMath::Max(1, HorizontalSamples - 1);
 	const float VerticalStep = VerticalChannels > 1 ? VerticalFieldOfViewDegrees / (VerticalChannels - 1) : 0.f;
 	const float HorizontalStart = -HorizontalFieldOfViewDegrees * .5f;
 	const float VerticalStart = VerticalCenterDegrees - VerticalFieldOfViewDegrees * .5f;
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(R16HDLidar), false);
 	Params.bTraceComplex = false;
-	for (int32 VerticalIndex = 0; VerticalIndex < VerticalChannels; ++VerticalIndex)
+	for (int32 VerticalIndex = 0; VerticalIndex <= VerticalChannels; ++VerticalIndex)
 	{
-		const float PitchRad = FMath::DegreesToRadians(VerticalStart + VerticalIndex * VerticalStep);
-		for (int32 HorizontalIndex = 0; HorizontalIndex < HorizontalSamples; ++HorizontalIndex)
+		const float PitchRad = (VerticalIndex == VerticalChannels ? 0.f : FMath::DegreesToRadians(VerticalStart + VerticalIndex * VerticalStep));
+		const int32 RayCount = VerticalIndex == VerticalChannels ? FMath::Clamp(MappingHorizontalSamples,120,720) : HorizontalSamples;
+		const float RayStep = HorizontalFieldOfViewDegrees >= 359.99f ? HorizontalFieldOfViewDegrees / RayCount : HorizontalFieldOfViewDegrees / FMath::Max(1, RayCount-1);
+		for (int32 HorizontalIndex = 0; HorizontalIndex < RayCount; ++HorizontalIndex)
 		{
-			const float YawRad = FMath::DegreesToRadians(HorizontalStart + HorizontalIndex * HorizontalStep);
+			const float YawRad = FMath::DegreesToRadians(HorizontalStart + HorizontalIndex * RayStep);
 			FLidarRaySample& Sample = LatestScan.Samples.AddDefaulted_GetRef();
 			Sample.LocalDirection = FRotator(FMath::RadiansToDegrees(PitchRad), FMath::RadiansToDegrees(YawRad), 0.f).Vector();
 			const FVector Start = SensorWorld.GetLocation() + SensorWorld.TransformVectorNoScale(Sample.LocalDirection) * MinimumRangeCm;

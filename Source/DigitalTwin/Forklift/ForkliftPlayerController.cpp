@@ -29,28 +29,37 @@ void AForkliftPlayerController::ClickAutoPickupButton()
 	float MouseX = 0.f, MouseY = 0.f; int32 ViewX = 0, ViewY = 0;
 	GetViewportSize(ViewX, ViewY);
 	const bool bHasMouse = GetMousePosition(MouseX, MouseY);
+		if (bHasMouse && AAutomatedForklift::NavigationButtonRect(ViewY).IsInside(FVector2D(MouseX,MouseY)))
+	{
+		if (AAutomatedForklift* Forklift=Cast<AAutomatedForklift>(GetPawn()))
+		{
+			if (ActiveWoodPallet) CancelWoodPalletPlacement();
+			Forklift->ToggleNavigation();
+		}
+		return;
+	}
 	const bool bInsideAutoButton = bHasMouse && MouseX >= 24.f && MouseX <= 264.f && MouseY >= ViewY - 72.f && MouseY <= ViewY - 24.f;
 	const bool bInsideWoodButton = bHasMouse && MouseX >= 274.f && MouseX <= 514.f && MouseY >= ViewY - 72.f && MouseY <= ViewY - 24.f;
 	UE_LOG(LogTemp, Warning, TEXT("[R16HD_UI] controller=%s viewport=%dx%d mouse=(%.0f,%.0f) valid=%d auto=%d wood=%d pawn=%s"), *GetName(), ViewX, ViewY, MouseX, MouseY, bHasMouse, bInsideAutoButton, bInsideWoodButton, *GetNameSafe(GetPawn()));
 	if (bInsideAutoButton) { if (AAutomatedForklift* Forklift = Cast<AAutomatedForklift>(GetPawn())) Forklift->NotifyAutoPickupButtonClick(true, FVector2D(MouseX, MouseY)); return; }
-	if (bInsideWoodButton) { BeginOrSelectWoodPallet(); return; }
+	if (bInsideWoodButton) { if (AAutomatedForklift* Forklift=Cast<AAutomatedForklift>(GetPawn())) Forklift->StopNavigation(); BeginOrSelectWoodPallet(); return; }
 	if (ActiveWoodPallet) return;
 	if (AAutomatedForklift* Forklift = Cast<AAutomatedForklift>(GetPawn()))
 	{
-		if (Forklift->GetAutoPickupState() == EAutoPickupState::Detecting || Forklift->GetAutoPickupState() == EAutoPickupState::Approaching || Forklift->GetAutoPickupState() == EAutoPickupState::Aligning || Forklift->GetAutoPickupState() == EAutoPickupState::Inserting || Forklift->GetAutoPickupState() == EAutoPickupState::Lifting)
+		if (Forklift->GetAutoPickupState() == EAutoPickupState::Detecting || Forklift->GetAutoPickupState() == EAutoPickupState::Aligning || Forklift->GetAutoPickupState() == EAutoPickupState::Inserting || Forklift->GetAutoPickupState() == EAutoPickupState::Lifting)
 		{
 			WoodPalletPlacementStatus = TEXT("자동 집기 실행 중에는 기존 목재 파레트를 이동할 수 없음");
 			return;
 		}
 	}
-	FHitResult Hit; if (GetHitResultUnderCursorByChannel(UEngineTypes::ConvertToTraceType(ECC_Visibility), false, Hit)) if (AWoodPallet* Pallet = Cast<AWoodPallet>(Hit.GetActor())) { ActiveWoodPallet = Pallet; SavedWoodPalletTransform = Pallet->GetActorTransform(); bWoodPalletIsNew = false; Pallet->SetSelectedDebug(true); Pallet->SetPlacementPreview(true); WoodPalletPlacementStatus = TEXT("목재 파레트 드래그 중"); }
+	FHitResult Hit; if (GetHitResultUnderCursorByChannel(UEngineTypes::ConvertToTraceType(ECC_Visibility), false, Hit)) if (AWoodPallet* Pallet = Cast<AWoodPallet>(Hit.GetActor())) { if (AAutomatedForklift* Forklift=Cast<AAutomatedForklift>(GetPawn())) Forklift->StopNavigation(); ActiveWoodPallet = Pallet; SavedWoodPalletTransform = Pallet->GetActorTransform(); bWoodPalletIsNew = false; Pallet->SetSelectedDebug(true); Pallet->SetPlacementPreview(true); WoodPalletPlacementStatus = TEXT("목재 파레트 드래그 중"); }
 }
 
 void AForkliftPlayerController::BeginOrSelectWoodPallet()
 {
 	if (ActiveWoodPallet) { WoodPalletPlacementStatus = TEXT("이미 배치 중 — 좌클릭 확정 또는 Esc 취소"); return; }
 	AAutomatedForklift* Forklift = Cast<AAutomatedForklift>(GetPawn());
-	if (Forklift && (Forklift->GetAutoPickupState() == EAutoPickupState::Detecting || Forklift->GetAutoPickupState() == EAutoPickupState::Approaching || Forklift->GetAutoPickupState() == EAutoPickupState::Aligning || Forklift->GetAutoPickupState() == EAutoPickupState::Inserting || Forklift->GetAutoPickupState() == EAutoPickupState::Lifting)) { WoodPalletPlacementStatus = TEXT("자동 집기 실행 중에는 배치 불가"); return; }
+	if (Forklift && (Forklift->GetAutoPickupState() == EAutoPickupState::Detecting || Forklift->GetAutoPickupState() == EAutoPickupState::Aligning || Forklift->GetAutoPickupState() == EAutoPickupState::Inserting || Forklift->GetAutoPickupState() == EAutoPickupState::Lifting)) { WoodPalletPlacementStatus = TEXT("자동 집기 실행 중에는 배치 불가"); return; }
 	FActorSpawnParameters Params; Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 	ActiveWoodPallet = GetWorld()->SpawnActor<AWoodPallet>(AWoodPallet::StaticClass(), FVector(0.f, 0.f, -10000.f), FRotator::ZeroRotator, Params);
 	if (!ActiveWoodPallet) { WoodPalletPlacementStatus = TEXT("목재 파레트 생성 실패"); return; }

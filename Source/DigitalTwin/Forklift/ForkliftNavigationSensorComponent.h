@@ -71,13 +71,14 @@ public:
 	UPROPERTY(EditAnywhere, Category="LiDAR|Scan", meta=(ClampMin="1", ClampMax="64")) int32 VerticalChannels = 8;
 	UPROPERTY(EditAnywhere, Category="LiDAR|Scan") float VerticalCenterDegrees = -10.f;
 	UPROPERTY(EditAnywhere, Category="LiDAR|Scan", meta=(ClampMin="0.0")) float MinimumRangeCm = 10.f;
-	UPROPERTY(EditAnywhere, Category="LiDAR|Scan", meta=(ClampMin="1.0")) float MaximumRangeCm = 1500.f;
+	UPROPERTY(EditAnywhere, Category="LiDAR|Scan", meta=(ClampMin="1.0")) float MaximumRangeCm = 3000.f;
 	UPROPERTY(EditAnywhere, Category="LiDAR|Debug") bool bDebugVisible = false;
 	UPROPERTY(EditAnywhere, Category="LiDAR|Debug", meta=(ClampMin="1")) int32 DebugRayStride = 40;
 	UPROPERTY(EditAnywhere, Category="IMU") bool bImuIncludesGravity = false;
 	UPROPERTY(EditAnywhere, Category="IMU", meta=(ClampMin="1.0")) float TeleportResetDistanceCm = 250.f;
 	UPROPERTY(EditAnywhere, Category="IMU", meta=(ClampMin="1.0", ClampMax="180.0")) float TeleportResetRotationDegrees = 60.f;
 
+	UPROPERTY(EditAnywhere, Category="LiDAR|Scan", meta=(ClampMin="120", ClampMax="720")) int32 MappingHorizontalSamples = 360;
 	const FForkliftLidarScan& GetLatestScan() const { return LatestScan; }
 	const FForkliftImuSample& GetLatestImu() const { return LatestImu; }
 	/** Debug/simulation truth only. Do not use as an estimated vehicle pose. */
