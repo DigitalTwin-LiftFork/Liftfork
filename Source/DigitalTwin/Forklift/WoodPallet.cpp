@@ -9,6 +9,7 @@ AWoodPallet::AWoodPallet()
 	SetRootComponent(PhysicsRoot);
 	PhysicsRoot->SetBoxExtent(FVector(2.f)); // Host body; the following simple shapes preserve the two openings.
 	PhysicsRoot->SetCollisionProfileName(TEXT("PhysicsActor"));
+	PhysicsRoot->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
 	PhysicsRoot->SetSimulatePhysics(true); PhysicsRoot->SetEnableGravity(true); PhysicsRoot->SetNotifyRigidBodyCollision(true);
 	PhysicsRoot->OnComponentHit.AddDynamic(this, &AWoodPallet::HandleHit);
 	CollisionShapes.Add(PhysicsRoot);
@@ -38,16 +39,16 @@ UStaticMeshComponent* AWoodPallet::AddWoodBox(const TCHAR* Name, const FVector& 
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> Cube(TEXT("/Engine/BasicShapes/Cube.Cube"));
 	if (Cube.Succeeded()) Part->SetStaticMesh(Cube.Object);
 	Part->SetRelativeLocation(Location); Part->SetRelativeScale3D(FullSize / 100.f); Part->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	// Deliberately high-saturation red: this is a simulation/vision aid, not a
-	// claim about a real wood-pallet finish.  It is rendered by the same sensor.
-	Part->SetVectorParameterValueOnMaterials(TEXT("Color"), FVector(.78f, .035f, .025f));
+	Part->SetVectorParameterValueOnMaterials(TEXT("Color"), FVector(.72f, .50f, .25f));
 	VisualParts.Add(Part); return Part;
 }
 UBoxComponent* AWoodPallet::AddCollisionBox(const TCHAR* Name, const FVector& Location, const FVector& HalfExtent)
 {
 	UBoxComponent* Part = CreateDefaultSubobject<UBoxComponent>(Name); Part->SetupAttachment(PhysicsRoot); Part->SetRelativeLocation(Location); Part->SetBoxExtent(HalfExtent);
 	Part->SetCollisionProfileName(TEXT("PhysicsActor"));
+	Part->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
 	Part->SetCollisionResponseToChannel(ECC_WorldDynamic, ECR_Block);
+	Part->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
 	Part->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	Part->SetNotifyRigidBodyCollision(true);
 	Part->OnComponentHit.AddDynamic(this, &AWoodPallet::HandleHit);
@@ -59,13 +60,13 @@ void AWoodPallet::SetPlacementPreview(bool bPreview)
 {
 	bPlacementPreview = bPreview; PhysicsRoot->SetSimulatePhysics(false); PhysicsRoot->SetEnableGravity(false);
 	for (UBoxComponent* Shape : CollisionShapes) Shape->SetCollisionEnabled(bPreview ? ECollisionEnabled::NoCollision : ECollisionEnabled::QueryAndPhysics);
-	for (UStaticMeshComponent* Part : VisualParts) Part->SetVectorParameterValueOnMaterials(TEXT("Color"), bPreview ? FVector(.25f, .8f, .3f) : FVector(.78f, .035f, .025f));
+	for (UStaticMeshComponent* Part : VisualParts) Part->SetVectorParameterValueOnMaterials(TEXT("Color"), bPreview ? FVector(.25f, .8f, .3f) : FVector(.72f, .50f, .25f));
 }
 void AWoodPallet::FinalizePlacement()
 {
 	bPlacementPreview = false; for (UBoxComponent* Shape : CollisionShapes) Shape->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	PhysicsRoot->SetEnableGravity(true); PhysicsRoot->SetSimulatePhysics(true); PhysicsRoot->SetPhysicsLinearVelocity(FVector::ZeroVector); PhysicsRoot->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
-	for (UStaticMeshComponent* Part : VisualParts) Part->SetVectorParameterValueOnMaterials(TEXT("Color"), FVector(.78f, .035f, .025f));
+	for (UStaticMeshComponent* Part : VisualParts) Part->SetVectorParameterValueOnMaterials(TEXT("Color"), FVector(.72f, .50f, .25f));
 }
 void AWoodPallet::HandleHit(UPrimitiveComponent*, AActor*, UPrimitiveComponent* Other, FVector, const FHitResult& Hit) { LastHit = Hit; LastHitTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f; LastHitOther = Other; }
 bool AWoodPallet::GetRecentForkContact(float MaxAge, UPrimitiveComponent*& OutOther) const { OutOther = nullptr; if (!GetWorld() || GetWorld()->GetTimeSeconds() - LastHitTime > MaxAge) return false; OutOther = LastHitOther.Get(); return OutOther != nullptr; }

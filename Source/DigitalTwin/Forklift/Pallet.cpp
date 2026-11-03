@@ -13,7 +13,9 @@ APallet::APallet()
 	CollisionBody->SetBoxExtent(FVector(DepthCm * .5f, WidthCm * .5f, DeckThicknessCm * .5f));
 	CollisionBody->SetCollisionProfileName(TEXT("PhysicsActor"));
 	CollisionBody->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	CollisionBody->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
 	CollisionBody->SetCollisionResponseToChannel(ECC_WorldDynamic, ECR_Block);
+	CollisionBody->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
 	CollisionBody->SetNotifyRigidBodyCollision(true);
 	CollisionBody->OnComponentHit.AddDynamic(this, &APallet::HandlePalletHit);
 	CollisionBody->SetMobility(EComponentMobility::Movable);
@@ -24,6 +26,8 @@ APallet::APallet()
 	AddCollisionShape(TEXT("LeftSupportCollision"), FVector(0.f, -47.5f, 6.5f), FVector(DepthCm * .5f, 7.5f, ForkOpeningHeightCm * .5f));
 	AddCollisionShape(TEXT("CenterSupportCollision"), FVector(0.f, 0.f, 6.5f), FVector(DepthCm * .5f, 10.f, ForkOpeningHeightCm * .5f));
 	AddCollisionShape(TEXT("RightSupportCollision"), FVector(0.f, 47.5f, 6.5f), FVector(DepthCm * .5f, 7.5f, ForkOpeningHeightCm * .5f));
+	CargoVisual = AddBoard(TEXT("CargoVisual"), FVector(0,0,54), FVector(1,1,.8));
+	CargoCollision = AddCollisionShape(TEXT("CargoCollision"), FVector(0,0,54), FVector(50,50,40));
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> Cube(TEXT("/Engine/BasicShapes/Cube.Cube"));
 	if (Cube.Succeeded())
 	{
@@ -108,6 +112,10 @@ float APallet::GetForkSupportSurfaceWorldZ() const
 void APallet::BeginPlay()
 {
 	Super::BeginPlay();
+ CollisionShapes.Remove(CargoCollision);
+ if (bHasCargo) CollisionShapes.AddUnique(CargoCollision);
+ CargoVisual->SetVisibility(bHasCargo);
+ CargoCollision->SetCollisionEnabled(bHasCargo ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
 	SetCarriedState(false);
 	UE_LOG(LogTemp, Warning, TEXT("[R16HD_PALLET_PHYSICS] pallet=%s sim=%d gravity=%d collision=%d root=%s"), *GetName(), CollisionBody->IsSimulatingPhysics(), CollisionBody->IsGravityEnabled(), static_cast<int32>(CollisionBody->GetCollisionEnabled()), *CollisionBody->GetComponentLocation().ToString());
 }
@@ -149,8 +157,19 @@ UBoxComponent* APallet::AddCollisionShape(const TCHAR* Name, const FVector& Loca
 	Shape->SetBoxExtent(HalfExtent);
 	Shape->SetCollisionProfileName(TEXT("PhysicsActor"));
 	Shape->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	Shape->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
 	Shape->SetCollisionResponseToChannel(ECC_WorldDynamic, ECR_Block);
+	Shape->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
 	Shape->SetMobility(EComponentMobility::Movable);
 	CollisionShapes.Add(Shape);
 	return Shape;
+}
+
+void APallet::OnConstruction(const FTransform& Transform)
+{
+ Super::OnConstruction(Transform);
+ CargoVisual->SetVisibility(bHasCargo);
+ CargoCollision->SetCollisionEnabled(bHasCargo ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
+ CollisionShapes.Remove(CargoCollision);
+ if (bHasCargo) CollisionShapes.AddUnique(CargoCollision);
 }

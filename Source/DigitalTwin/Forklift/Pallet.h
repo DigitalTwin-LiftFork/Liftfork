@@ -17,6 +17,10 @@ class DIGITALTWIN_API APallet : public AActor
 public:
 	APallet();
 	virtual void BeginPlay() override;
+ virtual void OnConstruction(const FTransform& Transform) override;
+ UPROPERTY(EditAnywhere, Category="Pallet") bool bHasCargo = false;
+ UPROPERTY(VisibleAnywhere, Category="Pallet") TObjectPtr<UStaticMeshComponent> CargoVisual;
+ UPROPERTY(VisibleAnywhere, Category="Pallet") TObjectPtr<UBoxComponent> CargoCollision;
 	/** Disable pallet collision while fork-carried; restore gravity and collision when set down. */
 	void SetCarriedState(bool bIsCarried);
 	/** Validates that both complete tine cross-sections are inside the two specified fork openings. */
