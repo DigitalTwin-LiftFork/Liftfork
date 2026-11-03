@@ -20,10 +20,45 @@ namespace
 	}
 }
 
+void AAutomatedForklift::GetNavigationDiagnosticLines(TArray<FString>& OutLines) const
+{
+	const auto* S = FindComponentByClass<UForkliftSlamComponent>();
+	const float Now = GetWorld()->GetTimeSeconds();
+	OutLines.Add(FString::Printf(TEXT("주행 상태: %s"), bNavigationActive ? TEXT("자동 주행 활성") : TEXT("정지 / 수동")));
+	OutLines.Add(FString::Printf(TEXT("실제 속도 %.2f m/s | 명령 %.2f m/s"), CurrentForwardSpeedCmPerSec / 100.f, TargetForwardSpeedCmPerSec / 100.f));
+	OutLines.Add(bNavigationGoalSet && S && NavigationSensor ? FString::Printf(TEXT("목표까지 %.2f m | 경로점 %d"), FVector2D::Distance(BodyPose(S, NavigationSensor), NavigationGoal) / 100.f, NavigationRoute.Num()) : TEXT("목표: 미지정"));
+	OutLines.Add(S ? FString::Printf(TEXT("위치 신뢰도 %.0f%% | 추적 %s"), S->GetConfidence() * 100.f, S->IsTrackingFresh(Now) ? TEXT("정상") : TEXT("대기")) : TEXT("SLAM 센서 없음"));
+	const double Stamp = NavigationSensor ? NavigationSensor->GetLatestScan().TimestampSeconds : -1.;
+	OutLines.Add(Stamp >= 0. ? FString::Printf(TEXT("최근 스캔 %.2f초 전 | 복구 시도 %d/3"), Now - Stamp, NavigationRecoveryAttempts) : TEXT("첫 스캔 대기"));
+	OutLines.Add(FString::Printf(TEXT("상태 / 정지 이유: %s"), *NavigationStatus));
+}
+
+void AAutomatedForklift::BeginNavigationRecovery(const FString& Reason)
+{
+	DriveInput = SteerInput = 0.f;
+	if (NavigationRecoveryStart >= 0.f) return;
+	if (NavigationRecoveryAttempts >= 3)
+	{
+		StopNavigation();
+		NavigationStatus = FString::Printf(TEXT("복구 중지: %s — 주변 통로 확인 후 다시 시작"), *Reason);
+		return;
+	}
+	++NavigationRecoveryAttempts;
+	NavigationRecoveryStart = GetWorld()->GetTimeSeconds();
+	const auto* S = FindComponentByClass<UForkliftSlamComponent>();
+	NavigationRecoveryScan = S ? S->GetScanCount() : 0;
+	NavigationRecoveryReason = Reason;
+	// Replan from observed occupancy; a stalled turn is not obstacle evidence.
+	NavigationRoute.Reset();
+	NavigationStatus = FString::Printf(TEXT("복구 %d/3: 정지 후 주변 재스캔 — %s"), NavigationRecoveryAttempts, *Reason);
+	UE_LOG(LogTemp, Log, TEXT("Navigation recovery %d: %s"), NavigationRecoveryAttempts, *Reason);
+}
+
 void AAutomatedForklift::StopNavigation()
 {
 	if (bNavigationActive) DriveInput = SteerInput = 0.f;
 	bNavigationActive = false;
+	NavigationRecoveryStart = -1.f;
 	NavigationRoute.Reset();
 	bNavigationGoalSet=false;
 	bNavigationGoalIsManual=false;
@@ -46,6 +81,9 @@ bool AAutomatedForklift::SetNavigationGoalFromMapScreen(FVector2D ScreenPosition
 	bNavigationGoalIsManual = true;
 	bNavigationGoalSet = true;
 	bNavigationActive = true;
+	NavigationRecoveryStart = -1.f;
+	NavigationRecoveryAttempts = 0;
+	NavigationAvoidUntil.Reset();
 	NavigationRoute.Reset();
 	NavigationMapGeneration = S->GetMapGeneration();
 	NavigationTrackingWaitStart = -1.f;
@@ -79,6 +117,9 @@ void AAutomatedForklift::ToggleNavigation()
 	if (S && NavigationMapGeneration!=S->GetMapGeneration()) { ExplorationVisited.Reset(); ExplorationBlockedUntil.Reset(); }
 	NavigationMapGeneration=S ? S->GetMapGeneration() : -1;
 	bNavigationActive=true;
+	NavigationRecoveryStart=-1.f;
+	NavigationRecoveryAttempts=0;
+	NavigationAvoidUntil.Reset();
 	bNavigationGoalIsManual=false;
 	bNavigationGoalSet=false;
 	NavigationRoute.Reset();
@@ -103,6 +144,12 @@ bool AAutomatedForklift::PlanNavigationRoute(FVector2D Start)
 					if (X*X+Y*Y<=Padding*Padding) Blocked.Add(C+FIntPoint(X,Y));
 	}
 	const FIntPoint Begin=NavCell(Start), End=NavCell(NavigationGoal);
+	const double Now = GetWorld()->GetTimeSeconds();
+	for (auto It = NavigationAvoidUntil.CreateIterator(); It; ++It)
+	{
+		if (It.Value() <= Now) It.RemoveCurrent();
+		else if (It.Key() != Begin && It.Key() != End) Blocked.Add(It.Key());
+	}
 	if (Blocked.Contains(Begin) || Blocked.Contains(End) || !Known.Contains(End)) return false;
 	TArray<FIntPoint> Open; Open.Add(Begin);
 	TSet<FIntPoint> Closed;
@@ -153,6 +200,11 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 	{
 		if (NavigationTrackingWaitStart<0.f) NavigationTrackingWaitStart=Now;
 		NavigationStatus=FString::Printf(TEXT("안전 정지: 위치 추정 회복 대기 — %s (%.2fs/frame)"), *S->GetStatus(), Dt);
+		if (NavigationRecoveryStart >= 0.f && Now - NavigationRecoveryStart > 8.f)
+		{
+			StopNavigation();
+			NavigationStatus=TEXT("복구 중지: 센서 또는 위치 추적 회복 실패 — SLAM 상태 확인 필요");
+		}
 		return;
 	}
 	if (NavigationTrackingWaitStart>=0.f)
@@ -165,6 +217,29 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 		StopNavigation(); NavigationStatus=TEXT("중지: 빈 포크를 내리고 리치를 접어주세요"); return;
 	}
 	const FVector2D Pose=BodyPose(S,NavigationSensor);
+	if (NavigationRecoveryStart >= 0.f)
+	{
+		const int32 FreshScans = S->GetScanCount() - NavigationRecoveryScan;
+		if (Now - NavigationRecoveryStart < 1.f || FreshScans < 2)
+		{
+			NavigationStatus=FString::Printf(TEXT("복구 %d/3: 재스캔 %d/2 — %s"), NavigationRecoveryAttempts, FMath::Min(FreshScans, 2), *NavigationRecoveryReason);
+			if (Now - NavigationRecoveryStart > 8.f)
+			{
+				StopNavigation(); NavigationStatus=TEXT("복구 중지: 새로운 LiDAR 스캔 시간 초과");
+			}
+			return;
+		}
+		NavigationRecoveryStart=-1.f;
+		if (!PlanNavigationRoute(Pose))
+		{
+			BeginNavigationRecovery(TEXT("목표로 연결되는 우회 경로 없음"));
+			return;
+		}
+		NavigationReplanTime=Now+1.f;
+		NavigationProgressPosition=Pose;
+		NavigationProgressTime=Now;
+		NavigationStatus=TEXT("재스캔 완료: 새 경로 주행 재개");
+	}
 	if (bNavigationGoalSet && FVector2D::Distance(Pose,NavigationGoal)<70.f)
 	{
 		if (bNavigationGoalIsManual)
@@ -178,27 +253,15 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 		bNavigationGoalSet=false;
 		ExplorationBlockedGoals=0;
 	}
-	if (FVector2D::Distance(Pose,NavigationProgressPosition)>30.f)
+	if (FVector2D::Distance(Pose,NavigationProgressPosition)>15.f)
 	{
 		NavigationProgressPosition=Pose; NavigationProgressTime=Now;
+		NavigationRecoveryAttempts=0;
 	}
-	if (bNavigationGoalSet && Now-NavigationProgressTime>10.f)
+	if (bNavigationGoalSet && Now-NavigationProgressTime>12.f)
 	{
-		if (bNavigationGoalIsManual)
-		{
-			NavigationProgressTime=Now;
-			NavigationReplanTime=Now;
-			NavigationStatus=TEXT("목표 진행 지연: 지정 목적지 경로 재탐색 중");
-		}
-		else
-		{
-			ExplorationBlockedUntil.Add(NavCell(NavigationGoal),Now+30.0);
-			bNavigationGoalSet=false;
-			if (++ExplorationBlockedGoals>=5)
-			{
-				StopNavigation(); NavigationStatus=TEXT("중지: 연속된 통로 막힘"); return;
-			}
-		}
+		BeginNavigationRecovery(TEXT("12초간 이동 진행 없음"));
+		return;
 	}
 	if (!bNavigationGoalSet)
 	{
@@ -214,7 +277,7 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 		{
 			if (bNavigationGoalIsManual)
 			{
-				NavigationStatus=TEXT("목표 경로 대기: 지도상 통로 확인 후 다시 계산");
+				BeginNavigationRecovery(TEXT("목표 통로가 막힘"));
 				return;
 			}
 			ExplorationBlockedUntil.Add(NavCell(NavigationGoal),Now+30.0);
@@ -287,7 +350,7 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 			const float Score=(Target.Size()-Remaining.Size())-Heading*30.f-FMath::Abs(Rate)*.1f-PivotPenalty;
 			if (Score>Best) { Best=Score; BestSpeed=Speed; BestRate=Rate; }
 		}
-	if (Best==-BIG_NUMBER) { NavigationStatus=TEXT("장애물 대기: 다른 경로 탐색 예정"); return; }
+	if (Best==-BIG_NUMBER) { BeginNavigationRecovery(TEXT("안전한 이동 후보 없음")); return; }
 	// Simulation collision guard is separate from sensor-based planning.
 	// Sweep all physical parts at small increments, including yaw, to stop for
 	// objects hidden by self-occlusion and low pallets missed between beams.
@@ -308,7 +371,7 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 			if (GetWorld()->SweepSingleByObjectType(Hit,Part->GetComponentLocation(),End.GetLocation(),End.GetRotation(),Objects,
 				FCollisionShape::MakeBox(Part->GetScaledBoxExtent()),Params))
 			{
-				NavigationStatus=TEXT("충돌 방지 정지: 다른 경로 탐색 예정"); return;
+				BeginNavigationRecovery(FString::Printf(TEXT("충돌 방지: %s"), *GetNameSafe(Hit.GetActor()))); return;
 			}
 		}
 	}

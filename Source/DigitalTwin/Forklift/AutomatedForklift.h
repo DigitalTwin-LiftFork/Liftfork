@@ -249,12 +249,18 @@ public:
 	void ToggleNavigation();
 	void StopNavigation();
 	const FString& GetNavigationStatus() const { return NavigationStatus; }
+	void GetNavigationDiagnosticLines(TArray<FString>& OutLines) const;
 	const TArray<FVector2D>& GetNavigationRoute() const { return NavigationRoute; }
 	bool HasNavigationGoal() const { return bNavigationGoalSet; }
 	FVector2D GetNavigationGoal() const { return NavigationGoal; }
 	static FString AutoPickupStateToString(EAutoPickupState State);
 
 private:
+	void BeginNavigationRecovery(const FString& Reason);
+	float NavigationRecoveryStart = -1.f;
+	int32 NavigationRecoveryScan = 0, NavigationRecoveryAttempts = 0;
+	FString NavigationRecoveryReason;
+	TMap<FIntPoint, double> NavigationAvoidUntil;
 		void UpdateNavigation(float Dt);
 		bool PlanNavigationRoute(FVector2D Start);
 	bool SelectExplorationGoal(FVector2D Start);

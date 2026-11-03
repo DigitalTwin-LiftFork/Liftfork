@@ -14,6 +14,17 @@ void AForkliftSensorHUD::DrawHUD()
 	if (!Canvas || !PlayerOwner) return;
 	AAutomatedForklift* Forklift = Cast<AAutomatedForklift>(PlayerOwner->GetPawn());
 	if (!Forklift) return;
+	const auto DrawNavigationPanel = [this, Forklift]()
+	{
+		TArray<FString> Lines;
+		Forklift->GetNavigationDiagnosticLines(Lines);
+		const float Width = FMath::Min(510.f, Canvas->SizeX * .43f);
+		const float X = Canvas->SizeX - Width - 18.f, Y = Canvas->SizeY - 180.f;
+		DrawRect(FLinearColor(.015f,.025f,.04f,.94f), X, Y, Width, 164.f);
+		DrawText(TEXT("주행 / 센서 / 복구 상태"), FLinearColor(0.f,.85f,1.f), X+10.f,Y+8.f,nullptr,.85f);
+		for (int32 I=0; I<Lines.Num(); ++I)
+			DrawText(Lines[I], I==Lines.Num()-1 ? FLinearColor::Yellow : FLinearColor::White, X+10.f,Y+32.f+I*20.f,nullptr,.65f);
+	};
 		DrawText(Forklift->GetNavigationStatus(), FLinearColor::Yellow, 20.f, 40.f, nullptr, .9f);
 	const bool bRunning = Forklift->GetAutoPickupState() == EAutoPickupState::Detecting || Forklift->GetAutoPickupState() == EAutoPickupState::Aligning || Forklift->GetAutoPickupState() == EAutoPickupState::Inserting || Forklift->GetAutoPickupState() == EAutoPickupState::Lifting;
 	const float ButtonY = Canvas->SizeY - 72.f;
@@ -92,7 +103,7 @@ void AForkliftSensorHUD::DrawHUD()
 	}
 	UTextureRenderTarget2D* SensorImage = Forklift->GetPalletSensorRenderTarget();
 	const int32 Mode = Forklift->GetPalletSensorDisplayMode();
-	if (!SensorImage || Mode == 0) return;
+	if (!SensorImage || Mode == 0) { DrawNavigationPanel(); return; }
 
 	const float Aspect = static_cast<float>(SensorImage->SizeX) / FMath::Max(1, SensorImage->SizeY);
 	const float Width = Mode == 1 ? Canvas->SizeX * .30f : Canvas->SizeX * .88f;
@@ -141,4 +152,5 @@ void AForkliftSensorHUD::DrawHUD()
 		DrawOpening(Detection.LeftCenter, Detection.LeftExtent); DrawOpening(Detection.RightCenter, Detection.RightExtent);
 		DrawText(FString::Printf(TEXT("OPENINGS: %.2f  dist %.0fcm lateral %.1fcm"), Detection.Confidence, Detection.EstimatedDistanceCm, Detection.EstimatedLateralCm), FLinearColor::Yellow, X + 8.f, Y + 28.f, nullptr, .75f);
 	}
+	DrawNavigationPanel();
 }
