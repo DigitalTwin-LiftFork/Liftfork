@@ -30,6 +30,10 @@ public:
 	int32 GetMapUpdateCount() const { return MapUpdateCount; }
 		int32 GetMapGeneration() const { return MapGeneration; }
 	bool IsTrackingFresh(double Now) const { return bInitialized && StableScans >= 3 && LastAcceptedScan == LastScan && Now-LastAcceptedScan < 1.25 && bLastPoseQualityAccepted; }
+	bool CanBridgeRejectedScan(double Now) const
+	{
+		return bInitialized && StableScans >= 3 && ConsecutiveRejectedScans == 1 && Now - LastAcceptedScan < .40;
+	}
 	static constexpr float CellCm = 20.f;
 private:
 	UPROPERTY(Transient) TObjectPtr<UForkliftNavigationSensorComponent> Sensor;
@@ -38,6 +42,7 @@ private:
 	TSet<FIntPoint> LocalizationCells;
 	TMap<FIntPoint,float> MatchField;
 	int32 StableScans = 0, MarginalScans = 0;
+	int32 ConsecutiveRejectedScans = 0;
     bool bLastPoseQualityAccepted = false;
     FVector2D MarginalPosition = FVector2D::ZeroVector;
     float MarginalYaw = 0.f;

@@ -155,14 +155,15 @@ bool AAutomatedForklift::PlanNavigationRoute(FVector2D Start)
 	TSet<FIntPoint> Closed;
 	TMap<FIntPoint,float> Cost; Cost.Add(Begin,0.f);
 	TMap<FIntPoint,FIntPoint> Parent;
-	const FIntPoint Neighbours[] = {FIntPoint(1,0),FIntPoint(-1,0),FIntPoint(0,1),FIntPoint(0,-1)};
+	const FIntPoint Neighbours[] = {FIntPoint(1,0),FIntPoint(-1,0),FIntPoint(0,1),FIntPoint(0,-1), FIntPoint(1,1), FIntPoint(1,-1), FIntPoint(-1,1), FIntPoint(-1,-1)};
 	for (int32 Iter=0; Iter<10000 && !Open.IsEmpty(); ++Iter)
 	{
 		int32 Best=0; float BestF=BIG_NUMBER;
 		for (int32 I=0; I<Open.Num(); ++I)
 		{
 			const FIntPoint C=Open[I];
-			const float F=Cost[C]+FMath::Abs(C.X-End.X)+FMath::Abs(C.Y-End.Y);
+			const int32 DX = FMath::Abs(C.X - End.X), DY = FMath::Abs(C.Y - End.Y);
+			const float F = Cost[C] + FMath::Max(DX, DY) + .41421356f * FMath::Min(DX, DY);
 			if (F<BestF) { BestF=F; Best=I; }
 		}
 		const FIntPoint Current=Open[Best]; Open.RemoveAtSwap(Best);
@@ -178,7 +179,15 @@ bool AAutomatedForklift::PlanNavigationRoute(FVector2D Start)
 		{
 			const FIntPoint Next=Current+D;
 			if (Closed.Contains(Next)||Blocked.Contains(Next)||!Known.Contains(Next)) continue;
-			const float G=Cost[Current]+1.f;
+			const bool bDiagonal = D.X != 0 && D.Y != 0;
+			if (bDiagonal)
+			{
+				const FIntPoint SideX = Current + FIntPoint(D.X, 0);
+				const FIntPoint SideY = Current + FIntPoint(0, D.Y);
+				if (Blocked.Contains(SideX) || Blocked.Contains(SideY) ||
+					!Known.Contains(SideX) || !Known.Contains(SideY)) continue;
+			}
+			const float G = Cost[Current] + (bDiagonal ? 1.41421356f : 1.f);
 			if (!Cost.Contains(Next)) { Open.Add(Next); Cost.Add(Next,G); Parent.Add(Next,Current); }
 			else if (G<Cost[Next]) { Cost[Next]=G; Parent[Next]=Current; }
 		}
@@ -196,7 +205,10 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 	{
 		StopNavigation(); NavigationStatus=TEXT("중지: 센서 꺼짐 또는 지도 초기화"); return;
 	}
-	if (!S->IsTrackingFresh(Now) || Now-NavigationSensor->GetLatestScan().TimestampSeconds>NavigationSensor->GetScanTimeout() || Dt>.15f)
+	const bool bTrackingFresh = S->IsTrackingFresh(Now);
+	const bool bBridgingScan = !bTrackingFresh && NavigationRecoveryStart < 0.f && bNavigationGoalSet &&
+		!NavigationRoute.IsEmpty() && S->CanBridgeRejectedScan(Now);
+	if ((!bTrackingFresh && !bBridgingScan) || Now-NavigationSensor->GetLatestScan().TimestampSeconds>NavigationSensor->GetScanTimeout() || Dt>.15f)
 	{
 		if (NavigationTrackingWaitStart<0.f) NavigationTrackingWaitStart=Now;
 		NavigationStatus=FString::Printf(TEXT("안전 정지: 위치 추정 회복 대기 — %s (%.2fs/frame)"), *S->GetStatus(), Dt);
@@ -270,7 +282,7 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 			StopNavigation(); NavigationStatus=TEXT("순찰 대기 종료: 현재 도달 가능한 랜덤 목표 없음"); return;
 		}
 	}
-	else if (Now>=NavigationReplanTime)
+	else if (!bBridgingScan && Now>=NavigationReplanTime)
 	{
 		NavigationReplanTime=Now+1.f;
 		if (!PlanNavigationRoute(Pose))
@@ -324,10 +336,11 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
         }
 	}
 	float Best=-BIG_NUMBER, BestSpeed=0.f, BestRate=0.f;
-	for (float Speed:{0.f, S->GetConfidence()<.45f ? 15.f : 30.f, S->GetConfidence()<.45f ? 30.f : 60.f})
+	for (float Speed:{0.f, (bBridgingScan || S->GetConfidence()<.45f) ? 15.f : 30.f, (bBridgingScan || S->GetConfidence()<.45f) ? 30.f : 60.f})
 		for (float Rate:{-30.f,-15.f,0.f,15.f,30.f})
 		{
 			if (Speed==0.f && Rate==0.f) continue;
+			if (bBridgingScan && (Speed > 15.f || FMath::Abs(Rate) > 15.f)) continue;
 			FVector2D P=FVector2D::ZeroVector; float A=0.f; bool Clear=true;
 			for (int32 Step=0; Step<25 && Clear; ++Step)
 			{
