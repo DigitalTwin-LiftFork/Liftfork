@@ -39,6 +39,7 @@ void UForkliftSlamComponent::ResetMap()
 	bLastPoseQualityAccepted=false;
 	MatchField.Reset();
 	StableScans = 0;
+	ConsecutiveRejectedScans = 0;
 	++MapGeneration;
 	LastAcceptedScan = -1.0;
 	Position = Velocity = FVector2D::ZeroVector;
@@ -91,6 +92,7 @@ void UForkliftSlamComponent::ProcessScan()
 	const float Dt = static_cast<float>(Scan.TimestampSeconds - LastScan);
 	LastScan = Scan.TimestampSeconds;
 	++ScanCount;
+	if (++ConsecutiveRejectedScans >= 2 || Scan.TimestampSeconds - LastAcceptedScan >= .40) StableScans = 0;
 	bLastPoseQualityAccepted=false;
 	TArray<FVector2D> Points;
 	TSet<FIntPoint> PointCells;
@@ -108,7 +110,6 @@ void UForkliftSlamComponent::ProcessScan()
 	// space below, but are deliberately excluded from scan matching.
 	if (Points.Num() < 5 || Dt <= 0.f)
 	{
-		StableScans = 0;
 		MarginalScans=0;
 		Status = FString::Printf(TEXT("측정점 부족: %d/5, 범위 %.0fm"), Points.Num(), Sensor->MaximumRangeCm/100.f);
 		Velocity = FVector2D::ZeroVector;
@@ -187,7 +188,6 @@ void UForkliftSlamComponent::ProcessScan()
         const bool QualityOK=BestScore>=.45f || (Marginal && MarginalScans>=5);
         if (!QualityOK || FVector2D::Distance(BestP, Position) > 150.f)
 		{
-			StableScans = 0;
 			Status = FString::Printf(TEXT("정합 %.1f%% | 경계 안정 %d/5 | 지지점 %d | 방향 %d"), BestScore*100.f, MarginalScans, UniqueSupport.Num(), BearingSectors.Num());
 			Velocity = FVector2D::ZeroVector;
 			bPoseAccepted = false;
@@ -243,7 +243,8 @@ void UForkliftSlamComponent::ProcessScan()
 	++MapUpdateCount;
 	if (bPoseAccepted)
 	{
-		++StableScans;
+		StableScans = FMath::Min(StableScans + 1, 3);
+		ConsecutiveRejectedScans = 0;
 		LastAcceptedScan = Scan.TimestampSeconds;
 		bLastPoseQualityAccepted=true;
 		Status = FString::Printf(TEXT("SLAM %d점 | 바닥 %d / 장애물 %d | 안정 %d/3"), Points.Num(), FreeCells.Num(), HitCells.Num(), FMath::Min(StableScans,3));
