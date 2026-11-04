@@ -19,18 +19,10 @@ public:
 	virtual void BeginPlay() override;
  virtual void OnConstruction(const FTransform& Transform) override;
  UPROPERTY(EditAnywhere, Category="Pallet") bool bHasCargo = false;
- /** Simulation estimate only; tune against the target pallet/load. */
- UPROPERTY(EditAnywhere, Category="Pallet|Physics", meta=(ClampMin="1.0")) float EmptyPalletMassKg = 50.f;
- /** Added mass when bHasCargo is enabled; independent of the rated truck capacity. */
- UPROPERTY(EditAnywhere, Category="Pallet|Physics", meta=(ClampMin="0.0")) float CargoMassKg = 800.f;
- UPROPERTY(EditAnywhere, Category="Pallet|Physics", meta=(ClampMin="0.0")) float LinearDamping = 0.15f;
- UPROPERTY(EditAnywhere, Category="Pallet|Physics", meta=(ClampMin="0.0")) float AngularDamping = 1.5f;
  UPROPERTY(VisibleAnywhere, Category="Pallet") TObjectPtr<UStaticMeshComponent> CargoVisual;
  UPROPERTY(VisibleAnywhere, Category="Pallet") TObjectPtr<UBoxComponent> CargoCollision;
 	/** Disable pallet collision while fork-carried; restore gravity and collision when set down. */
 	void SetCarriedState(bool bIsCarried);
- /** Applies the editable simulation mass and damping to the Chaos root. */
- void ApplyPhysicsTuning();
 	/** Validates that both complete tine cross-sections are inside the two specified fork openings. */
 	bool CanAcceptForkTines(const UBoxComponent* LeftTine, const UBoxComponent* RightTine) const;
 	/** Contact-based support test. Both fork tips must pass the configurable depth inside their own openings. */
@@ -41,9 +33,6 @@ public:
 	const TArray<TObjectPtr<UBoxComponent>>& GetCollisionShapes() const { return CollisionShapes; }
 	/** Chaos contact is used only for diagnostics when this uncarried pallet simulates. */
 	bool GetRecentPhysicsContact(float MaxAgeSeconds, FHitResult& OutHit, UPrimitiveComponent*& OutOther) const;
-	float GetSimulationMassKg() const;
-	float GetConfiguredMassKg() const { return EmptyPalletMassKg + (bHasCargo ? CargoMassKg : 0.f); }
-	float GetRiseFromSpawnCm() const { return GetActorLocation().Z - InitialActorZcm; }
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Pallet") TObjectPtr<UBoxComponent> CollisionBody;
 private:
 	// Verified pallet specification, expressed in Unreal centimetres.
@@ -61,5 +50,4 @@ private:
 	FHitResult LastPhysicsHit;
 	float LastPhysicsHitTime = -BIG_NUMBER;
 	TWeakObjectPtr<UPrimitiveComponent> LastPhysicsOther;
-	float InitialActorZcm = 0.f;
 };

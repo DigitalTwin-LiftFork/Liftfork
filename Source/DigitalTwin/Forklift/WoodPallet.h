@@ -14,10 +14,6 @@ class DIGITALTWIN_API AWoodPallet : public AActor
 	GENERATED_BODY()
 public:
 	AWoodPallet();
-	/** Simulation estimate only; not a manufacturer mass specification. */
-	UPROPERTY(EditAnywhere, Category="Pallet|Physics", meta=(ClampMin="1.0")) float PalletMassKg = 100.f;
-	UPROPERTY(EditAnywhere, Category="Pallet|Physics", meta=(ClampMin="0.0")) float LinearDamping = 0.15f;
-	UPROPERTY(EditAnywhere, Category="Pallet|Physics", meta=(ClampMin="0.0")) float AngularDamping = 1.5f;
 	virtual void BeginPlay() override;
 	void SetPlacementPreview(bool bPreview);
 	void FinalizePlacement();
@@ -26,8 +22,6 @@ public:
 	void SetSelectedDebug(bool bSelected) { bSelectedForPlacement = bSelected; }
 	bool IsSelectedDebug() const { return bSelectedForPlacement; }
 	bool GetRecentForkContact(float MaxAge, UPrimitiveComponent*& OutOther) const;
-	float GetSimulationMassKg() const;
-	float GetRiseFromSpawnCm() const { return GetActorLocation().Z - InitialActorZcm; }
 	float GetBaseHeightCm() const { return 0.f; }
 	// Model assumptions derived from the supplied outer dimensions, not a product drawing.
 	static float LengthCm() { return 100.f; }
@@ -48,5 +42,4 @@ private:
 	FHitResult LastHit;
 	float LastHitTime = -BIG_NUMBER;
 	TWeakObjectPtr<UPrimitiveComponent> LastHitOther;
-	float InitialActorZcm = 0.f;
 };

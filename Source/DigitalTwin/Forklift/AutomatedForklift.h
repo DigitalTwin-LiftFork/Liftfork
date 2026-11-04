@@ -106,8 +106,8 @@ struct FForkliftMotionSettings
 	GENERATED_BODY()
 
 	// Converted from m/s to cm/s; these are the source specification values.
-	UPROPERTY(EditAnywhere, Category="R16 HD|Motion") float ForwardSpeedCmPerSec = 277.78f; // 10 km/h
-	UPROPERTY(EditAnywhere, Category="R16 HD|Motion") float ReverseSpeedCmPerSec = 138.89f; // 5 km/h
+	UPROPERTY(EditAnywhere, Category="R16 HD|Motion") float ForwardSpeedCmPerSec = 195.0f;
+	UPROPERTY(EditAnywhere, Category="R16 HD|Motion") float ReverseSpeedCmPerSec = 75.0f;
 	UPROPERTY(EditAnywhere, Category="R16 HD|Motion") float LoadedLiftSpeedCmPerSec = 52.0f;
 	UPROPERTY(EditAnywhere, Category="R16 HD|Motion") float UnloadedLiftSpeedCmPerSec = 66.0f;
 	UPROPERTY(EditAnywhere, Category="R16 HD|Motion") float LoadedLowerSpeedCmPerSec = 55.0f;
@@ -119,27 +119,6 @@ struct FForkliftMotionSettings
 	UPROPERTY(EditAnywhere, Category="R16 HD|Motion") float AutoRearTurningRadius1000Cm = 118.4f;
 	UPROPERTY(EditAnywhere, Category="R16 HD|Motion") float AutoRearTurningRadius1200Cm = 118.4f;
 	UPROPERTY(EditAnywhere, Category="R16 HD|TEMP - control feel") float SteeringRateDegPerSec = 60.0f;
-	/** Stage 2 simulation controls. These are tunable estimates, not rated vehicle data. */
-	UPROPERTY(EditAnywhere, Category="R16 HD|Load stability", meta=(ClampMin="0.1", ClampMax="1.0")) float LoadedMaxSpeedScale = 0.65f;
-	UPROPERTY(EditAnywhere, Category="R16 HD|Load stability", meta=(ClampMin="1.0")) float UnloadedAccelerationCmPerSecSq = 160.f;
-	UPROPERTY(EditAnywhere, Category="R16 HD|Load stability", meta=(ClampMin="1.0")) float LoadedAccelerationCmPerSecSq = 90.f;
-	UPROPERTY(EditAnywhere, Category="R16 HD|Load stability", meta=(ClampMin="1.0")) float UnloadedBrakingCmPerSecSq = 220.f;
-	UPROPERTY(EditAnywhere, Category="R16 HD|Load stability", meta=(ClampMin="1.0")) float LoadedBrakingCmPerSecSq = 150.f;
-	UPROPERTY(EditAnywhere, Category="R16 HD|Load stability", meta=(ClampMin="0.1", ClampMax="1.0")) float LoadedSteeringScale = 0.75f;
-	UPROPERTY(EditAnywhere, Category="R16 HD|Load stability", meta=(ClampMin="0.0")) float LiftHeightCautionStartCm = 80.f;
-	UPROPERTY(EditAnywhere, Category="R16 HD|Load stability", meta=(ClampMin="0.1", ClampMax="1.0")) float RaisedForkMaxSpeedScale = 0.45f;
-	UPROPERTY(EditAnywhere, Category="R16 HD|Load stability", meta=(ClampMin="0.1", ClampMax="1.0")) float RaisedForkSteeringScale = 0.5f;
-	/** Stage 3 analytical stability limits. These are conservative simulation tuning values, not manufacturer data. */
-	UPROPERTY(EditAnywhere, Category="R16 HD|Stability control", meta=(ClampMin="0.05", ClampMax="1.0")) float UnloadedLateralLimitG = 0.35f;
-	UPROPERTY(EditAnywhere, Category="R16 HD|Stability control", meta=(ClampMin="0.05", ClampMax="1.0")) float LoadedLateralLimitG = 0.18f;
-	UPROPERTY(EditAnywhere, Category="R16 HD|Stability control", meta=(ClampMin="0.1", ClampMax="1.0")) float RaisedForkLateralLimitScale = 0.65f;
-	UPROPERTY(EditAnywhere, Category="R16 HD|Stability control", meta=(ClampMin="0.1", ClampMax="1.0")) float StabilityControlMinimumScale = 0.55f;
-	/** Approximate kinematic-body impact response; tune these as simulation parameters, not rated truck data. */
-	UPROPERTY(EditAnywhere, Category="R16 HD|Impact response", meta=(ClampMin="100.0")) float ForkliftEffectiveMassKg = 4000.f;
-	UPROPERTY(EditAnywhere, Category="R16 HD|Impact response", meta=(ClampMin="1.0")) float DefaultPusherMassKg = 500.f;
-	UPROPERTY(EditAnywhere, Category="R16 HD|Impact response", meta=(ClampMin="0.0", ClampMax="2.0")) float ImpactMomentumTransferScale = 0.7f;
-	UPROPERTY(EditAnywhere, Category="R16 HD|Impact response", meta=(ClampMin="0.0")) float PushVelocityDecayCmPerSecSq = 250.f;
-	UPROPERTY(EditAnywhere, Category="R16 HD|Impact response", meta=(ClampMin="1.0")) float MaximumImpactPushSpeedCmPerSec = 300.f;
 };
 
 /** C++ only, mesh-replaceable reach-truck proxy. Visual meshes never own collision. */
@@ -152,8 +131,6 @@ public:
 	AAutomatedForklift();
 	virtual void Tick(float DeltaSeconds) override;
 	virtual void SetupPlayerInputComponent(UInputComponent* PlayerInputComponent) override;
-	float GetCurrentSpeedKmh() const { return CurrentForwardSpeedCmPerSec * 0.036f; }
-	float GetTargetSpeedKmh() const { return TargetForwardSpeedCmPerSec * 0.036f; }
 
 	/** Geometry and travel limits; enter centimetres. */
 	UPROPERTY(EditAnywhere, Category="R16 HD") FForkliftDimensions Dimensions;
@@ -185,12 +162,6 @@ public:
 	UPROPERTY(VisibleAnywhere, Category="Chaos|Lift reference") float GroundReferenceLocalZcm = -49.5f;
 	UPROPERTY(VisibleAnywhere, Category="Chaos|Lift reference") float LowestForkTopHeightAboveGroundCm = 0.f;
 	UPROPERTY(VisibleAnywhere, Category="Chaos|Lift reference") float RequiredLiftStrokeCm = 500.f;
-	UPROPERTY(VisibleAnywhere, Category="Load stability") float CurrentPayloadMassKg = 0.f;
-	UPROPERTY(VisibleAnywhere, Category="Load stability") float CurrentPalletMassKg = 0.f;
-	UPROPERTY(VisibleAnywhere, Category="Load stability") float CurrentCargoMassKg = 0.f;
-	UPROPERTY(VisibleAnywhere, Category="Stability control") float CurrentLateralAccelerationG = 0.f;
-	UPROPERTY(VisibleAnywhere, Category="Stability control") float CurrentStabilityRisk = 0.f;
-	UPROPERTY(VisibleAnywhere, Category="Impact response") FVector ExternalPushVelocityCmPerSec = FVector::ZeroVector;
 
 	// Replace a visual's Static Mesh without changing the collision / kinematic components below.
 	UPROPERTY(VisibleAnywhere, Category="Replaceable visual slots") TObjectPtr<UStaticMeshComponent> BodyVisual;
@@ -209,8 +180,6 @@ public:
 
 	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> BodyCollision;
 	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> ForkCollision;
-	/** Physical fork heel/backrest. Prevents an inertia-driven load from sliding into the truck. */
-	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> ForkBackrestCollision;
 	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> LeftForkCollision;
 	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> RightForkCollision;
 	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> LeftSupportLegCollision;
@@ -417,7 +386,7 @@ private:
 	float AutoDriveInput = 0.f, AutoSteerInput = 0.f, AutoLiftInput = 0.f, AutoReachInput = 0.f, AutoSideShiftInput = 0.f;
 	float LastAppliedDriveInput = 0.f, LastAppliedSteerInput = 0.f, LastAppliedLiftInput = 0.f, LastAppliedReachInput = 0.f, LastAppliedSideShiftInput = 0.f;
 	float LiftCm = 0.f, ReachCm = 0.f, SideShiftCm = 0.f;
-	float TargetForwardSpeedCmPerSec = 0.f, CommandedForwardSpeedCmPerSec = 0.f, CurrentForwardSpeedCmPerSec = 0.f, DriveDebugElapsed = 0.f;
+	float TargetForwardSpeedCmPerSec = 0.f, CurrentForwardSpeedCmPerSec = 0.f, DriveDebugElapsed = 0.f;
 	float CameraPitchDeg = -24.f, CameraYawDeg = -35.f, CameraDistanceCm = 700.f;
 	float PalletSensorCaptureElapsed = 0.f;
 
@@ -455,8 +424,6 @@ private:
 	bool bApproachSteeringInDeadband = false;
 	bool bSavedLastValidVisionArtifact = false, bSavedFirstVisionFailureArtifact = false;
 	TArray<FColor> LastSuccessfulVisionPixels;
-	TWeakObjectPtr<AActor> LastImpactPusher;
-	float LastBodyImpactTime = -BIG_NUMBER;
 	int32 OpeningStableFrames = 0, AlignmentStableFrames = 0;
 	int32 LastStableOpeningVisionFrame = -1, LastStableAlignmentVisionFrame = -1;
 	int32 LastVisionCandidateCount = -1;
@@ -564,9 +531,7 @@ private:
 	void LogInputInvocation(const TCHAR* InputName, float Value);
 	void ApplyDimensions();
 	void SpawnPallet();
-	void SpawnLoadComparisonPallets();
 	void InteractWithPallet();
-	void UpdateDetectedPalletLoad();
 	bool SweepForkliftPart(UBoxComponent* Component, const FVector& WorldDelta, const TCHAR* Operation, FHitResult& OutHit, const AActor* ExtraIgnoredActor = nullptr);
 	bool SweepForkPartAgainstFixedObstacle(UBoxComponent* Component, const FVector& WorldDelta, const TCHAR* Operation, FHitResult& OutHit);
 	bool IsForkAxisMotionBlockedByFixedObstacle(const FVector& WorldDelta, const TCHAR* Operation);
@@ -575,14 +540,12 @@ private:
 	bool SweepPalletAgainstExternal(APallet* Pallet, const FVector& WorldDelta, const TCHAR* Operation, FHitResult& OutHit);
 	bool IsMovementDeeperIntoInitialOverlap(const FHitResult& Hit, const FVector& WorldDelta) const;
 	void RecordCollision(const TCHAR* Operation, UPrimitiveComponent* SourceComponent, const FHitResult& Hit, const FVector& WorldDelta, bool bBlocked);
-	UFUNCTION() void HandleBodyImpact(UPrimitiveComponent* HitComponent, AActor* OtherActor, UPrimitiveComponent* OtherComponent, FVector NormalImpulse, const FHitResult& Hit);
 	void DrawCollisionDebug();
 	void DrawPalletSensorDebug() const;
 	void EmitDriveDiagnostic(const FVector& StartLocation, const FVector& EndLocation, const FHitResult& Hit);
 	void LogInitialDriveOverlaps();
 	UStaticMeshComponent* CreateVisual(const TCHAR* Name, USceneComponent* Parent);
 	UPROPERTY() TObjectPtr<APallet> CarriedPallet;
-	TWeakObjectPtr<AActor> DetectedLoadPallet;
 	bool bPalletSupportedAutomatically = false;
 	bool bCarriedPalletResting = false;
 	FString PalletSupportDebugStatus;

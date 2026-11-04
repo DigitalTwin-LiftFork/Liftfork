@@ -55,11 +55,11 @@ AAutomatedForklift::AAutomatedForklift()
 	BodyCollision = CreateDefaultSubobject<UBoxComponent>(TEXT("BodyCollision"));
 	SetRootComponent(BodyCollision);
 	BodyCollision->SetCollisionProfileName(TEXT("Pawn"));
+
 	BodyCollision->SetCollisionResponseToChannel(ECC_PhysicsBody, ECR_Ignore);
 	NavigationSensor = CreateDefaultSubobject<UForkliftNavigationSensorComponent>(TEXT("RearBodyLidarImu"));
 	NavigationSensor->SetupAttachment(BodyCollision);
-	BodyCollision->SetNotifyRigidBodyCollision(true);
-	BodyCollision->OnComponentHit.AddDynamic(this, &AAutomatedForklift::HandleBodyImpact);
+
 	// PhysicsActor pallets use ECC_PhysicsBody. The broad chassis proxy ends
 	// 10 cm behind the tine roots (the tine roots start at x=+20 cm from the
 	// mast), so blocking pallets here stops chassis penetration while leaving
@@ -169,16 +169,9 @@ NavigationSensor->SetRelativeLocation(
 	// This is only the broad pickup-query volume; tine collision stays separated
 	// so the forks can pass through the pallet's two lower openings.
 	ForkCollision->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	ForkBackrestCollision = CreateDefaultSubobject<UBoxComponent>(TEXT("ForkBackrestCollision"));
-	ForkBackrestCollision->SetupAttachment(ForkCarriage);
-	ForkBackrestCollision->SetCollisionProfileName(TEXT("BlockAll"));
-	ForkBackrestCollision->SetCollisionObjectType(ECC_WorldDynamic);
-	ForkBackrestCollision->SetCollisionResponseToChannel(ECC_PhysicsBody, ECR_Block);
-	ForkBackrestCollision->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-	ForkBackrestCollision->SetUseCCD(true);
 	LeftForkCollision = CreateDefaultSubobject<UBoxComponent>(TEXT("LeftForkCollision")); LeftForkCollision->SetupAttachment(ForkCarriage);
 	RightForkCollision = CreateDefaultSubobject<UBoxComponent>(TEXT("RightForkCollision")); RightForkCollision->SetupAttachment(ForkCarriage);
-	for (UBoxComponent* Tine : {LeftForkCollision.Get(), RightForkCollision.Get(), ForkBackrestCollision.Get()})
+	for (UBoxComponent* Tine : {LeftForkCollision.Get(), RightForkCollision.Get()})
 	{
 		Tine->SetCollisionProfileName(TEXT("BlockAll"));
 		Tine->SetCollisionObjectType(ECC_WorldDynamic);
@@ -221,11 +214,9 @@ void AAutomatedForklift::OnConstruction(const FTransform& Transform) { Super::On
 void AAutomatedForklift::BeginPlay()
 {
 	Super::BeginPlay();
+
 	bAutoApproachStraightDiagnostic = false; // diagnostics never persist into normal auto pickup
-	// Upgrade actors serialized with the previous 7 km/h forward default.
-	if (FMath::IsNearlyEqual(Motion.ForwardSpeedCmPerSec, 195.f, .1f)) Motion.ForwardSpeedCmPerSec = 277.78f;
-	if (FMath::IsNearlyEqual(Motion.ReverseSpeedCmPerSec, 75.f, .1f)) Motion.ReverseSpeedCmPerSec = 138.89f;
-	UE_LOG(LogTemp, Warning, TEXT("[R16HD_DRIVE_SPEED] forward limit=%.2f km/h reverse limit=%.2f km/h"), Motion.ForwardSpeedCmPerSec * .036f, Motion.ReverseSpeedCmPerSec * .036f);
+
 	PalletSensorRenderTarget = NewObject<UTextureRenderTarget2D>(this, NAME_None, RF_Transient);
 	PalletSensorRenderTarget->RenderTargetFormat = RTF_RGBA8;
 	PalletSensorRenderTarget->ClearColor = FLinearColor::Black;
@@ -335,10 +326,6 @@ void AAutomatedForklift::ApplyDimensions()
 	LeftForkVisual->SetRelativeScale3D(FVector::OneVector); RightForkVisual->SetRelativeScale3D(FVector::OneVector);
 	ForkCollision->SetRelativeLocation(FVector(ForkMountForwardOffsetCm + Dimensions.ForkLengthCm * .5f, 0, Dimensions.ForkThicknessCm * .5f));
 	ForkCollision->SetBoxExtent(FVector(Dimensions.ForkLengthCm * .5f, 35.f, Dimensions.ForkThicknessCm * .5f));
-	// A vertical heel plate at the fork roots keeps a lifted pallet from
-	// sliding rearward into the chassis when its angular momentum changes.
-	ForkBackrestCollision->SetRelativeLocation(FVector(ForkMountForwardOffsetCm - 5.f, 0.f, 25.f));
-	ForkBackrestCollision->SetBoxExtent(FVector(3.f, FMath::Max(55.f, Dimensions.MastWidthCm * .5f + 10.f), 24.f));
 	for (const TPair<UBoxComponent*, float>& Tine : {TPair<UBoxComponent*, float>(LeftForkCollision, -30.f), TPair<UBoxComponent*, float>(RightForkCollision, 30.f)})
 	{
 		Tine.Key->SetRelativeLocation(FVector(ForkMountForwardOffsetCm + Dimensions.ForkLengthCm * .5f, Tine.Value, Dimensions.ForkThicknessCm * .5f));
@@ -381,10 +368,6 @@ void AAutomatedForklift::ConfigureKinematicForkMechanism()
 		Tine->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 		Tine->SetUseCCD(true);
 	}
-	ForkBackrestCollision->SetSimulatePhysics(false);
-	ForkBackrestCollision->SetEnableGravity(false);
-	ForkBackrestCollision->AttachToComponent(ForkCarriage, FAttachmentTransformRules::KeepRelativeTransform);
-	ForkBackrestCollision->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	ApplyDimensions();
 	ConfigureLiftHeightReference();
 	LiftCm = ReachCm = SideShiftCm = 0.f;
@@ -502,7 +485,6 @@ void AAutomatedForklift::SetupPlayerInputComponent(UInputComponent* Input)
 	Input->BindAction(TEXT("ForkliftCameraOrbit"), IE_Released, this, &AAutomatedForklift::EndCameraOrbit);
 	Input->BindAction(TEXT("ForkliftCameraReset"), IE_Pressed, this, &AAutomatedForklift::ResetCamera);
 	Input->BindAction(TEXT("ForkliftSpawnPallet"), IE_Pressed, this, &AAutomatedForklift::SpawnPallet);
-	Input->BindKey(EKeys::J, IE_Pressed, this, &AAutomatedForklift::SpawnLoadComparisonPallets);
 	Input->BindAction(TEXT("ForkliftPalletInteract"), IE_Pressed, this, &AAutomatedForklift::InteractWithPallet);
 	Input->BindKey(EKeys::K, IE_Pressed, this, &AAutomatedForklift::ToggleCollisionDebug);
 	Input->BindKey(EKeys::V, IE_Pressed, this, &AAutomatedForklift::TogglePalletSensorDisplay);
@@ -672,43 +654,6 @@ void AAutomatedForklift::RecordCollision(const TCHAR* Operation, UPrimitiveCompo
 		*GetNameSafe(Hit.GetActor()), Hit.bStartPenetrating ? TEXT(" [initial overlap]") : TEXT(""));
 }
 
-void AAutomatedForklift::HandleBodyImpact(UPrimitiveComponent*, AActor* OtherActor, UPrimitiveComponent* OtherComponent, FVector NormalImpulse, const FHitResult& Hit)
-{
-	if (!OtherActor || !OtherComponent || OtherActor == this) return;
-
-	const bool bOtherIsSimulating = OtherComponent->IsSimulatingPhysics();
-	const FVector OtherVelocity = bOtherIsSimulating
-		? OtherComponent->GetPhysicsLinearVelocityAtPoint(Hit.ImpactPoint)
-		: OtherActor->GetVelocity();
-	FVector HorizontalPusherVelocity(OtherVelocity.X, OtherVelocity.Y, 0.f);
-	if (HorizontalPusherVelocity.IsNearlyZero()) return;
-	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
-	if (LastImpactPusher.Get() == OtherActor && Now - LastBodyImpactTime < .15f) return;
-
-	FVector ImpactDirection = Hit.ImpactNormal.GetSafeNormal();
-	ImpactDirection.Z = 0.f;
-	ImpactDirection = ImpactDirection.GetSafeNormal();
-	if (ImpactDirection.IsNearlyZero()) ImpactDirection = HorizontalPusherVelocity.GetSafeNormal();
-	// Align the contact normal with the incoming pusher direction so the truck
-	// receives forward/sideways momentum instead of an artificial rebound.
-	if (FVector::DotProduct(ImpactDirection, HorizontalPusherVelocity) < 0.f) ImpactDirection *= -1.f;
-	const float ClosingSpeedCmPerSec = FMath::Abs(FVector::DotProduct(HorizontalPusherVelocity, ImpactDirection));
-	if (ClosingSpeedCmPerSec < 12.f) return;
-
-	const float PusherMassKg = bOtherIsSimulating ? OtherComponent->GetMass() : Motion.DefaultPusherMassKg;
-	const float EstimatedDeltaSpeed = ClosingSpeedCmPerSec * PusherMassKg / FMath::Max(100.f, Motion.ForkliftEffectiveMassKg)
-		* Motion.ImpactMomentumTransferScale;
-	if (EstimatedDeltaSpeed <= .1f) return;
-
-	ExternalPushVelocityCmPerSec = (ExternalPushVelocityCmPerSec + ImpactDirection * EstimatedDeltaSpeed)
-		.GetClampedToMaxSize(Motion.MaximumImpactPushSpeedCmPerSec);
-	LastImpactPusher = OtherActor;
-	LastBodyImpactTime = Now;
-	UE_LOG(LogTemp, Warning, TEXT("[R16HD_IMPACT_INERTIA] source=%s pusherKg=%.1f pusherSpeed=%.1fcm/s appliedDelta=%.1fcm/s pushVelocity=%s impulse=%s"),
-		*GetNameSafe(OtherActor), PusherMassKg, ClosingSpeedCmPerSec, EstimatedDeltaSpeed,
-		*ExternalPushVelocityCmPerSec.ToString(), *NormalImpulse.ToString());
-}
-
 bool AAutomatedForklift::SweepForkliftPart(UBoxComponent* Component, const FVector& WorldDelta, const TCHAR* Operation, FHitResult& OutHit, const AActor* ExtraIgnoredActor)
 {
 	if (!Component || WorldDelta.IsNearlyZero()) return false;
@@ -737,7 +682,7 @@ bool AAutomatedForklift::SweepForkPartAgainstFixedObstacle(UBoxComponent* Compon
 
 bool AAutomatedForklift::IsForkAxisMotionBlockedByFixedObstacle(const FVector& WorldDelta, const TCHAR* Operation)
 {
-	for (UBoxComponent* Tine : {LeftForkCollision.Get(), RightForkCollision.Get(), ForkBackrestCollision.Get()})
+	for (UBoxComponent* Tine : {LeftForkCollision.Get(), RightForkCollision.Get()})
 	{
 		FHitResult Hit;
 		if (SweepForkPartAgainstFixedObstacle(Tine, WorldDelta, Operation, Hit)) return true;
@@ -758,7 +703,7 @@ bool AAutomatedForklift::WouldForkRotationHitFixedObstacle(float DeltaYawDegrees
 	// Check the actual outer envelope for a steering step.  The support legs
 	// are deliberately included: the root box alone does not cover their full
 	// lateral sweep, and the fork tines can be raised or extended beyond it.
-	for (UBoxComponent* Tine : {LeftForkCollision.Get(), RightForkCollision.Get(), ForkBackrestCollision.Get(), LeftSupportLegCollision.Get(), RightSupportLegCollision.Get()})
+	for (UBoxComponent* Tine : {LeftForkCollision.Get(), RightForkCollision.Get(), LeftSupportLegCollision.Get(), RightSupportLegCollision.Get()})
 	{
 		if (!Tine) continue;
 		const bool bCurrentOverlap = GetWorld()->OverlapAnyTestByObjectType(Tine->GetComponentLocation(), Tine->GetComponentQuat(), Objects, FCollisionShape::MakeBox(Tine->GetScaledBoxExtent()), Params);
@@ -829,7 +774,7 @@ void AAutomatedForklift::DrawCollisionDebug()
 		const bool bHighlighted = Component == LastBlockingComponent.Get() && GetWorld()->GetTimeSeconds() <= LastCollisionHitExpireTime;
 		DrawDebugBox(GetWorld(), Component->GetComponentLocation(), Component->GetScaledBoxExtent(), Component->GetComponentQuat(), bHighlighted ? FColor::Yellow : FColor::Red, false, 0.f, 0, 1.5f);
 	};
-	DrawBox(BodyCollision); DrawBox(LiftPhysicsBody); DrawBox(ReachPhysicsBody); DrawBox(ForkPhysicsBody); DrawBox(LeftForkCollision); DrawBox(RightForkCollision); DrawBox(ForkBackrestCollision); DrawBox(LeftSupportLegCollision); DrawBox(RightSupportLegCollision);
+	DrawBox(BodyCollision); DrawBox(LiftPhysicsBody); DrawBox(ReachPhysicsBody); DrawBox(ForkPhysicsBody); DrawBox(LeftForkCollision); DrawBox(RightForkCollision); DrawBox(LeftSupportLegCollision); DrawBox(RightSupportLegCollision);
 	for (TActorIterator<APallet> It(GetWorld()); It; ++It)
 	{
 		for (UBoxComponent* Shape : It->GetCollisionShapes()) DrawBox(Shape);
@@ -885,98 +830,6 @@ void AAutomatedForklift::SpawnPallet()
 	GetWorld()->SpawnActor<APallet>(APallet::StaticClass(), FVector(SpawnLocation.X, SpawnLocation.Y, 1.f), GetActorRotation(), Params);
 }
 
-void AAutomatedForklift::SpawnLoadComparisonPallets()
-{
-	if (!GetWorld()) return;
-	FVector Center = GetActorLocation() + GetActorForwardVector() * 340.f;
-	Center.Z = 1.f;
-	const FRotator Rotation = GetActorRotation();
-	const auto SpawnCargoPallet = [this, &Rotation](const FVector& Location, float CargoMassKg, const FLinearColor& Color)
-	{
-		APallet* Pallet = GetWorld()->SpawnActorDeferred<APallet>(APallet::StaticClass(), FTransform(Rotation, Location), this, GetInstigator(), ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
-		if (!Pallet) return;
-		Pallet->bHasCargo = true;
-		Pallet->CargoMassKg = CargoMassKg;
-		Pallet->FinishSpawning(FTransform(Rotation, Location));
-		Pallet->CargoVisual->SetVectorParameterValueOnMaterials(TEXT("Color"), FVector(Color.R, Color.G, Color.B));
-	};
-	SpawnCargoPallet(Center - GetActorRightVector() * 80.f, 200.f, FLinearColor(0.15f, 0.45f, 1.f));
-	SpawnCargoPallet(Center + GetActorRightVector() * 80.f, 1400.f, FLinearColor(1.f, 0.25f, 0.08f));
-	UE_LOG(LogTemp, Warning, TEXT("[R16HD_LOAD_COMPARE] spawned blue=250kg total, orange=1450kg total; lift each above 5cm to activate load-dependent drive response"));
-}
-
-void AAutomatedForklift::UpdateDetectedPalletLoad()
-{
-	AActor* PreviousLoadActor = DetectedLoadPallet.Get();
-	AActor* LoadedActor = DetectedLoadPallet.Get();
-	if (LoadedActor)
-	{
-		const FVector Local = GetActorTransform().InverseTransformPosition(LoadedActor->GetActorLocation());
-		const bool bStillOnTruck = Local.X > -20.f && Local.X < Dimensions.OverallLengthCm + Dimensions.ForkLengthCm + 120.f
-			&& FMath::Abs(Local.Y) < Dimensions.MaximumWidthCm * .5f + 80.f;
-		float RiseCm = 0.f;
-		if (APallet* Pallet = Cast<APallet>(LoadedActor)) RiseCm = Pallet->GetRiseFromSpawnCm();
-		else if (AWoodPallet* WoodPallet = Cast<AWoodPallet>(LoadedActor)) RiseCm = WoodPallet->GetRiseFromSpawnCm();
-		if (!bStillOnTruck || RiseCm < 2.f) DetectedLoadPallet.Reset();
-	}
-
-	if (!DetectedLoadPallet.IsValid())
-	{
-		// The forklift mast/forks are kinematic scene components, so Chaos does
-		// not consistently report a fresh hit on the pallet while it is being
-		// raised. Detect a lifted pallet in the fork envelope spatially instead
-		// of requiring a transient OnHit callback to have fired.
-		for (TActorIterator<APallet> It(GetWorld()); It; ++It)
-		{
-			const FVector Local = GetActorTransform().InverseTransformPosition((*It)->GetActorLocation());
-			if ((*It)->GetRiseFromSpawnCm() > 5.f && Local.X > -20.f && Local.X < Dimensions.OverallLengthCm + Dimensions.ForkLengthCm + 120.f
-				&& FMath::Abs(Local.Y) < Dimensions.MaximumWidthCm * .5f + 80.f
-				&& LiftCm > 2.f)
-			{
-				DetectedLoadPallet = *It;
-				break;
-			}
-		}
-		if (!DetectedLoadPallet.IsValid())
-		{
-			for (TActorIterator<AWoodPallet> It(GetWorld()); It; ++It)
-			{
-				const FVector Local = GetActorTransform().InverseTransformPosition((*It)->GetActorLocation());
-				if ((*It)->GetRiseFromSpawnCm() > 5.f && Local.X > -20.f && Local.X < Dimensions.OverallLengthCm + Dimensions.ForkLengthCm + 120.f
-					&& FMath::Abs(Local.Y) < Dimensions.MaximumWidthCm * .5f + 80.f
-					&& LiftCm > 2.f)
-				{
-					DetectedLoadPallet = *It;
-					break;
-				}
-			}
-		}
-	}
-
-	if (APallet* Pallet = Cast<APallet>(DetectedLoadPallet.Get()))
-	{
-		CurrentPalletMassKg = Pallet->EmptyPalletMassKg;
-		CurrentCargoMassKg = Pallet->bHasCargo ? Pallet->CargoMassKg : 0.f;
-		CurrentPayloadMassKg = Pallet->GetConfiguredMassKg();
-	}
-	else if (AWoodPallet* WoodPallet = Cast<AWoodPallet>(DetectedLoadPallet.Get()))
-	{
-		CurrentPalletMassKg = WoodPallet->PalletMassKg;
-		CurrentCargoMassKg = 0.f;
-		CurrentPayloadMassKg = CurrentPalletMassKg;
-	}
-	else
-	{
-		CurrentPalletMassKg = CurrentCargoMassKg = CurrentPayloadMassKg = 0.f;
-	}
-	if (PreviousLoadActor != DetectedLoadPallet.Get())
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[R16HD_LOAD_DETECTED] actor=%s class=%s palletKg=%.1f cargoKg=%.1f totalKg=%.1f"),
-			*GetNameSafe(DetectedLoadPallet.Get()), *GetNameSafe(DetectedLoadPallet.IsValid() ? DetectedLoadPallet->GetClass() : nullptr),
-			CurrentPalletMassKg, CurrentCargoMassKg, CurrentPayloadMassKg);
-	}
-}
-
 void AAutomatedForklift::InteractWithPallet()
 {
 	// Transport is intentionally contact-only.  Keeping this input as a visible
@@ -1008,7 +861,7 @@ void AAutomatedForklift::ApplyKinematicForkControls(float Dt)
 	ReachCarriage->SetRelativeLocation(FVector(ReachCm, 0.f, 0.f));
 	ForkCarriage->SetRelativeLocation(FVector(0.f, SideShiftCm, 0.f));
 	UpdateMastVisuals(LiftCm);
-	ActuatorDebugStatus = FString::Printf(TEXT("LOAD %.0fkg | target %.0f / commanded %.0fcm/s | KINEMATIC ForkTop %.1f / %.1fcm | E/Q %.1f | R/F %.1f / %.1f | Z/C %.1f"), CurrentPayloadMassKg, TargetForwardSpeedCmPerSec, CommandedForwardSpeedCmPerSec, GetForkTopHeightAboveGroundCm(), MaximumForkTopHeightAboveGroundCm, LiftCm, ReachCm, Dimensions.ReachTravelCm, SideShiftCm);
+	ActuatorDebugStatus = FString::Printf(TEXT("KINEMATIC | ForkTop %.1f / %.1fcm | E/Q %.1f | R/F %.1f / %.1f | Z/C %.1f"), GetForkTopHeightAboveGroundCm(), MaximumForkTopHeightAboveGroundCm, LiftCm, ReachCm, Dimensions.ReachTravelCm, SideShiftCm);
 }
 
 FString AAutomatedForklift::AutoPickupStateToString(EAutoPickupState State)
@@ -2132,34 +1985,11 @@ void AAutomatedForklift::Tick(float Dt)
 	TargetForwardSpeedCmPerSec = LastAppliedDriveInput * Speed;
 
 	UpdateNavigation(Dt);
-	UpdateDetectedPalletLoad();
-	const float LoadFactor = CurrentPayloadMassKg > 0.f
-		? FMath::Clamp(CurrentPayloadMassKg / FMath::Max(1.f, Dimensions.RatedLoadKg), 0.f, 1.f)
-		: (bIsLoaded ? 1.f : 0.f);
-	const float LiftRiskDenominator = FMath::Max(1.f, MaximumForkTopHeightAboveGroundCm - Motion.LiftHeightCautionStartCm);
-	const float LiftRisk = FMath::Clamp((LiftCm - Motion.LiftHeightCautionStartCm) / LiftRiskDenominator, 0.f, 1.f);
-	const float LoadSpeedScale = FMath::Lerp(1.f, Motion.LoadedMaxSpeedScale, LoadFactor);
-	const float HeightSpeedScale = FMath::Lerp(1.f, Motion.RaisedForkMaxSpeedScale, LiftRisk);
-	const float SteeringLoadScale = FMath::Lerp(1.f, Motion.LoadedSteeringScale, LoadFactor);
-	const float SteeringHeightScale = FMath::Lerp(1.f, Motion.RaisedForkSteeringScale, LiftRisk);
-	const float RequestedYawRateRad = FMath::DegreesToRadians(Motion.SteeringRateDegPerSec * SteerInput * SteeringLoadScale * SteeringHeightScale);
-	CurrentLateralAccelerationG = FMath::Abs(CurrentForwardSpeedCmPerSec * RequestedYawRateRad) / 980.665f;
-	const float LateralLimitG = FMath::Lerp(Motion.UnloadedLateralLimitG, Motion.LoadedLateralLimitG, LoadFactor)
-		* FMath::Lerp(1.f, Motion.RaisedForkLateralLimitScale, LiftRisk);
-	CurrentStabilityRisk = CurrentLateralAccelerationG / FMath::Max(.01f, LateralLimitG);
-	// Apply a progressive speed and steering override as the estimated lateral
-	// acceleration approaches the conservative operating envelope.
-	const float StabilityControlScale = CurrentStabilityRisk > .65f
-		? FMath::Lerp(1.f, Motion.StabilityControlMinimumScale, FMath::Clamp((CurrentStabilityRisk - .65f) / .85f, 0.f, 1.f))
-		: 1.f;
 	const float Speed = DriveInput >= 0.f ? Motion.ForwardSpeedCmPerSec : Motion.ReverseSpeedCmPerSec;
-	TargetForwardSpeedCmPerSec = LastAppliedDriveInput * Speed * LoadSpeedScale * HeightSpeedScale * StabilityControlScale;
-	const bool bBrakingOrReversing = FMath::IsNearlyZero(TargetForwardSpeedCmPerSec) || (!FMath::IsNearlyZero(CommandedForwardSpeedCmPerSec) && TargetForwardSpeedCmPerSec * CommandedForwardSpeedCmPerSec < 0.f);
-	const float Rate = bBrakingOrReversing ? FMath::Lerp(Motion.UnloadedBrakingCmPerSecSq, Motion.LoadedBrakingCmPerSecSq, LoadFactor) : FMath::Lerp(Motion.UnloadedAccelerationCmPerSecSq, Motion.LoadedAccelerationCmPerSecSq, LoadFactor);
-	CommandedForwardSpeedCmPerSec = FMath::FInterpConstantTo(CommandedForwardSpeedCmPerSec, TargetForwardSpeedCmPerSec, Dt, FMath::Max(1.f, Rate));
+	TargetForwardSpeedCmPerSec = DriveInput * Speed;
+
 	const FVector StartLocation = GetActorLocation(); FHitResult DriveHit;
-	FVector DriveDelta = GetActorForwardVector() * CommandedForwardSpeedCmPerSec * Dt
-		+ ExternalPushVelocityCmPerSec * Dt;
+	FVector DriveDelta = GetActorForwardVector() * TargetForwardSpeedCmPerSec * Dt;
 	float EarliestPartHit = 1.f;
 	for (UBoxComponent* Part : {LeftSupportLegCollision.Get(), RightSupportLegCollision.Get()})
 	{
@@ -2169,7 +1999,7 @@ void AAutomatedForklift::Tick(float Dt)
 	// The chassis root does not cover the raised/extended fork tips. Sweep the
 	// real tine shapes against fixed geometry before moving the kinematic body;
 	// pallets are intentionally excluded and remain Chaos contact loads.
-	for (UBoxComponent* Tine : {LeftForkCollision.Get(), RightForkCollision.Get(), ForkBackrestCollision.Get()})
+	for (UBoxComponent* Tine : {LeftForkCollision.Get(), RightForkCollision.Get()})
 	{
 		FHitResult TineHit;
 		if (SweepForkPartAgainstFixedObstacle(Tine, DriveDelta, TEXT("drive fork fixed-obstacle sweep"), TineHit)) EarliestPartHit = FMath::Min(EarliestPartHit, TineHit.Time);
@@ -2189,21 +2019,17 @@ void AAutomatedForklift::Tick(float Dt)
 	}
 	AddActorWorldOffset(DriveDelta, true, &DriveHit);
 	if (DriveHit.bBlockingHit) RecordCollision(TEXT("body root sweep"), BodyCollision, DriveHit, DriveDelta, true);
-	if (DriveHit.bBlockingHit && FVector::DotProduct(ExternalPushVelocityCmPerSec, DriveHit.Normal) < 0.f)
-	{
-		// Remove only the velocity directed into the blocking surface; preserve
-		// sideways sliding, which then decays through the configured friction.
-		ExternalPushVelocityCmPerSec = FVector::VectorPlaneProject(ExternalPushVelocityCmPerSec, DriveHit.Normal);
-	}
 	const FVector EndLocation = GetActorLocation();
 	CurrentForwardSpeedCmPerSec = Dt > SMALL_NUMBER ? FVector::DotProduct((EndLocation - StartLocation) / Dt, GetActorForwardVector()) : 0.f;
+
 	const bool bIsDriving = !FMath::IsNearlyZero(LastAppliedDriveInput); if (bIsDriving && !bWasDriving) LogInitialDriveOverlaps(); if (bIsDriving) EmitDriveDiagnostic(StartLocation, EndLocation, DriveHit); bWasDriving = bIsDriving;
-	const float PushSpeed = ExternalPushVelocityCmPerSec.Size();
-	if (PushSpeed <= Motion.PushVelocityDecayCmPerSecSq * Dt || PushSpeed < .5f) ExternalPushVelocityCmPerSec = FVector::ZeroVector;
-	else ExternalPushVelocityCmPerSec *= (PushSpeed - Motion.PushVelocityDecayCmPerSecSq * Dt) / PushSpeed;
-	const float YawDelta = LastAppliedSteerInput * Motion.SteeringRateDegPerSec * SteeringLoadScale * SteeringHeightScale * StabilityControlScale * Dt;
+	const float YawDelta = LastAppliedSteerInput * Motion.SteeringRateDegPerSec * Dt;
 	LastAutoYawDeltaDeg = IsAutoPickupMotionActive() ? YawDelta : 0.f;
 	if (IsAutoPickupMotionActive()) AutoApproachAccumulatedYawDeg += YawDelta;
+
+	const bool bIsDriving = !FMath::IsNearlyZero(DriveInput); if (bIsDriving && !bWasDriving) LogInitialDriveOverlaps(); if (bIsDriving) EmitDriveDiagnostic(StartLocation, EndLocation, DriveHit); bWasDriving = bIsDriving;
+	const float YawDelta = SteerInput * Motion.SteeringRateDegPerSec * Dt;
+
 	if (!WouldForkRotationHitFixedObstacle(YawDelta)) AddActorWorldRotation(FRotator(0.f, YawDelta, 0.f));
 	// Fork axes are deterministic kinematic controls. Their prediction sweeps
 	// use the real separated tine volumes against fixed geometry. The dynamic
@@ -2223,17 +2049,6 @@ void AAutomatedForklift::Tick(float Dt)
 	}
 	ProcessOpeningVision();
 	UpdateAutoPickup(Dt);
-	if (GEngine)
-	{
-		const FString SpeedValue = FString::SanitizeFloat(CurrentForwardSpeedCmPerSec * 0.036f, 2);
-		const FString TargetValue = FString::SanitizeFloat(TargetForwardSpeedCmPerSec * 0.036f, 2);
-		const FString SpeedStatus = FString(TEXT("속도: ")) + SpeedValue + TEXT(" km/h  |  목표: ") + TargetValue + TEXT(" km/h");
-		const FString LoadStatus = FString(TEXT("팔레트: ")) + FString::FromInt(FMath::RoundToInt(CurrentPalletMassKg))
-			+ TEXT(" kg  |  적재물: ") + FString::FromInt(FMath::RoundToInt(CurrentCargoMassKg))
-			+ TEXT(" kg  |  총 하중: ") + FString::FromInt(FMath::RoundToInt(CurrentPayloadMassKg)) + TEXT(" kg");
-		GEngine->AddOnScreenDebugMessage(reinterpret_cast<uint64>(this) + 3, 0.12f, FColor::Cyan, SpeedStatus);
-		GEngine->AddOnScreenDebugMessage(reinterpret_cast<uint64>(this) + 4, 0.12f, FColor::Yellow, LoadStatus);
-	}
 	DrawCollisionDebug();
 	DrawPalletSensorDebug();
 }
