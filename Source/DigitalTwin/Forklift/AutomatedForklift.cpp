@@ -501,15 +501,13 @@ void AAutomatedForklift::SetupPlayerInputComponent(UInputComponent* Input)
 	Input->BindKey(EKeys::J, IE_Pressed, this, &AAutomatedForklift::ToggleDetailedSensorDiagnostics);
 	Input->BindKey(EKeys::L, IE_Pressed, this, &AAutomatedForklift::ToggleLidarDebug);
 
-	Input->BindKey(EKeys::I, IE_Pressed, this, &AAutomatedForklift::ToggleSensorOcclusionDiagnostic);
-	Input->BindKey(EKeys::L, IE_Pressed, this, &AAutomatedForklift::ToggleLidarDebug);
-
+	// One binding per toggle.  The merge left duplicate L/I bindings here,
+	// causing a single key press to toggle the state on and immediately off.
+	// Keep M routed through the wrapper so its HUD/log feedback remains intact.
 	if (UForkliftSlamComponent* Slam = FindComponentByClass<UForkliftSlamComponent>())
 	{
-		Input->BindKey(EKeys::M, IE_Pressed, Slam, &UForkliftSlamComponent::ToggleMap);
 		Input->BindKey(EKeys::B, IE_Pressed, Slam, &UForkliftSlamComponent::ResetMap);
 	}
-
 	Input->BindKey(EKeys::M, IE_Pressed, this, &AAutomatedForklift::ToggleSlamMapDebug);
 
 
@@ -616,7 +614,17 @@ void AAutomatedForklift::ToggleSensorOcclusionDiagnostic()
 }
 void AAutomatedForklift::ToggleLidarDebug()
 {
-	if (NavigationSensor) NavigationSensor->ToggleDebugVisible();
+	if (!NavigationSensor) return;
+	NavigationSensor->ToggleDebugVisible();
+	const bool bEnabled = NavigationSensor->bDebugVisible;
+	UE_LOG(LogTemp, Log, TEXT("[FORKLIFT_INPUT] L LiDAR ray debug=%s sensor=%s"),
+		bEnabled ? TEXT("ON") : TEXT("OFF"), *GetNameSafe(NavigationSensor));
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(reinterpret_cast<uint64>(this) + 2, 2.f,
+			bEnabled ? FColor::Green : FColor::Silver,
+			bEnabled ? TEXT("LiDAR rays: ON (L to hide)") : TEXT("LiDAR rays: OFF (L to show)"));
+	}
 }
 
 void AAutomatedForklift::ToggleSlamMapDebug()

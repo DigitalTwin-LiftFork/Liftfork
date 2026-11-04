@@ -140,6 +140,10 @@ private:
 	float LastProcessedTimestamp = 0.f;
 	FVector2D TranslationPriorPerScan = FVector2D::ZeroVector;
 	float YawPriorPerScanDegrees = 0.f;
+	/** IMU rotation integrated between the two most recently consumed full sweeps.
+	 * Kept separately from scan-match confidence so the heading display and
+	 * matcher prior both advance during a physical turn. */
+	float LastImuYawDeltaDegrees = 0.f;
 
 	void ConsumeLatestScan();
 	void ExtractBodyScanPoints(const struct FForkliftLidarScan& Scan, TArray<FVector2D>& OutHits, TArray<FPlanarScanRay>& OutRays) const;

@@ -14,9 +14,14 @@ namespace
 	FVector2D NavCentre(FIntPoint C) { return FVector2D(C.X*40.+20., C.Y*40.+20.); }
 	FVector2D BodyPose(const UForkliftSlamComponent* S, const UForkliftNavigationSensorComponent* L)
 	{
-		const FVector Offset = L->GetRelativeLocation();
-		const double Now=L->GetWorld()->GetTimeSeconds();
-		return S->GetPredictedPosition(Now) - NavRotate(FVector2D(Offset.X,Offset.Y), S->GetPredictedYaw());
+		// ConsumeLatestScan transforms every return by SensorToBody before scan
+		// matching/integration, so the incremental SLAM pose is already the body
+		// origin in map coordinates.  The merge-era controller subtracted the
+		// LiDAR mount offset again here, shifting every route target and obstacle
+		// relative to the vehicle by the sensor's forward mount distance.
+		// Keep the parameter for the call sites' component-validity contract.
+		(void)L;
+		return S->GetPredictedPosition(S->GetWorld()->GetTimeSeconds());
 	}
 }
 
@@ -301,6 +306,14 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
     }
     const float HeadingNow=S->GetPredictedYaw();
     const FVector2D Target=NavRotate(LookAhead-Pose,-HeadingNow);
+	// Target is now in the same X-forward/Y-right chassis frame used by the
+	// vehicle kinematics.  Do not let the order of the sampled turn rates pick
+	// a direction when two arcs have nearly identical distance scores: it made
+	// the first (-30 deg/s) candidate win repeatedly after the merge.  Positive
+	// local Y maps to positive UE yaw (right turn); negative Y maps to left.
+	const float TargetBearingRadians = FMath::Atan2(Target.Y, Target.X);
+	const float DesiredTurnRate = FMath::Clamp(
+		FMath::RadiansToDegrees(TargetBearingRadians) * 0.75f, -30.f, 30.f);
 	// Full vehicle planar envelope measured from existing collision parts.
 	FBox Bounds(ForceInit);
 	const UBoxComponent* Parts[]={BodyCollision,LeftSupportLegCollision,RightSupportLegCollision,LeftForkCollision,RightForkCollision,LidarMastOccluder};
@@ -318,10 +331,14 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 		if (!Ray.bValid) continue;
 		const FVector P=Scan.SensorToBody.TransformPosition(Ray.LocalPointCm);
 		if (P.Z>NavigationSensor->GetGroundHeightInBody()+6.f && P.Z<Bounds.Max.Z+15.f)
-			{
-            const FVector2D MapPoint=S->GetPosition()+NavRotate(FVector2D(Ray.LocalPointCm.X,Ray.LocalPointCm.Y),S->GetYaw());
-            Obstacles.Add(NavRotate(MapPoint-Pose,-HeadingNow));
-        }
+		{
+			// P is the ray endpoint in the chassis frame.  It must match the
+			// SensorToBody-transformed endpoint used by SLAM map integration;
+			// using Ray.LocalPointCm here puts the obstacle in a second, sensor
+			// shifted frame and biases the local avoidance turn.
+			const FVector2D MapPoint = S->GetPosition() + NavRotate(FVector2D(P.X, P.Y), S->GetYaw());
+			Obstacles.Add(NavRotate(MapPoint - Pose, -HeadingNow));
+		}
 	}
 	float Best=-BIG_NUMBER, BestSpeed=0.f, BestRate=0.f;
 	for (float Speed:{0.f, S->GetConfidence()<.45f ? 15.f : 30.f, S->GetConfidence()<.45f ? 30.f : 60.f})
@@ -347,8 +364,15 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 			// planner choose a stationary spin repeatedly, even when forward
 			// motion was clear. Keep pivot turns for targets well off the nose.
 			const float PivotPenalty=Speed==0.f ? 35.f : 0.f;
-			const float Score=(Target.Size()-Remaining.Size())-Heading*30.f-FMath::Abs(Rate)*.1f-PivotPenalty;
-			if (Score>Best) { Best=Score; BestSpeed=Speed; BestRate=Rate; }
+			const float DirectionPenalty = FMath::Abs(Rate - DesiredTurnRate) * .20f;
+			const float Score=(Target.Size()-Remaining.Size())-Heading*30.f-DirectionPenalty-FMath::Abs(Rate)*.02f-PivotPenalty;
+			const bool bBetterScore = Score > Best + KINDA_SMALL_NUMBER;
+			const bool bSameScore = FMath::IsNearlyEqual(Score, Best, KINDA_SMALL_NUMBER);
+			const bool bCloserToRouteHeading = bSameScore &&
+				(FMath::Abs(Rate - DesiredTurnRate) < FMath::Abs(BestRate - DesiredTurnRate) - KINDA_SMALL_NUMBER ||
+					(FMath::IsNearlyEqual(FMath::Abs(Rate - DesiredTurnRate), FMath::Abs(BestRate - DesiredTurnRate), KINDA_SMALL_NUMBER) &&
+						FMath::Abs(Rate) < FMath::Abs(BestRate)));
+			if (bBetterScore || bCloserToRouteHeading) { Best=Score; BestSpeed=Speed; BestRate=Rate; }
 		}
 	if (Best==-BIG_NUMBER) { BeginNavigationRecovery(TEXT("안전한 이동 후보 없음")); return; }
 	// Simulation collision guard is separate from sensor-based planning.
@@ -377,7 +401,8 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 	}
 	DriveInput=BestSpeed/FMath::Max(Motion.ForwardSpeedCmPerSec,1.f);
 	SteerInput=BestRate/FMath::Max(Motion.SteeringRateDegPerSec,1.f);
-	NavigationStatus=FString::Printf(TEXT("%s: 전진 %.0fcm/s / 조향 %.0f°/s"),bNavigationGoalIsManual ? TEXT("목표 주행") : TEXT("랜덤 순찰"),BestSpeed,BestRate);
+	NavigationStatus=FString::Printf(TEXT("%s: 전진 %.0fcm/s / 조향 %.0f°/s (경로 로컬 X %.0f Y %.0f, 희망 %.0f°/s)"),
+		bNavigationGoalIsManual ? TEXT("목표 주행") : TEXT("랜덤 순찰"), BestSpeed, BestRate, Target.X, Target.Y, DesiredTurnRate);
 }
 
 bool AAutomatedForklift::SelectExplorationGoal(FVector2D Start)

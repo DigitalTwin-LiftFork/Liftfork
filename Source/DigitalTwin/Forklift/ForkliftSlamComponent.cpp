@@ -59,6 +59,7 @@ void UForkliftSlamComponent::ResetMap()
 	LastProcessedTimestamp = 0.f;
 	TranslationPriorPerScan = FVector2D::ZeroVector;
 	YawPriorPerScanDegrees = 0.f;
+	LastImuYawDeltaDegrees = 0.f;
 	EstimatedPose = FForkliftSlamPose();
 	MapWidth = FMath::Max(1, FMath::CeilToInt(MapSizeCm / FMath::Max(2.f, MapResolutionCm)));
 	LogOddsMap.Init(0, MapWidth * MapWidth);
@@ -300,6 +301,9 @@ void UForkliftSlamComponent::ConsumeLatestScan()
 	if (!SensorComponent) return;
 	const FForkliftLidarScan& Scan = SensorComponent->GetLatestScan();
 	if (Scan.SequenceNumber == 0 || Scan.SequenceNumber == ConsumedScanSequence) return;
+	const double PreviousScanTimestamp = LastProcessedTimestamp > 0.f
+		? static_cast<double>(LastProcessedTimestamp) : Scan.TimestampSeconds;
+	const float ScanDeltaSeconds = FMath::Clamp(static_cast<float>(Scan.TimestampSeconds - PreviousScanTimestamp), 0.f, .5f);
 	ConsumedScanSequence = Scan.SequenceNumber;
 	LastScan = Scan.TimestampSeconds;
 	TArray<FVector2D> BodyHits;
@@ -307,8 +311,16 @@ void UForkliftSlamComponent::ConsumeLatestScan()
 	ExtractBodyScanPoints(Scan, BodyHits, Rays);
 	const FVector2D PreviousPosition = EstimatedPose.PositionMapCm;
 	const float PreviousYaw = EstimatedPose.YawMapDegrees;
+	const FForkliftImuSample& Imu = SensorComponent->GetLatestImu();
+	// The component is physically attached to the LiDAR mast and produces its
+	// angular velocity in sensor-local axes.  The mount has no roll/pitch
+	// offset, so local +Z is the same planar yaw convention used by the map.
+	// Use this only as a pose prior; scan matching remains the measurement that
+	// validates/map-integrates the pose.
+	LastImuYawDeltaDegrees = Imu.bInitialized
+		? FMath::RadiansToDegrees(Imu.AngularVelocityRadPerSec.Z) * ScanDeltaSeconds : 0.f;
 	FVector2D PredictedPosition = PreviousPosition + TranslationPriorPerScan;
-	float PredictedYaw = PreviousYaw + YawPriorPerScanDegrees;
+	float PredictedYaw = FMath::UnwindDegrees(PreviousYaw + LastImuYawDeltaDegrees);
 	int32 MatchedPoints = 0;
 	float MatchedFraction = 0.f;
 	bool bCanIntegrate = !EstimatedPose.bInitialized;
@@ -334,14 +346,16 @@ void UForkliftSlamComponent::ConsumeLatestScan()
 			EstimatedPose.PositionMapCm = MatchedPosition;
 			EstimatedPose.YawMapDegrees = MatchedYaw;
 			TranslationPriorPerScan = (MatchedPosition - PreviousPosition) * .5f;
-			YawPriorPerScanDegrees = FMath::FindDeltaAngleDegrees(PreviousYaw, MatchedYaw) * .5f;
+			// The next yaw prior comes from the IMU, not from replaying the last
+			// scan-match correction a second time.
+			YawPriorPerScanDegrees = 0.f;
 			bCanIntegrate = true;
 		}
 		else
 		{
 			// Do not smear a scan into the map when localization confidence is low.
 			TranslationPriorPerScan *= .5f;
-			YawPriorPerScanDegrees *= .5f;
+			YawPriorPerScanDegrees = 0.f;
 		}
 	}
 	EstimatedPose.TimestampSeconds = Scan.TimestampSeconds;
