@@ -13,6 +13,7 @@ APallet::APallet()
 	CollisionBody->SetBoxExtent(FVector(DepthCm * .5f, WidthCm * .5f, DeckThicknessCm * .5f));
 	CollisionBody->SetCollisionProfileName(TEXT("PhysicsActor"));
 	CollisionBody->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	CollisionBody->SetUseCCD(true);
 	CollisionBody->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
 	CollisionBody->SetCollisionResponseToChannel(ECC_WorldDynamic, ECR_Block);
 	CollisionBody->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
@@ -52,6 +53,13 @@ bool APallet::GetRecentPhysicsContact(float MaxAgeSeconds, FHitResult& OutHit, U
 	OutHit = LastPhysicsHit;
 	OutOther = LastPhysicsOther.Get();
 	return OutOther != nullptr;
+}
+
+float APallet::GetSimulationMassKg() const
+{
+	return CollisionBody && CollisionBody->IsSimulatingPhysics()
+		? CollisionBody->GetMass()
+		: EmptyPalletMassKg + (bHasCargo ? CargoMassKg : 0.f);
 }
 
 bool APallet::CanAcceptForkTines(const UBoxComponent* LeftTine, const UBoxComponent* RightTine) const
@@ -112,12 +120,22 @@ float APallet::GetForkSupportSurfaceWorldZ() const
 void APallet::BeginPlay()
 {
 	Super::BeginPlay();
+	InitialActorZcm = GetActorLocation().Z;
  CollisionShapes.Remove(CargoCollision);
  if (bHasCargo) CollisionShapes.AddUnique(CargoCollision);
  CargoVisual->SetVisibility(bHasCargo);
  CargoCollision->SetCollisionEnabled(bHasCargo ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
+ ApplyPhysicsTuning();
 	SetCarriedState(false);
-	UE_LOG(LogTemp, Warning, TEXT("[R16HD_PALLET_PHYSICS] pallet=%s sim=%d gravity=%d collision=%d root=%s"), *GetName(), CollisionBody->IsSimulatingPhysics(), CollisionBody->IsGravityEnabled(), static_cast<int32>(CollisionBody->GetCollisionEnabled()), *CollisionBody->GetComponentLocation().ToString());
+	UE_LOG(LogTemp, Warning, TEXT("[R16HD_PALLET_PHYSICS] pallet=%s massKg=%.1f targetKg=%.1f cargo=%d sim=%d gravity=%d collision=%d root=%s"), *GetName(), CollisionBody->GetMass(), GetConfiguredMassKg(), bHasCargo, CollisionBody->IsSimulatingPhysics(), CollisionBody->IsGravityEnabled(), static_cast<int32>(CollisionBody->GetCollisionEnabled()), *CollisionBody->GetComponentLocation().ToString());
+}
+
+void APallet::ApplyPhysicsTuning()
+{
+	if (!CollisionBody) return;
+	CollisionBody->SetMassOverrideInKg(NAME_None, FMath::Max(1.f, GetConfiguredMassKg()), true);
+	CollisionBody->SetLinearDamping(FMath::Max(0.f, LinearDamping));
+	CollisionBody->SetAngularDamping(FMath::Max(0.f, AngularDamping));
 }
 
 void APallet::SetCarriedState(bool bIsCarried)
@@ -134,6 +152,18 @@ void APallet::SetCarriedState(bool bIsCarried)
 	}
 	CollisionBody->SetEnableGravity(true);
 	CollisionBody->SetSimulatePhysics(true);
+	// Attached collision pieces contribute their own geometric masses. Correct
+	// the root override for that compound-body contribution so Chaos's measured
+	// total matches the editable pallet + cargo mass.
+	const float TargetMassKg = GetConfiguredMassKg();
+	const float MeasuredMassKg = CollisionBody->GetMass();
+	const float CorrectedRootMassKg = FMath::Max(.1f, TargetMassKg - (MeasuredMassKg - TargetMassKg));
+	CollisionBody->SetMassOverrideInKg(NAME_None, CorrectedRootMassKg, true);
+	const float CorrectedMassKg = CollisionBody->GetMass();
+	if (!FMath::IsNearlyEqual(CorrectedMassKg, TargetMassKg, .5f))
+	{
+		CollisionBody->SetMassOverrideInKg(NAME_None, FMath::Max(.1f, CorrectedRootMassKg + TargetMassKg - CorrectedMassKg), true);
+	}
 	for (UBoxComponent* Shape : CollisionShapes) Shape->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 }
 
@@ -157,6 +187,7 @@ UBoxComponent* APallet::AddCollisionShape(const TCHAR* Name, const FVector& Loca
 	Shape->SetBoxExtent(HalfExtent);
 	Shape->SetCollisionProfileName(TEXT("PhysicsActor"));
 	Shape->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	Shape->SetUseCCD(true);
 	Shape->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
 	Shape->SetCollisionResponseToChannel(ECC_WorldDynamic, ECR_Block);
 	Shape->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
@@ -168,6 +199,7 @@ UBoxComponent* APallet::AddCollisionShape(const TCHAR* Name, const FVector& Loca
 void APallet::OnConstruction(const FTransform& Transform)
 {
  Super::OnConstruction(Transform);
+ ApplyPhysicsTuning();
  CargoVisual->SetVisibility(bHasCargo);
  CargoCollision->SetCollisionEnabled(bHasCargo ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
  CollisionShapes.Remove(CargoCollision);
