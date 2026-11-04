@@ -3,8 +3,6 @@
 #include "Forklift/WoodPallet.h"
 #include "Forklift/ForkliftNavigationSensorComponent.h"
 #include "Forklift/ForkliftSlamComponent.h"
-#include "Forklift/ForkliftLocalOccupancyGridComponent.h"
-#include "Forklift/ForkliftGlobalPathPlannerComponent.h"
 #include "Components/BoxComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/SceneComponent.h"
@@ -69,9 +67,7 @@ AAutomatedForklift::AAutomatedForklift()
 	BodyCollision->SetCollisionResponseToChannel(ECC_PhysicsBody, ECR_Block);
 	// One rear-body LiDAR/IMU and one SLAM consumer.  The components are kept
 	// independent of the moving fork RGB-D camera.
-	LocalOccupancyGrid = CreateDefaultSubobject<UForkliftLocalOccupancyGridComponent>(TEXT("LocalOccupancyGrid"));
 	SlamComponent = CreateDefaultSubobject<UForkliftSlamComponent>(TEXT("LidarSlam"));
-	GlobalPathPlanner = CreateDefaultSubobject<UForkliftGlobalPathPlannerComponent>(TEXT("GlobalPathPlanner"));
 
 // LiDAR support pole
 // 50 cm enters the chassis, with the remaining pole above the body.
@@ -497,16 +493,13 @@ void AAutomatedForklift::SetupPlayerInputComponent(UInputComponent* Input)
 
 	Input->BindKey(EKeys::U, IE_Pressed, this, &AAutomatedForklift::ToggleDepthDebugView);
 	Input->BindKey(EKeys::P, IE_Pressed, this, &AAutomatedForklift::ToggleAutoApproachStraightDiagnostic);
-	Input->BindKey(EKeys::I, IE_Pressed, this, &AAutomatedForklift::ToggleSensorOcclusionDiagnostic);
 	Input->BindKey(EKeys::J, IE_Pressed, this, &AAutomatedForklift::ToggleDetailedSensorDiagnostics);
-	Input->BindKey(EKeys::L, IE_Pressed, this, &AAutomatedForklift::ToggleLidarDebug);
 
 	Input->BindKey(EKeys::I, IE_Pressed, this, &AAutomatedForklift::ToggleSensorOcclusionDiagnostic);
 	Input->BindKey(EKeys::L, IE_Pressed, this, &AAutomatedForklift::ToggleLidarDebug);
 
 	if (UForkliftSlamComponent* Slam = FindComponentByClass<UForkliftSlamComponent>())
 	{
-		Input->BindKey(EKeys::M, IE_Pressed, Slam, &UForkliftSlamComponent::ToggleMap);
 		Input->BindKey(EKeys::B, IE_Pressed, Slam, &UForkliftSlamComponent::ResetMap);
 	}
 
@@ -621,15 +614,7 @@ void AAutomatedForklift::ToggleLidarDebug()
 
 void AAutomatedForklift::ToggleSlamMapDebug()
 {
-	if (!SlamComponent) return;
-	SlamComponent->bDrawMap = !SlamComponent->bDrawMap;
-	UE_LOG(LogTemp, Warning, TEXT("[SLAM_DEBUG] M map display=%s poseTrackingValid=%d"), SlamComponent->bDrawMap ? TEXT("ON") : TEXT("OFF"), SlamComponent->EstimatedPose.bTrackingValid);
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(reinterpret_cast<uint64>(this) + 1, 2.f,
-			SlamComponent->bDrawMap ? FColor::Green : FColor::Silver,
-			SlamComponent->bDrawMap ? TEXT("SLAM map: ON (M to hide)") : TEXT("SLAM map: OFF (M to show)"));
-	}
+	if (SlamComponent) SlamComponent->ToggleMap();
 }
 
 void AAutomatedForklift::CameraYaw(float V) { if (bCameraOrbiting && !FMath::IsNearlyZero(V)) { CameraYawDeg += V * 2.f; CameraBoom->SetRelativeRotation(FRotator(CameraPitchDeg, CameraYawDeg, 0.f)); } }

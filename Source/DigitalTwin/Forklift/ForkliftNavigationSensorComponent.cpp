@@ -20,10 +20,11 @@ UForkliftNavigationSensorComponent::UForkliftNavigationSensorComponent()
 void UForkliftNavigationSensorComponent::BeginPlay()
 {
 	Super::BeginPlay();
-	// Keep a single migration path for old serialized scanner settings.
 	if (FMath::IsNearlyEqual(ScanIntervalSeconds,.01f) || FMath::IsNearlyEqual(ScanIntervalSeconds,.10f)) ScanIntervalSeconds=.002f;
 	// Migrate the previous 15 m instance setting for the expanded factory.
 	if (FMath::IsNearlyEqual(MaximumRangeCm, 1500.f)) MaximumRangeCm = 3000.f;
+	// Migrate serialized defaults from the old stationary sector scanner.
+	if (FMath::IsNearlyEqual(ScanIntervalSeconds, .10f)) ScanIntervalSeconds = .01f;
 	if (HorizontalSamples == 120) HorizontalSamples = 100;
 	if (FMath::IsNearlyEqual(VerticalFieldOfViewDegrees, 50.f)) VerticalFieldOfViewDegrees = 120.f;
 	if (VerticalChannels == 8) VerticalChannels = 9;
@@ -32,11 +33,7 @@ void UForkliftNavigationSensorComponent::BeginPlay()
 	PreviousWorldLocation = GetComponentLocation();
 	PreviousWorldRotation = GetComponentQuat();
 	PreviousImuTimeSeconds = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
-
-	MeasurementRandomStream.Initialize(NoiseRandomSeed);
-
 	SweepSamples.Reserve(FMath::Max(1, HorizontalSamples) * (FMath::Max(1, VerticalChannels)+38));
-
 }
 
 void UForkliftNavigationSensorComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
@@ -77,7 +74,6 @@ void UForkliftNavigationSensorComponent::PerformScan()
 	UWorld* World = GetWorld();
 	if (!World) return;
 	const double Now = World->GetTimeSeconds();
-
 	const FTransform SensorWorld = GetComponentTransform();
 	if (!bSweepReferenceInitialized)
 	{
@@ -98,9 +94,7 @@ void UForkliftNavigationSensorComponent::PerformScan()
 	const float VerticalStart = VerticalCenterDegrees - VerticalFieldOfViewDegrees * .5f;
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(R16HDLidar), false);
 	Params.bTraceComplex = false;
-	// Do not ignore the owning forklift: the query-only body/mast occluders are
-	// intentional LiDAR returns.  They are marked SelfOccluded below and never
-	// enter the completed scan's external obstacle/map samples.
+	Params.AddIgnoredActor(GetOwner()); // Ignore only this forklift in the sensor query.
 
 	// Same rotating head, with extra downward elevation channels. Fixed 15-degree
 	// spacing at a 7 m mount left metre-wide gaps in floor observations.
@@ -131,21 +125,10 @@ void UForkliftNavigationSensorComponent::PerformScan()
 				Sample.ReturnKind = ELidarReturnKind::SelfOccluded;
 				Sample.bValid = false;
 			}
-			else if (bApplyMeasurementNoise && MeasurementRandomStream.GetFraction() < FMath::Clamp(DropoutProbability, 0.f, 1.f))
-			{
-				Sample.ReturnKind = ELidarReturnKind::Dropped;
-				Sample.bValid = false;
-			}
 			else
 			{
 				Sample.ReturnKind = ELidarReturnKind::ExternalHit;
 				Sample.bValid = true;
-				if (bApplyMeasurementNoise)
-				{
-					Sample.DistanceCm = FMath::Clamp(Sample.DistanceCm + RangeBiasCm + SampleStandardNormal() * FMath::Max(0.f, RangeNoiseStdDevCm), MinimumRangeCm, MaximumRangeCm);
-					// Keep all accumulated samples in the sweep-start sensor frame.
-					Sample.LocalPointCm = Sample.LocalDirection * Sample.DistanceCm;
-				}
 			}
 		}
 		else
@@ -170,24 +153,12 @@ void UForkliftNavigationSensorComponent::PerformScan()
 			Sample.LocalDirection = EndSensorTransform.InverseTransformVectorNoScale(SweepStartTransform.TransformVectorNoScale(Sample.LocalDirection)).GetSafeNormal();
 			if (!Sample.LocalNormal.IsNearlyZero()) Sample.LocalNormal = EndSensorTransform.InverseTransformVectorNoScale(SweepStartTransform.TransformVectorNoScale(Sample.LocalNormal)).GetSafeNormal();
 		}
-		// Publish only a completed 360-degree scan.  Samples are transformed from
-		// sweep-start sensor coordinates into this end-of-sweep sensor frame, and
-		// SensorToBody describes that exact same end pose.
 		LatestScan.TimestampSeconds = Now;
-		LatestScan.SequenceNumber = NextScanSequenceNumber++;
-		LatestScan.SensorFrameId = SensorFrameId;
 		LatestScan.SensorToBody = GetRelativeTransform();
 		LatestScan.Samples = MoveTemp(SweepSamples);
 		SweepSamples.Reserve(FMath::Max(1, HorizontalSamples) * (FMath::Max(1, VerticalChannels)+38));
 		SweepStartTransform = EndSensorTransform;
 	}
-}
-
-float UForkliftNavigationSensorComponent::SampleStandardNormal()
-{
-	const float U1 = FMath::Max(MeasurementRandomStream.GetFraction(), SMALL_NUMBER);
-	const float U2 = MeasurementRandomStream.GetFraction();
-	return FMath::Sqrt(-2.f * FMath::Loge(U1)) * FMath::Cos(2.f * PI * U2);
 }
 
 void UForkliftNavigationSensorComponent::UpdateImu()
@@ -251,13 +222,10 @@ void UForkliftNavigationSensorComponent::DrawLidarDebug() const
 	DrawDebugDirectionalArrow(World, LatestBeamWorldStart, LatestBeamWorldStart + LatestBeamWorldForward * 70.f, 12.f, FColor::Cyan, false, 0.f, 0, 2.f);
 	for (int32 Index = 0; Index < LatestBeamSamples.Num(); ++Index)
 	{
-
 		const FLidarRaySample& Sample = LatestBeamSamples[Index];
-		const FVector Start = LatestBeamWorldStart;
-		const FVector End = LatestBeamWorldEnds.IsValidIndex(Index) ? LatestBeamWorldEnds[Index] : Start + Sample.LocalDirection * MaximumRangeCm;
-		const FColor Colour = Sample.ReturnKind == ELidarReturnKind::ExternalHit ? FColor::Green : (Sample.ReturnKind == ELidarReturnKind::SelfOccluded ? FColor::Orange : (Sample.ReturnKind == ELidarReturnKind::Dropped ? FColor::Magenta : FColor(80, 80, 80)));
-		DrawDebugLine(World, Start, End, Colour, false, 0.f, 0, 0.75f);
-		if (Sample.ReturnKind != ELidarReturnKind::NoReturn) DrawDebugPoint(World, End, 4.f, Colour, false, 0.f);
-
+		const FVector End = LatestBeamWorldEnds.IsValidIndex(Index) ? LatestBeamWorldEnds[Index] : LatestBeamWorldStart;
+		const FColor Colour = Sample.ReturnKind == ELidarReturnKind::ExternalHit ? FColor::Green : (Sample.ReturnKind == ELidarReturnKind::SelfOccluded ? FColor::Orange : FColor(80, 80, 80));
+		DrawDebugLine(World, LatestBeamWorldStart, End, Colour, false, 0.f, 0, 1.f);
+		if (Sample.ReturnKind != ELidarReturnKind::NoReturn) DrawDebugPoint(World, End, 5.f, Colour, false, 0.f);
 	}
 }
