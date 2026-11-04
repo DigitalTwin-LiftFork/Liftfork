@@ -22,9 +22,7 @@ class APallet;
 UENUM()
 enum class EAutoPickupState : uint8 { Idle, Detecting, Approaching, Aligning, Inserting, Lifting, Complete, Stopped, Failed };
 
-class UForkliftLocalOccupancyGridComponent;
 class UForkliftSlamComponent;
-class UForkliftGlobalPathPlannerComponent;
 
 
 /** Pixel-space result from the existing pallet sensor render target. */
@@ -190,9 +188,7 @@ public:
 	UPROPERTY(VisibleAnywhere, Category="LiDAR") TObjectPtr<UBoxComponent> LidarBodyOccluder;
 	UPROPERTY(VisibleAnywhere, Category="LiDAR") TObjectPtr<UBoxComponent> LidarMastOccluder;
 
-	UPROPERTY(VisibleAnywhere, Category="Perception") TObjectPtr<UForkliftLocalOccupancyGridComponent> LocalOccupancyGrid;
 	UPROPERTY(VisibleAnywhere, Category="SLAM") TObjectPtr<UForkliftSlamComponent> SlamComponent;
-	UPROPERTY(VisibleAnywhere, Category="Navigation") TObjectPtr<UForkliftGlobalPathPlannerComponent> GlobalPathPlanner;
 
 	UPROPERTY(VisibleAnywhere, Category="Chaos") TObjectPtr<UBoxComponent> LiftPhysicsBody;
 	UPROPERTY(VisibleAnywhere, Category="Chaos") TObjectPtr<UBoxComponent> ReachPhysicsBody;
