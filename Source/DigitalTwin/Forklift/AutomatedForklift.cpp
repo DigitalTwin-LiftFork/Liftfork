@@ -911,8 +911,10 @@ void AAutomatedForklift::UpdateSupportedLoadState()
 		const float ForkTopZ = FMath::Min(
 			LeftForkCollision->GetComponentLocation().Z + LeftForkCollision->GetScaledBoxExtent().Z,
 			RightForkCollision->GetComponentLocation().Z + RightForkCollision->GetScaledBoxExtent().Z);
+		const float SupportSurfaceZ = Pallet ? Pallet->GetForkSupportSurfaceWorldZ() : 0.f;
 		if (Pallet && Pallet->CanSupportFromForks(LeftForkCollision, RightForkCollision, MinimumPalletSupportInsertionCm, Reason)
-			&& ForkTopZ >= Pallet->GetForkSupportSurfaceWorldZ() - PalletSupportContactToleranceCm)
+			&& ForkTopZ >= SupportSurfaceZ - PalletSupportContactToleranceCm
+			&& ForkTopZ <= SupportSurfaceZ + PalletSupportContactToleranceCm + 5.f)
 		{
 			SupportedLoadKg += Pallet->GetConfiguredMassKg();
 			ActiveLoadFriction = FMath::Max(ActiveLoadFriction, Pallet->GetSurfaceFriction());

@@ -103,11 +103,16 @@ bool AWoodPallet::CanSupportFromForks(const UBoxComponent* LeftTine, const UBoxC
 				for (int32 ZSign : {-1, 1})
 					LocalBounds += PalletTransform.InverseTransformPosition(TineTransform.TransformPosition(FVector(Extent.X * XSign, Extent.Y * YSign, Extent.Z * ZSign)));
 
-		// Both complete tine sections must remain in their respective openings.
-		if (FMath::Abs(LocalBounds.GetCenter().Y - OpeningCenterY) + LocalBounds.GetExtent().Y > OpeningHalfWidth + ContactToleranceCm) return false;
+		// A tine may be partly outside the ideal channel and still carry the
+		// pallet. Require meaningful overlap with its opening instead of demanding
+		// that the complete collision box be perfectly centred inside it.
+		const float OpeningOverlap = FMath::Min(LocalBounds.Max.Y, OpeningCenterY + OpeningHalfWidth)
+			- FMath::Max(LocalBounds.Min.Y, OpeningCenterY - OpeningHalfWidth);
+		if (OpeningOverlap < FMath::Max(2.f, LocalBounds.GetExtent().Y * .4f)) return false;
 		if (LocalBounds.Min.Z < LowerRunnerTopZ - ContactToleranceCm) return false;
-		if (LocalBounds.Max.Z < UpperDeckSupportZ - ContactToleranceCm) return false;
-		return LocalBounds.Max.X >= RequiredTipX;
+		if (LocalBounds.Max.Z < UpperDeckSupportZ - ContactToleranceCm || LocalBounds.Max.Z > UpperDeckSupportZ + ContactToleranceCm + 5.f) return false;
+		const float OverlapX = FMath::Min(LocalBounds.Max.X, LengthCm() * .5f) - FMath::Max(LocalBounds.Min.X, -LengthCm() * .5f);
+		return LocalBounds.Max.X >= RequiredTipX && OverlapX >= FMath::Max(1.f, MinimumInsertionDepthCm);
 	};
 
 	return IsSupportedTine(LeftTine, -OpeningCenterSpacingCm() * .5f)

@@ -20,8 +20,8 @@ public:
  virtual void OnConstruction(const FTransform& Transform) override;
  UPROPERTY(EditAnywhere, Category="Pallet") bool bHasCargo = false;
 	/** C++-configured Chaos values.  Cargo mass is added only when bHasCargo is true. */
-	UPROPERTY(EditAnywhere, Category="Pallet|Physics", meta=(ClampMin="1.0")) float EmptyMassKg = 55.f;
-	UPROPERTY(EditAnywhere, Category="Pallet|Physics", meta=(ClampMin="1.0")) float CargoMassKg = 700.f;
+	UPROPERTY(EditAnywhere, Category="Pallet|Physics", meta=(ClampMin="1.0")) float EmptyMassKg = 25.f;
+	UPROPERTY(EditAnywhere, Category="Pallet|Physics", meta=(ClampMin="1.0")) float CargoMassKg = 150.f;
 	UPROPERTY(EditAnywhere, Category="Pallet|Physics", meta=(ClampMin="0.0", ClampMax="2.0")) float SurfaceFriction = .85f;
  UPROPERTY(VisibleAnywhere, Category="Pallet") TObjectPtr<UStaticMeshComponent> CargoVisual;
  UPROPERTY(VisibleAnywhere, Category="Pallet") TObjectPtr<UBoxComponent> CargoCollision;

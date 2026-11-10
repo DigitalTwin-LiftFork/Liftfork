@@ -85,21 +85,38 @@ bool APallet::CanSupportFromForks(const UBoxComponent* LeftTine, const UBoxCompo
 		OutReason = TEXT("fork collision components are missing");
 		return false;
 	}
-	if (!CanAcceptForkTines(LeftTine, RightTine))
-	{
-		OutReason = TEXT("both complete fork cross-sections are not inside the specified openings");
-		return false;
-	}
 	const FTransform PalletTransform = GetActorTransform();
-	const float RequiredTipX = -DepthCm * .5f + FMath::Max(0.f, MinimumInsertionDepthCm);
+	const float PalletMinX = -DepthCm * .5f;
+	const float PalletMaxX = DepthCm * .5f;
+	const float PalletMinY = -WidthCm * .5f;
+	const float PalletMaxY = WidthCm * .5f;
+	const float RequiredInsertion = FMath::Max(1.f, MinimumInsertionDepthCm);
+	TArray<FVector> TineCenters;
 	for (const UBoxComponent* Tine : {LeftTine, RightTine})
 	{
-		const FVector Tip = PalletTransform.InverseTransformPosition(Tine->GetComponentTransform().TransformPosition(FVector(Tine->GetScaledBoxExtent().X, 0.f, 0.f)));
-		if (Tip.X < RequiredTipX)
+		const FVector Extent = Tine->GetScaledBoxExtent();
+		const FTransform TineTransform = Tine->GetComponentTransform();
+		FBox LocalBounds(ForceInit);
+		for (int32 XSign : {-1, 1})
+			for (int32 YSign : {-1, 1})
+				for (int32 ZSign : {-1, 1})
+					LocalBounds += PalletTransform.InverseTransformPosition(TineTransform.TransformPosition(FVector(Extent.X * XSign, Extent.Y * YSign, Extent.Z * ZSign)));
+
+		const float OverlapX = FMath::Min(LocalBounds.Max.X, PalletMaxX) - FMath::Max(LocalBounds.Min.X, PalletMinX);
+		const float OverlapY = FMath::Min(LocalBounds.Max.Y, PalletMaxY) - FMath::Max(LocalBounds.Min.Y, PalletMinY);
+		if (OverlapX < RequiredInsertion || OverlapY < 2.f)
 		{
-			OutReason = FString::Printf(TEXT("fork insertion %.1fcm is below required %.1fcm"), Tip.X + DepthCm * .5f, MinimumInsertionDepthCm);
+			OutReason = FString::Printf(TEXT("fork overlap %.1f x %.1fcm is below support minimum %.1f x 2.0cm"), OverlapX, OverlapY, RequiredInsertion);
 			return false;
 		}
+		TineCenters.Add(LocalBounds.GetCenter());
+	}
+	// Keep both tines spread across the load. This allows a small lateral shift
+	// and forks extending past the rear edge while rejecting a one-sided contact.
+	if (FMath::Abs(TineCenters[0].Y - TineCenters[1].Y) < 30.f || FMath::Abs((TineCenters[0].Y + TineCenters[1].Y) * .5f) > WidthCm * .35f)
+	{
+		OutReason = TEXT("forks do not span the pallet support area");
+		return false;
 	}
 	return true;
 }
