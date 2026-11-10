@@ -13,6 +13,8 @@ class DIGITALTWIN_API AWoodPallet : public AActor
 {
 	GENERATED_BODY()
 public:
+	UPROPERTY(EditInstanceOnly, BlueprintReadOnly, Category="Pallet")
+	FName PalletId = NAME_None;
 	AWoodPallet();
 	virtual void BeginPlay() override;
 	void SetPlacementPreview(bool bPreview);

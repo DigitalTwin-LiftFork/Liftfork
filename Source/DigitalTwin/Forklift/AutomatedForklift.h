@@ -388,6 +388,19 @@ public:
 	static FBox2D NavigationButtonRect(float Height) { return FBox2D(FVector2D(24.f,Height-154.f),FVector2D(264.f,Height-112.f)); }
 	static FBox2D SlamMapRect(float Height) { const float Size=FMath::Min(300.f,Height*.40f); return FBox2D(FVector2D(20.f,100.f),FVector2D(20.f+Size,100.f+Size)); }
 	bool SetNavigationGoalFromMapScreen(FVector2D ScreenPosition, float ViewportHeight);
+	static FBox2D WorkStationButtonRect(float Height, int32 Index)
+	{
+		const float X = 274.f + 80.f * (Index % 3);
+		const float Y = Height - 200.f + 46.f * (Index / 3);
+		return FBox2D(FVector2D(X, Y), FVector2D(X + 76.f, Y + 42.f));
+	}
+	static constexpr int32 WorkStationCount = 6;
+	static FString WorkStationLabel(int32 Index) { return FString::Printf(TEXT("%c구역"), TCHAR('A' + Index)); }
+	void GoToStation(int32 Index);
+	bool HasPendingWorkStation() const { return PendingWorkStation != INDEX_NONE; }
+	int32 GetSelectedWorkStation() const { return HasPendingWorkStation() ? PendingWorkStation : ActiveWorkStation; }
+	bool IsWorkStationRegistered(int32 Index) const;
+	FVector2D GetWorkStationPosition(int32 Index) const { return WorkStations[Index].Position; }
 	void ToggleNavigation();
 	void StopNavigation();
 	const FString& GetNavigationStatus() const { return NavigationStatus; }
@@ -405,8 +418,23 @@ private:
 	FString NavigationRecoveryReason;
 	TMap<FIntPoint, double> NavigationAvoidUntil;
 		void UpdateNavigation(float Dt);
+	void UpdateWorkStationSign(int32 Index, const FVector& Position, const FRotator& Heading);
+	float NextWorkStationSearch = 0.f;
+	bool bRackRowsScanned = false;
+	FBox RackRows[WorkStationCount];
+	int32 PendingWorkStation = INDEX_NONE;
+	bool SetNavigationGoalInMap(FVector2D Goal, int32 StationIndex = INDEX_NONE);
+	struct FWorkStation
+	{
+		FVector2D Position = FVector2D::ZeroVector;
+		float Heading = 0.f;
+		int32 MapGeneration = -1;
+	};
+	FWorkStation WorkStations[WorkStationCount];
+	TWeakObjectPtr<class UTextRenderComponent> WorkStationSigns[WorkStationCount];
+	int32 ActiveWorkStation = INDEX_NONE;
 		bool PlanNavigationRoute(FVector2D Start);
-	bool SelectExplorationGoal(FVector2D Start);
+	bool SelectExplorationGoal(FVector2D Start, int32 StationIndex = INDEX_NONE);
 	TArray<FVector2D> ExplorationVisited;
 	TMap<FIntPoint,double> ExplorationBlockedUntil;
 	int32 ExplorationBlockedGoals = 0;

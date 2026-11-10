@@ -41,12 +41,22 @@ void AForkliftSensorHUD::DrawHUD()
 	const bool bRunning = Forklift->GetAutoPickupState() == EAutoPickupState::Detecting || Forklift->GetAutoPickupState() == EAutoPickupState::Approaching || Forklift->GetAutoPickupState() == EAutoPickupState::Aligning || Forklift->GetAutoPickupState() == EAutoPickupState::Inserting || Forklift->GetAutoPickupState() == EAutoPickupState::Lifting;
 
 	const float ButtonY = Canvas->SizeY - 72.f;
+	DrawText(TEXT("선반 구역 이동 · A~F"),
+		FLinearColor::White, 24.f, ButtonY - 31.f, nullptr, .72f);
 
 	const FBox2D NavButton=AAutomatedForklift::NavigationButtonRect(Canvas->SizeY);
-	const bool NavActive=Forklift->IsNavigationActive();
+	for (int32 Index = 0; Index < AAutomatedForklift::WorkStationCount; ++Index)
+	{
+		const bool bSelected = Forklift->GetSelectedWorkStation() == Index;
+		const FBox2D Rect = AAutomatedForklift::WorkStationButtonRect(Canvas->SizeY, Index);
+		DrawRect(bSelected ? FLinearColor(.1f, .48f, .29f, .95f) : FLinearColor(.09f, .28f, .38f, .95f), Rect.Min.X, Rect.Min.Y, Rect.GetSize().X, Rect.GetSize().Y);
+		DrawText(AAutomatedForklift::WorkStationLabel(Index),
+			FLinearColor::White, Rect.Min.X + 8.f, Rect.Min.Y + 13.f, nullptr, .8f);
+	}
+	const bool NavActive = Forklift->IsNavigationActive() || Forklift->HasPendingWorkStation();
 	DrawRect(NavActive ? FLinearColor(.65f,.12f,.08f,.95f) : FLinearColor(.05f,.3f,.55f,.95f),NavButton.Min.X,NavButton.Min.Y,NavButton.GetSize().X,NavButton.GetSize().Y);
 
-	DrawText(NavActive ? TEXT("자동 탐색 정지") : TEXT("자동 탐색 시작 (순찰)"), FLinearColor::White,NavButton.Min.X+16.f,NavButton.Min.Y+12.f,nullptr,1.f);
+	DrawText(NavActive ? TEXT("이동 정지 / 대기 취소") : TEXT("자동 탐색 시작 (순찰)"), FLinearColor::White,NavButton.Min.X+16.f,NavButton.Min.Y+12.f,nullptr,1.f);
 	DrawText(TEXT("지도 클릭: 선택한 위치로 바로 출발 / L: 라이다 / M: 지도"),FLinearColor::White,24.f,NavButton.Min.Y-20.f,nullptr,.72f);
 
 	DrawRect(bRunning ? FLinearColor(.65f, .18f, .12f, .92f) : FLinearColor(.08f, .32f, .12f, .92f), 24.f, ButtonY, 240.f, 48.f);
@@ -97,6 +107,16 @@ void AForkliftSensorHUD::DrawHUD()
 			const float X = Size*.5f+D.Y, Y = Size*.5f-D.X;
 			if (X>=0 && Y>=0 && X<Size-3 && Y<Size-3)
 				DrawRect(FLinearColor(.1f,.5f,1.f), MX+X, MY+Y, 3.f, 3.f);
+		}
+		for (int32 Index = 0; Index < AAutomatedForklift::WorkStationCount; ++Index)
+		{
+			if (!Forklift->IsWorkStationRegistered(Index)) continue;
+			const FVector2D D = (Forklift->GetWorkStationPosition(Index) - Pose) * Scale;
+			const float X = Size * .5f + D.Y, Y = Size * .5f - D.X;
+			if (X < 5.f || Y < 5.f || X > Size - 36.f || Y > Size - 15.f) continue;
+			const FLinearColor Color = Index == 0 ? FLinearColor(0.f, .85f, 1.f) : FLinearColor::Yellow;
+			DrawRect(Color, MX + X - 3.f, MY + Y - 3.f, 6.f, 6.f);
+			DrawText(AAutomatedForklift::WorkStationLabel(Index), Color, MX + X + 5.f, MY + Y - 7.f, nullptr, .7f);
 		}
 		if (Forklift->HasNavigationGoal())
 		{
