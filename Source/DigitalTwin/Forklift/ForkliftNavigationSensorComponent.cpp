@@ -1,6 +1,7 @@
 #include "Forklift/ForkliftNavigationSensorComponent.h"
 
 #include "DrawDebugHelpers.h"
+#include "Forklift/AutomatedForklift.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "Components/BoxComponent.h"
@@ -120,7 +121,8 @@ void UForkliftNavigationSensorComponent::PerformScan()
 			Sample.LocalPointCm = SweepStartTransform.InverseTransformPosition(Hit.ImpactPoint);
 			Sample.LocalNormal = SweepStartTransform.InverseTransformVectorNoScale(Hit.ImpactNormal).GetSafeNormal();
 			DebugEnd = Hit.ImpactPoint;
-			if (Hit.GetActor() == GetOwner())
+			const auto* Forklift = Cast<AAutomatedForklift>(GetOwner());
+			if (Hit.GetActor() == GetOwner() || (Forklift && Forklift->IsSupportedPallet(Hit.GetActor())))
 			{
 				Sample.ReturnKind = ELidarReturnKind::SelfOccluded;
 				Sample.bValid = false;

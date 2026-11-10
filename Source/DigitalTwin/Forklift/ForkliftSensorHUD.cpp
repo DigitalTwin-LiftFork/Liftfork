@@ -32,8 +32,8 @@ void AForkliftSensorHUD::DrawHUD()
 		TArray<FString> Lines;
 		Forklift->GetNavigationDiagnosticLines(Lines);
 		const float Width = FMath::Min(510.f, Canvas->SizeX * .43f);
-		const float X = Canvas->SizeX - Width - 18.f, Y = Canvas->SizeY - 180.f;
-		DrawRect(FLinearColor(.015f,.025f,.04f,.94f), X, Y, Width, 164.f);
+		const float X = Canvas->SizeX - Width - 18.f, Y = Canvas->SizeY - 200.f;
+		DrawRect(FLinearColor(.015f,.025f,.04f,.94f), X, Y, Width, 184.f);
 		DrawText(TEXT("주행 / 센서 / 복구 상태"), FLinearColor(0.f,.85f,1.f), X+10.f,Y+8.f,nullptr,.85f);
 		for (int32 I=0; I<Lines.Num(); ++I)
 			DrawText(Lines[I], I==Lines.Num()-1 ? FLinearColor::Yellow : FLinearColor::White, X+10.f,Y+32.f+I*20.f,nullptr,.65f);

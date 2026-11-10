@@ -760,6 +760,27 @@ bool AAutomatedForklift::IsForkAxisMotionBlockedByFixedObstacle(const FVector& W
 	return false;
 }
 
+bool AAutomatedForklift::IsSupportedPallet(const AActor* Actor) const
+{
+	if (!Actor) return false;
+	if (Actor == CarriedPallet.Get()) return true;
+	return SupportedLoadActors.ContainsByPredicate([Actor](const TWeakObjectPtr<AActor>& Pallet) { return Pallet.Get() == Actor; });
+}
+
+void AAutomatedForklift::GetSupportedPalletShapes(TArray<UBoxComponent*>& OutShapes) const
+{
+	const auto AddShapes = [&OutShapes](const AActor* Pallet)
+	{
+		if (!Pallet) return;
+		TInlineComponentArray<UBoxComponent*> Shapes;
+		Pallet->GetComponents(Shapes);
+		for (UBoxComponent* Shape : Shapes)
+			if (Shape->IsQueryCollisionEnabled()) OutShapes.AddUnique(Shape);
+	};
+	AddShapes(CarriedPallet.Get());
+	for (const auto& Pallet : SupportedLoadActors) AddShapes(Pallet.Get());
+}
+
 bool AAutomatedForklift::WouldForkRotationHitFixedObstacle(float DeltaYawDegrees) const
 {
 	if (FMath::IsNearlyZero(DeltaYawDegrees) || !GetWorld()) return false;
@@ -773,7 +794,11 @@ bool AAutomatedForklift::WouldForkRotationHitFixedObstacle(float DeltaYawDegrees
 	// Check the actual outer envelope for a steering step.  The support legs
 	// are deliberately included: the root box alone does not cover their full
 	// lateral sweep, and the fork tines can be raised or extended beyond it.
-	for (UBoxComponent* Tine : {LeftForkCollision.Get(), RightForkCollision.Get(), LeftSupportLegCollision.Get(), RightSupportLegCollision.Get(), LeftMastRailCollision.Get(), RightMastRailCollision.Get(), MastTopCrossbarCollision.Get()})
+	TArray<UBoxComponent*> RotationParts = {LeftForkCollision.Get(), RightForkCollision.Get(),
+		LeftSupportLegCollision.Get(), RightSupportLegCollision.Get(), LeftMastRailCollision.Get(),
+		RightMastRailCollision.Get(), MastTopCrossbarCollision.Get()};
+	GetSupportedPalletShapes(RotationParts);
+	for (UBoxComponent* Tine : RotationParts)
 	{
 		if (!Tine) continue;
 		const bool bCurrentOverlap = GetWorld()->OverlapAnyTestByObjectType(Tine->GetComponentLocation(), Tine->GetComponentQuat(), Objects, FCollisionShape::MakeBox(Tine->GetScaledBoxExtent()), Params);
@@ -930,6 +955,39 @@ void AAutomatedForklift::UpdateSupportedLoadState()
 	ActiveLoadCollisionStatus = TEXT("No supported load");
 	if (!GetWorld() || !LeftForkCollision || !RightForkCollision) { CurrentDriveSpeedMultiplier = 1.f; return; }
 
+	const FTransform ForkFrame = ForkCarriage->GetComponentTransform();
+	const auto LocalBounds = [&ForkFrame](const UBoxComponent* Shape)
+	{
+		return Shape->CalcBounds(Shape->GetComponentTransform().GetRelativeTransform(ForkFrame)).GetBox();
+	};
+	const FBox LeftBounds = LocalBounds(LeftForkCollision);
+	const FBox RightBounds = LocalBounds(RightForkCollision);
+	const double FloorZ = GetActorLocation().Z - BodyCollision->GetScaledBoxExtent().Z;
+	const auto IsRestingOnBothForks = [&](const AActor* Pallet)
+	{
+		if (LiftCm < 2.f) return false;
+		TInlineComponentArray<UBoxComponent*> Shapes;
+		Pallet->GetComponents(Shapes);
+		double PalletBottom = TNumericLimits<double>::Max();
+		bool bLeft = false, bRight = false;
+		const auto SupportsFork = [](const FBox& Surface, const FBox& Fork)
+		{
+			const double Depth = FMath::Min(Surface.Max.X, Fork.Max.X) - FMath::Max(Surface.Min.X, Fork.Min.X);
+			const double Width = FMath::Min(Surface.Max.Y, Fork.Max.Y) - FMath::Max(Surface.Min.Y, Fork.Min.Y);
+			const double Gap = Surface.Min.Z - Fork.Max.Z;
+			return Depth >= 8.0 && Width >= 2.0 && Gap >= -2.0 && Gap <= 3.0;
+		};
+		for (const UBoxComponent* Shape : Shapes)
+		{
+			if (!Shape->IsQueryCollisionEnabled()) continue;
+			PalletBottom = FMath::Min(PalletBottom, Shape->Bounds.GetBox().Min.Z);
+			const FBox Surface = LocalBounds(Shape);
+			bLeft |= SupportsFork(Surface, LeftBounds);
+			bRight |= SupportsFork(Surface, RightBounds);
+		}
+		return bLeft && bRight && PalletBottom > FloorZ + 2.0;
+	};
+
 	// APallet has exact opening/insertion validation.  This keeps a nearby pallet
 	// from being counted until both physical tines actually support it.
 	for (TActorIterator<APallet> It(GetWorld()); It; ++It)
@@ -940,9 +998,9 @@ void AAutomatedForklift::UpdateSupportedLoadState()
 			LeftForkCollision->GetComponentLocation().Z + LeftForkCollision->GetScaledBoxExtent().Z,
 			RightForkCollision->GetComponentLocation().Z + RightForkCollision->GetScaledBoxExtent().Z);
 		const float SupportSurfaceZ = Pallet ? Pallet->GetForkSupportSurfaceWorldZ() : 0.f;
-		if (Pallet && Pallet->CanSupportFromForks(LeftForkCollision, RightForkCollision, MinimumPalletSupportInsertionCm, Reason)
+		if (Pallet && ((Pallet->CanSupportFromForks(LeftForkCollision, RightForkCollision, MinimumPalletSupportInsertionCm, Reason)
 			&& ForkTopZ >= SupportSurfaceZ - PalletSupportContactToleranceCm
-			&& ForkTopZ <= SupportSurfaceZ + PalletSupportContactToleranceCm + 5.f)
+			&& ForkTopZ <= SupportSurfaceZ + PalletSupportContactToleranceCm + 5.f) || IsRestingOnBothForks(Pallet)))
 		{
 			SupportedLoadKg += Pallet->GetConfiguredMassKg();
 			SupportedLoadActors.AddUnique(Pallet);
@@ -956,7 +1014,7 @@ void AAutomatedForklift::UpdateSupportedLoadState()
 	for (TActorIterator<AWoodPallet> It(GetWorld()); It; ++It)
 	{
 		AWoodPallet* Pallet = *It;
-		if (Pallet && Pallet->CanSupportFromForks(LeftForkCollision, RightForkCollision, MinimumPalletSupportInsertionCm, PalletSupportContactToleranceCm))
+		if (Pallet && !Pallet->IsPlacementPreview() && (Pallet->CanSupportFromForks(LeftForkCollision, RightForkCollision, MinimumPalletSupportInsertionCm, PalletSupportContactToleranceCm) || IsRestingOnBothForks(Pallet)))
 		{
 			SupportedLoadKg += Pallet->GetConfiguredMassKg();
 			SupportedLoadActors.AddUnique(Pallet);
@@ -2243,8 +2301,8 @@ void AAutomatedForklift::Tick(float Dt)
 	}
 	ProcessOpeningVision();
 	UpdateAutoPickup(Dt);
-	if (!IsAutoPickupMotionActive()) UpdateNavigation(Dt);
 	UpdateSupportedLoadState();
+	if (!IsAutoPickupMotionActive()) UpdateNavigation(Dt);
 
 	const bool bAutoMotion = IsAutoPickupMotionActive();
 	// The restored controller still writes the original command fields.  Prefer

@@ -397,6 +397,7 @@ public:
 	static constexpr int32 WorkStationCount = 6;
 	static FString WorkStationLabel(int32 Index) { return FString::Printf(TEXT("%c구역"), TCHAR('A' + Index)); }
 	void GoToStation(int32 Index);
+	bool IsSupportedPallet(const AActor* Actor) const;
 	bool HasPendingWorkStation() const { return PendingWorkStation != INDEX_NONE; }
 	int32 GetSelectedWorkStation() const { return HasPendingWorkStation() ? PendingWorkStation : ActiveWorkStation; }
 	bool IsWorkStationRegistered(int32 Index) const;
@@ -427,6 +428,7 @@ private:
 	struct FWorkStation
 	{
 		FVector2D Position = FVector2D::ZeroVector;
+		FVector WorldPosition = FVector::ZeroVector;
 		float Heading = 0.f;
 		int32 MapGeneration = -1;
 	};
@@ -434,7 +436,15 @@ private:
 	TWeakObjectPtr<class UTextRenderComponent> WorkStationSigns[WorkStationCount];
 	int32 ActiveWorkStation = INDEX_NONE;
 		bool PlanNavigationRoute(FVector2D Start);
-	bool SelectExplorationGoal(FVector2D Start, int32 StationIndex = INDEX_NONE);
+	bool SelectExplorationGoal(FVector2D Start);
+	bool HasFactoryRackRows() const;
+	float GetNavigationHeading(const UForkliftSlamComponent& Slam) const;
+	bool bUsingFactoryOdometry = false;
+	int32 FactoryPoseGeneration = INDEX_NONE;
+	float FactoryMapToWorldYaw = 0.f;
+	FVector2D FactoryMapOriginInWorld = FVector2D::ZeroVector;
+	void ResolveWorkStations(const class UForkliftSlamComponent& Slam, const FVector2D& Start);
+	bool IsFactoryAisleClear(const FVector& Position, float Radius) const;
 	TArray<FVector2D> ExplorationVisited;
 	TMap<FIntPoint,double> ExplorationBlockedUntil;
 	int32 ExplorationBlockedGoals = 0;
@@ -602,6 +612,8 @@ private:
 	void ConfigureKinematicForkMechanism();
 	void ApplyKinematicForkControls(float DeltaSeconds);
 	void UpdateSupportedLoadState();
+	void GetSupportedPalletShapes(TArray<UBoxComponent*>& OutShapes) const;
+	float GetNavigationHalfWidth() const;
 	void SetConstraintFramesAtPose(UPhysicsConstraintComponent* Constraint, UPrimitiveComponent* Body1, UPrimitiveComponent* Body2, const FTransform& JointWorld, const FVector& Frame2Offset);
 	FVector GetConstraintFrameDelta(const UPhysicsConstraintComponent* Constraint, const UPrimitiveComponent* Body1, const UPrimitiveComponent* Body2) const;
 	float GetForkTopHeightAboveGroundCm() const;
