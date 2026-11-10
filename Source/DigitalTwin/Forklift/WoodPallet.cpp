@@ -1,6 +1,7 @@
 #include "Forklift/WoodPallet.h"
 #include "Components/BoxComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "PhysicalMaterials/PhysicalMaterial.h"
 #include "UObject/ConstructorHelpers.h"
 
 AWoodPallet::AWoodPallet()
@@ -9,6 +10,7 @@ AWoodPallet::AWoodPallet()
 	SetRootComponent(PhysicsRoot);
 	PhysicsRoot->SetBoxExtent(FVector(2.f)); // Host body; the following simple shapes preserve the two openings.
 	PhysicsRoot->SetCollisionProfileName(TEXT("PhysicsActor"));
+	PhysicsRoot->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
 	PhysicsRoot->SetSimulatePhysics(true); PhysicsRoot->SetEnableGravity(true); PhysicsRoot->SetNotifyRigidBodyCollision(true);
 	PhysicsRoot->OnComponentHit.AddDynamic(this, &AWoodPallet::HandleHit);
 	CollisionShapes.Add(PhysicsRoot);
@@ -45,14 +47,29 @@ UBoxComponent* AWoodPallet::AddCollisionBox(const TCHAR* Name, const FVector& Lo
 {
 	UBoxComponent* Part = CreateDefaultSubobject<UBoxComponent>(Name); Part->SetupAttachment(PhysicsRoot); Part->SetRelativeLocation(Location); Part->SetBoxExtent(HalfExtent);
 	Part->SetCollisionProfileName(TEXT("PhysicsActor"));
+	Part->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
 	Part->SetCollisionResponseToChannel(ECC_WorldDynamic, ECR_Block);
+	Part->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
 	Part->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	Part->SetNotifyRigidBodyCollision(true);
 	Part->OnComponentHit.AddDynamic(this, &AWoodPallet::HandleHit);
 	CollisionShapes.Add(Part);
 	return Part;
 }
-void AWoodPallet::BeginPlay() { Super::BeginPlay(); FinalizePlacement(); }
+void AWoodPallet::BeginPlay()
+{
+	Super::BeginPlay();
+	RuntimePhysicalMaterial = NewObject<UPhysicalMaterial>(this, TEXT("WoodPalletChaosMaterial"));
+	RuntimePhysicalMaterial->Friction = SurfaceFriction;
+	RuntimePhysicalMaterial->Restitution = .02f;
+	RuntimePhysicalMaterial->bOverrideFrictionCombineMode = true;
+	RuntimePhysicalMaterial->FrictionCombineMode = EFrictionCombineMode::Multiply;
+	for (UBoxComponent* Shape : CollisionShapes) Shape->SetPhysMaterialOverride(RuntimePhysicalMaterial);
+	PhysicsRoot->SetMassOverrideInKg(NAME_None, MassKg, true);
+	PhysicsRoot->SetLinearDamping(1.5f);
+	PhysicsRoot->SetAngularDamping(4.f);
+	FinalizePlacement();
+}
 void AWoodPallet::SetPlacementPreview(bool bPreview)
 {
 	bPlacementPreview = bPreview; PhysicsRoot->SetSimulatePhysics(false); PhysicsRoot->SetEnableGravity(false);
@@ -67,3 +84,4 @@ void AWoodPallet::FinalizePlacement()
 }
 void AWoodPallet::HandleHit(UPrimitiveComponent*, AActor*, UPrimitiveComponent* Other, FVector, const FHitResult& Hit) { LastHit = Hit; LastHitTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f; LastHitOther = Other; }
 bool AWoodPallet::GetRecentForkContact(float MaxAge, UPrimitiveComponent*& OutOther) const { OutOther = nullptr; if (!GetWorld() || GetWorld()->GetTimeSeconds() - LastHitTime > MaxAge) return false; OutOther = LastHitOther.Get(); return OutOther != nullptr; }
+FString AWoodPallet::GetRecentCollisionStatus() const { return !GetWorld() || GetWorld()->GetTimeSeconds() - LastHitTime > .5f ? TEXT("None") : GetNameSafe(LastHitOther.Get()); }

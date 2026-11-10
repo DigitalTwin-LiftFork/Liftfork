@@ -19,6 +19,10 @@ public:
 	virtual void BeginPlay() override;
  virtual void OnConstruction(const FTransform& Transform) override;
  UPROPERTY(EditAnywhere, Category="Pallet") bool bHasCargo = false;
+	/** C++-configured Chaos values.  Cargo mass is added only when bHasCargo is true. */
+	UPROPERTY(EditAnywhere, Category="Pallet|Physics", meta=(ClampMin="1.0")) float EmptyMassKg = 55.f;
+	UPROPERTY(EditAnywhere, Category="Pallet|Physics", meta=(ClampMin="1.0")) float CargoMassKg = 700.f;
+	UPROPERTY(EditAnywhere, Category="Pallet|Physics", meta=(ClampMin="0.0", ClampMax="2.0")) float SurfaceFriction = .85f;
  UPROPERTY(VisibleAnywhere, Category="Pallet") TObjectPtr<UStaticMeshComponent> CargoVisual;
  UPROPERTY(VisibleAnywhere, Category="Pallet") TObjectPtr<UBoxComponent> CargoCollision;
 	/** Disable pallet collision while fork-carried; restore gravity and collision when set down. */
@@ -33,6 +37,9 @@ public:
 	const TArray<TObjectPtr<UBoxComponent>>& GetCollisionShapes() const { return CollisionShapes; }
 	/** Chaos contact is used only for diagnostics when this uncarried pallet simulates. */
 	bool GetRecentPhysicsContact(float MaxAgeSeconds, FHitResult& OutHit, UPrimitiveComponent*& OutOther) const;
+	float GetConfiguredMassKg() const { return EmptyMassKg + (bHasCargo ? CargoMassKg : 0.f); }
+	float GetSurfaceFriction() const { return SurfaceFriction; }
+	FString GetRecentCollisionStatus() const;
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Pallet") TObjectPtr<UBoxComponent> CollisionBody;
 private:
 	// Verified pallet specification, expressed in Unreal centimetres.
@@ -50,4 +57,5 @@ private:
 	FHitResult LastPhysicsHit;
 	float LastPhysicsHitTime = -BIG_NUMBER;
 	TWeakObjectPtr<UPrimitiveComponent> LastPhysicsOther;
+	UPROPERTY(Transient) TObjectPtr<class UPhysicalMaterial> RuntimePhysicalMaterial;
 };

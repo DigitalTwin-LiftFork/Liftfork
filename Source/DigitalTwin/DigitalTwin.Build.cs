@@ -12,6 +12,7 @@ public class DigitalTwin : ModuleRules
 			"Core",
 			"CoreUObject",
 			"Engine",
+			"PhysicsCore",
 			"InputCore",
 			"EnhancedInput",
 			"AIModule",

@@ -1,4 +1,5 @@
 #include "Forklift/ForkliftSensorHUD.h"
+
 #include "Forklift/AutomatedForklift.h"
 #include "Forklift/ForkliftSlamComponent.h"
 #include "Forklift/ForkliftNavigationSensorComponent.h"
@@ -14,18 +15,39 @@ void AForkliftSensorHUD::DrawHUD()
 	AAutomatedForklift* Forklift = Cast<AAutomatedForklift>(PlayerOwner->GetPawn());
 	if (!Forklift) return;
 
+	// C++-only Chaos/load telemetry.  This panel deliberately does not depend
+	// on a Widget Blueprint, so it remains available after map or UI merges.
+	const float PhysicsPanelWidth = 310.f;
+	const float PhysicsPanelX = Canvas->SizeX - PhysicsPanelWidth - 18.f;
+	const float PhysicsPanelY = 18.f;
+	DrawRect(FLinearColor(.015f, .025f, .04f, .92f), PhysicsPanelX, PhysicsPanelY, PhysicsPanelWidth, 128.f);
+	DrawText(TEXT("하중 / Chaos 물리 상태"), FLinearColor(0.f, .85f, 1.f), PhysicsPanelX + 10.f, PhysicsPanelY + 8.f, nullptr, .82f);
+	DrawText(FString::Printf(TEXT("지지 하중: %.0f kg  |  속도: %.0f%%"), Forklift->GetSupportedLoadKg(), Forklift->GetCurrentDriveSpeedMultiplier() * 100.f), FLinearColor::White, PhysicsPanelX + 10.f, PhysicsPanelY + 34.f, nullptr, .66f);
+	DrawText(FString::Printf(TEXT("표면 마찰: %.2f  |  충돌: %s"), Forklift->GetActiveLoadFriction(), *Forklift->GetActiveLoadCollisionStatus()), FLinearColor::White, PhysicsPanelX + 10.f, PhysicsPanelY + 54.f, nullptr, .60f);
+	DrawText(TEXT("질량/마찰/감쇠: C++ Chaos 적용"), FLinearColor(.65f, .9f, .7f), PhysicsPanelX + 10.f, PhysicsPanelY + 78.f, nullptr, .60f);
+	DrawText(TEXT("포크가 실제 지지할 때만 하중 반영"), FLinearColor(.75f, .8f, .9f), PhysicsPanelX + 10.f, PhysicsPanelY + 98.f, nullptr, .56f);
+
+	const auto DrawNavigationPanel = [this, Forklift]()
+	{
+		TArray<FString> Lines;
+		Forklift->GetNavigationDiagnosticLines(Lines);
+		const float Width = FMath::Min(510.f, Canvas->SizeX * .43f);
+		const float X = Canvas->SizeX - Width - 18.f, Y = Canvas->SizeY - 180.f;
+		DrawRect(FLinearColor(.015f,.025f,.04f,.94f), X, Y, Width, 164.f);
+		DrawText(TEXT("주행 / 센서 / 복구 상태"), FLinearColor(0.f,.85f,1.f), X+10.f,Y+8.f,nullptr,.85f);
+		for (int32 I=0; I<Lines.Num(); ++I)
+			DrawText(Lines[I], I==Lines.Num()-1 ? FLinearColor::Yellow : FLinearColor::White, X+10.f,Y+32.f+I*20.f,nullptr,.65f);
+	};
 	const bool bRunning = Forklift->GetAutoPickupState() == EAutoPickupState::Detecting || Forklift->GetAutoPickupState() == EAutoPickupState::Approaching || Forklift->GetAutoPickupState() == EAutoPickupState::Aligning || Forklift->GetAutoPickupState() == EAutoPickupState::Inserting || Forklift->GetAutoPickupState() == EAutoPickupState::Lifting;
+
 	const float ButtonY = Canvas->SizeY - 72.f;
 
-		DrawText(Forklift->GetNavigationStatus(), FLinearColor::Yellow, 20.f, 40.f, nullptr, .9f);
-	const bool bRunning = Forklift->GetAutoPickupState() == EAutoPickupState::Detecting || Forklift->GetAutoPickupState() == EAutoPickupState::Aligning || Forklift->GetAutoPickupState() == EAutoPickupState::Inserting || Forklift->GetAutoPickupState() == EAutoPickupState::Lifting;
-	const float ButtonY = Canvas->SizeY - 72.f;
 	const FBox2D NavButton=AAutomatedForklift::NavigationButtonRect(Canvas->SizeY);
 	const bool NavActive=Forklift->IsNavigationActive();
 	DrawRect(NavActive ? FLinearColor(.65f,.12f,.08f,.95f) : FLinearColor(.05f,.3f,.55f,.95f),NavButton.Min.X,NavButton.Min.Y,NavButton.GetSize().X,NavButton.GetSize().Y);
 
-	DrawText(NavActive ? TEXT("주행 정지") : TEXT("랜덤 순찰 시작"), FLinearColor::White,NavButton.Min.X+16.f,NavButton.Min.Y+12.f,nullptr,1.f);
-	DrawText(TEXT("지도 클릭: 지정 위치 주행 / 시작 버튼: 랜덤 순찰"),FLinearColor::White,24.f,NavButton.Min.Y-20.f,nullptr,.72f);
+	DrawText(NavActive ? TEXT("자동 탐색 정지") : TEXT("자동 탐색 시작 (순찰)"), FLinearColor::White,NavButton.Min.X+16.f,NavButton.Min.Y+12.f,nullptr,1.f);
+	DrawText(TEXT("지도 클릭: 선택한 위치로 바로 출발 / L: 라이다 / M: 지도"),FLinearColor::White,24.f,NavButton.Min.Y-20.f,nullptr,.72f);
 
 	DrawRect(bRunning ? FLinearColor(.65f, .18f, .12f, .92f) : FLinearColor(.08f, .32f, .12f, .92f), 24.f, ButtonY, 240.f, 48.f);
 	DrawText(bRunning ? TEXT("작업 중지") : TEXT("파레트 자동 집기"), FLinearColor::White, 40.f, ButtonY + 13.f, nullptr, 1.f);
@@ -46,18 +68,15 @@ void AForkliftSensorHUD::DrawHUD()
 		for(int32 I=FMath::Max(HeadCount,Diagnostics.Num()-6);I<Diagnostics.Num();++I) Basic.Add(Diagnostics[I]);
 		Diagnostics=MoveTemp(Basic);
 	}
-	const float PanelWidth = 430.f, LineHeight = 20.f, PanelHeight = 30.f + Diagnostics.Num() * LineHeight;
-	const float PanelX = Canvas->SizeX - PanelWidth - 18.f, PanelY = Canvas->SizeY - PanelHeight - 18.f;
-	DrawRect(FLinearColor(.02f, .02f, .02f, .82f), PanelX, PanelY, PanelWidth, PanelHeight);
-	DrawText(TEXT("자동 집기 상태"), FLinearColor(0.f, .85f, .85f, 1.f), PanelX + 10.f, PanelY + 7.f, nullptr, .85f);
-	for (int32 Index = 0; Index < Diagnostics.Num(); ++Index) DrawText(Diagnostics[Index], FLinearColor::White, PanelX + 10.f, PanelY + 28.f + Index * LineHeight, nullptr, .68f);
-
+	
 	const float PanelWidth = 430.f, LineHeight = 20.f, PanelHeight = 30.f + Diagnostics.Num() * LineHeight;
 	const float PanelX = Canvas->SizeX - PanelWidth - 18.f, PanelY = FMath::Max(90.f, Canvas->SizeY - PanelHeight - 190.f);
 	DrawRect(FLinearColor(.02f, .02f, .02f, .82f), PanelX, PanelY, PanelWidth, PanelHeight);
 	DrawText(TEXT("자동 집기 상태"), FLinearColor(0.f, .85f, .85f, 1.f), PanelX + 10.f, PanelY + 7.f, nullptr, .85f);
 	for (int32 Index = 0; Index < Diagnostics.Num(); ++Index) DrawText(Diagnostics[Index], FLinearColor::White, PanelX + 10.f, PanelY + 28.f + Index * LineHeight, nullptr, .68f);
-		if (const UForkliftSlamComponent* Slam = Forklift->FindComponentByClass<UForkliftSlamComponent>(); Slam && Slam->bShowMap)
+		// The map owns the left preview area only while RGB-D preview is hidden.
+		// This prevents the SLAM map from covering the live depth/RGB pair.
+		if (const UForkliftSlamComponent* Slam = Forklift->FindComponentByClass<UForkliftSlamComponent>(); Slam && Slam->bShowMap && Forklift->GetPalletSensorDisplayMode() == 0)
 	{
 		const float MX = 20.f, MY = 100.f, Size = FMath::Min(300.f, Canvas->SizeY * .40f);
 		const float Scale = Size / 3000.f;
@@ -88,7 +107,7 @@ void AForkliftSensorHUD::DrawHUD()
 		}
 		const float CX = MX + Size * .5f, CY = MY + Size * .5f;
 		DrawRect(FLinearColor::Yellow, CX - 3.f, CY - 3.f, 6.f, 6.f);
-		DrawLine(CX, CY, CX + FMath::Sin(Slam->GetYaw()) * 18.f, CY - FMath::Cos(Slam->GetYaw()) * 18.f, FLinearColor::Yellow, 2.f);
+		DrawLine(CX, CY, CX + FMath::Sin(Slam->GetPredictedYaw()) * 18.f, CY - FMath::Cos(Slam->GetPredictedYaw()) * 18.f, FLinearColor::Yellow, 2.f);
 		DrawText(TEXT("LiDAR / SLAM | 클릭해 탐색된 목표 선택"), FLinearColor::White, MX, MY - 20.f, nullptr, .8f);
 		DrawText(Slam->GetStatus(), FLinearColor::Yellow, MX, MY + Size + 4.f, nullptr, .75f);
 		DrawText(FString::Printf(TEXT("x %.2f m  y %.2f m | match %.0f%%"), Pose.X / 100., Pose.Y / 100., Slam->GetConfidence() * 100.f), FLinearColor::White, MX, MY + Size + 22.f, nullptr, .75f);
@@ -114,7 +133,7 @@ void AForkliftSensorHUD::DrawHUD()
 
 	UTextureRenderTarget2D* SensorImage = Forklift->GetPalletSensorRenderTarget();
 	const int32 Mode = Forklift->GetPalletSensorDisplayMode();
-	if (!SensorImage || Mode == 0) return;
+	if (!SensorImage || Mode == 0) { DrawNavigationPanel(); return; }
 
 	const float Aspect = static_cast<float>(SensorImage->SizeX) / FMath::Max(1, SensorImage->SizeY);
 
@@ -127,54 +146,44 @@ void AForkliftSensorHUD::DrawHUD()
 	const float Y = DepthY + Height + 16.f;
 	const int32 DebugView = Forklift->GetVisionDebugViewMode();
 	const int32 DepthView = Forklift->GetDepthDebugViewMode();
-	const bool bDepthView = false; // U configures the left depth presentation; right remains RGB.
 	// V always presents the synchronized raw depth beside RGB.  This visualization
 	// uses a fixed sensor range, not per-frame normalization, and never feeds the
 	// displayed colours back into RGB-D measurement.
-	const int32 DW=SensorImage->SizeX,DH=SensorImage->SizeY; const TArray<float>& Depth=Forklift->GetLatestDepthCm(); const float MinD=Forklift->GetDepthMinimumCm(),MaxD=Forklift->GetDepthMaximumCm();
+	const int32 DW=SensorImage->SizeX,DH=SensorImage->SizeY; const TArray<float>& Depth=Forklift->GetLatestDepthCm(); float MinD=0.f,MaxD=0.f; Forklift->GetDepthDisplayRange(MinD,MaxD);
 	DrawRect(FLinearColor(.12f,0.f,.18f,1.f),DepthX,DepthY,Width,Height);
 	if (Forklift->IsDepthFrameValid()) for (int32 PY=0;PY<DH;PY+=4) for (int32 PX=0;PX<DW;PX+=4) if (Depth.IsValidIndex(PY*DW+PX))
 	{
-		const float D=Depth[PY*DW+PX]; const bool bFinite=FMath::IsFinite(D)&&D>0.f; const bool bInRange=bFinite&&D>=MinD&&D<=MaxD; const float N=bInRange?FMath::Clamp((D-MinD)/FMath::Max(1.f,MaxD-MinD),0.f,1.f):0.f;
-		// Purple means a sensor-invalid value only. Cyan is nearer than display
-		// range; orange is farther than range.  They never enter auto control.
-		const FLinearColor C=!bFinite?FLinearColor(.55f,0.f,.8f,1.f):(D<MinD?FLinearColor(0.f,.75f,1.f,1.f):(D>MaxD?FLinearColor(1.f,.28f,.05f,1.f):(DepthView==2?FLinearColor(1.f-N,N,.15f,1.f):FLinearColor(N,N,N,1.f))));
+		const float D=Depth[PY*DW+PX]; const bool bSensorValid=FMath::IsFinite(D)&&D>=Forklift->GetDepthSensorMinimumCm()&&D<=Forklift->GetDepthSensorMaximumCm(); const bool bInRange=bSensorValid&&D>=MinD&&D<=MaxD; const float N=bInRange?FMath::Clamp((D-MinD)/FMath::Max(1.f,MaxD-MinD),0.f,1.f):0.f;
+		// Purple is invalid transport data. Cyan/orange are valid raw values
+		// outside the selected display range, never silently converted to zero.
+		const bool bColour = (DepthView & 1) != 0;
+		const FLinearColor C=!bSensorValid?FLinearColor(.55f,0.f,.8f,1.f):(D<MinD?FLinearColor(0.f,.75f,1.f,1.f):(D>MaxD?FLinearColor(1.f,.28f,.05f,1.f):(bColour?FLinearColor(1.f-N,N,.15f,1.f):FLinearColor(N,N,N,1.f))));
 		DrawRect(C,DepthX+Width*PX/DW,DepthY+Height*PY/DH,Width*4.f/DW+1.f,Height*4.f/DH+1.f);
 	}
 	DrawRect(FLinearColor::White,DepthX,DepthY,Width,1.f); DrawRect(FLinearColor::White,DepthX,DepthY+Height-1.f,Width,1.f); DrawRect(FLinearColor::White,DepthX,DepthY,1.f,Height); DrawRect(FLinearColor::White,DepthX+Width-1.f,DepthY,1.f,Height);
 	const float DepthAge=Forklift->GetWorld()?FMath::Max(0.f,Forklift->GetWorld()->GetTimeSeconds()-Forklift->GetDepthFrameTimestampSeconds()):-1.f;
-	DrawText(FString::Printf(TEXT("SceneDepth %d/%d %s age %.2fs | %.0f..%.0fcm | purple=invalid cyan=near orange=far"),Forklift->GetDepthFrameId(),Forklift->GetSensorFrameId(),Forklift->IsDepthFrameValid()?TEXT("synced"):TEXT("invalid"),DepthAge,MinD,MaxD),FLinearColor::White,DepthX+8.f,DepthY+8.f,nullptr,.52f);
-	const bool bMaskView = DebugView != 0 && Forklift->GetVisionMaskWidth() > 0;
-	if (!bMaskView || bDepthView) DrawTexture(SensorImage, X, Y, Width, Height, 0.f, 0.f, 1.f, 1.f, FLinearColor::White, BLEND_Opaque);
+	const float CentreDepth = Depth.IsValidIndex((DH / 2) * DW + DW / 2) ? Depth[(DH / 2) * DW + DW / 2] : -1.f;
+	DrawText(FString::Printf(TEXT("Depth %d/%d %s age %.2fs | display %.0f..%.0f cm | U close/wide + grey/colour"),Forklift->GetDepthFrameId(),Forklift->GetSensorFrameId(),Forklift->IsDepthFrameValid()?TEXT("synced"):TEXT("invalid"),DepthAge,MinD,MaxD),FLinearColor::White,DepthX+8.f,DepthY+8.f,nullptr,.52f);
+	DrawText(FString::Printf(TEXT("centre Z: %s | purple=invalid cyan=below-display orange=above-display"), CentreDepth > 0.f ? *FString::Printf(TEXT("%.1f cm"), CentreDepth) : TEXT("unmeasured")),FLinearColor::White,DepthX+8.f,DepthY+23.f,nullptr,.50f);
+	for (int32 Tick=0; Tick<=4; ++Tick) { const float TX=DepthX+Width*Tick/4.f; DrawLine(TX,DepthY+Height-8.f,TX,DepthY+Height,FLinearColor::White,.5f); DrawText(FString::Printf(TEXT("%.0f"),FMath::Lerp(MinD,MaxD,Tick/4.f)),FLinearColor::White,TX-10.f,DepthY+Height-20.f,nullptr,.38f); }
+	const bool bCpuView = DebugView == 5;
+	const bool bMaskView = !bCpuView && DebugView != 0 && Forklift->GetVisionMaskWidth() > 0;
+	if (!bMaskView && !bCpuView) DrawTexture(SensorImage, X, Y, Width, Height, 0.f, 0.f, 1.f, 1.f, FLinearColor::White, BLEND_Opaque);
+	else if (bCpuView)
+	{
+		DrawRect(FLinearColor::Black, X, Y, Width, Height);
+		const TArray<FColor>& Cpu = Forklift->GetLatestRgbCpuPixels();
+		for (int32 PY=0; PY<DH; PY+=8) for (int32 PX=0; PX<DW; PX+=8) if (Cpu.IsValidIndex(PY*DW+PX))
+			DrawRect(FLinearColor::FromSRGBColor(Cpu[PY*DW+PX]), X+Width*PX/DW, Y+Height*PY/DH, Width*8.f/DW+1.f, Height*8.f/DH+1.f);
+	}
 	else
 	{
 		DrawRect(FLinearColor::Black, X, Y, Width, Height);
 		const TArray<uint8>& Mask = DebugView == 1 ? Forklift->GetVisionRegionMask() : (DebugView == 2 ? Forklift->GetVisionRgbBodyMask() : (DebugView == 3 ? Forklift->GetVisionBodyMask() : Forklift->GetVisionMask())); const int32 MW = Forklift->GetVisionMaskWidth(), MH = Forklift->GetVisionMaskHeight();
 
-	const float Width = Mode == 1 ? Canvas->SizeX * .30f : Canvas->SizeX * .88f;
-	const float Height = Width / Aspect;
-	const float X = Mode == 1 ? Canvas->SizeX - Width - 24.f : (Canvas->SizeX - Width) * .5f;
-	const float Y = Mode == 1 ? 24.f : (Canvas->SizeY - Height) * .5f;
-	const bool bMaskView = Forklift->GetVisionDebugViewMode() == 1 && Forklift->GetVisionMaskWidth() > 0;
-	if (!bMaskView) DrawTexture(SensorImage, X, Y, Width, Height, 0.f, 0.f, 1.f, 1.f, FLinearColor::White, BLEND_Opaque);
-	else
-	{
-		DrawRect(FLinearColor::Black, X, Y, Width, Height);
-		const TArray<uint8>& Mask = Forklift->GetVisionMask(); const int32 MW = Forklift->GetVisionMaskWidth(), MH = Forklift->GetVisionMaskHeight();
-
 		// A 2x decimated canvas rendering keeps this diagnostic view cheap while
 		// still revealing whether forks/shadows merge the opening regions.
 		for (int32 MY = 0; MY < MH; MY += 2) for (int32 MX = 0; MX < MW; MX += 2) if (Mask.IsValidIndex(MY * MW + MX) && Mask[MY * MW + MX]) DrawRect(FLinearColor::White, X + Width * MX / MW, Y + Height * MY / MH, Width * 2.f / MW + 1.f, Height * 2.f / MH + 1.f);
-	}
-
-	if (bDepthView)
-	{
-		for (int32 PY=0;PY<DH;PY+=4) for (int32 PX=0;PX<DW;PX+=4) if (Depth.IsValidIndex(PY*DW+PX))
-		{
-			const float D=Depth[PY*DW+PX]; const float N=FMath::Clamp((D-MinD)/FMath::Max(1.f,MaxD-MinD),0.f,1.f);
-			if (DepthView==1) DrawRect(FLinearColor(N,N,N,.92f),X+Width*PX/DW,Y+Height*PY/DH,Width*4.f/DW+1.f,Height*4.f/DH+1.f);
-			else if (PX+4<DW && FMath::Abs(D-Depth[PY*DW+PX+4])>18.f) DrawRect(FLinearColor(0.f,1.f,1.f,.9f),X+Width*PX/DW,Y+Height*PY/DH,Width*4.f/DW+1.f,Height*4.f/DH+1.f);
-		}
 	}
 
 	DrawRect(FLinearColor::White, X, Y, Width, 1.f);
@@ -186,7 +195,13 @@ void AForkliftSensorHUD::DrawHUD()
 	DrawLine(CX - 12.f, CY, CX + 12.f, CY, FLinearColor::Green, 1.5f);
 	DrawLine(CX, CY - 12.f, CX, CY + 12.f, FLinearColor::Green, 1.5f);
 
-	DrawText(bMaskView ? (DebugView == 1 ? TEXT("Colour-region mask (O: source/region/RGB body/depth body/opening)") : (DebugView == 2 ? TEXT("RGB body before depth/refinement") : (DebugView == 3 ? TEXT("Depth/refined body") : TEXT("Opening components")))) : TEXT("RGB sensor preview (O overlays, U depth palette)"), FLinearColor::White, X + 8.f, Y + 8.f, nullptr, .8f);
+	DrawText(bCpuView ? TEXT("RGB CPU FColor readback (O returns to RT/masks)") : (bMaskView ? (DebugView == 1 ? TEXT("RGB colour-region mask") : (DebugView == 2 ? TEXT("RGB body before depth/refinement") : (DebugView == 3 ? TEXT("Depth/refined body") : TEXT("Opening components")))) : TEXT("RGB Render Target source (O: diagnostics / CPU comparison)")), FLinearColor::White, X + 8.f, Y + 8.f, nullptr, .8f);
+	DrawText(Forklift->GetLastRgbReadStatistics(), FLinearColor(.75f, .9f, 1.f, 1.f), X + 8.f, Y + Height - 20.f, nullptr, .52f);
+	// Mode zero is deliberately a clean source view.  It lets us distinguish a
+	// capture/tonemapping fault from the HUD-only grid, masks, and candidate
+	// overlays below; none of these canvas diagnostics are part of the RT.
+	if (DebugView != 0 && !bCpuView)
+	{
 	// Coarse grid and body region are player-HUD diagnostics only.
 	const int32 GridX = Forklift->GetVisionCoarseGridColumns(), GridY = Forklift->GetVisionCoarseGridRows();
 	const TArray<int32>& Labels = Forklift->GetVisionCoarseLabels();
@@ -216,9 +231,6 @@ void AForkliftSensorHUD::DrawHUD()
 	}
 	const TArray<FVisionCandidateDebug>& Candidates = Forklift->GetVisionCandidates();
 	if (!Forklift->GetVisionFailureReason().IsEmpty()) DrawText(FString::Printf(TEXT("Vision: %s"), *Forklift->GetVisionFailureReason()), FLinearColor::Red, X + 8.f, Y + 28.f, nullptr, .70f);
-
-	DrawText(bMaskView ? TEXT("Binary mask (O: source/mask)") : TEXT("Pallet sensor preview (O: source/mask)"), FLinearColor::White, X + 8.f, Y + 8.f, nullptr, .8f);
-	const TArray<FVisionCandidateDebug>& Candidates = Forklift->GetVisionCandidates();
 
 	for (int32 Index = 0; Index < Candidates.Num(); ++Index)
 	{
@@ -251,14 +263,14 @@ void AForkliftSensorHUD::DrawHUD()
 		const FString OpeningLabel = Detection.bDepthValid ? FString::Printf(TEXT("VERIFIED RGB-D: %.2f dist %.0fcm lateral %.1fcm"), Detection.Confidence, Detection.EstimatedDistanceCm, Detection.EstimatedLateralCm) : FString::Printf(TEXT("RGB candidate only: %.2f — front depth missing"), Detection.Confidence);
 		DrawText(OpeningLabel, OpeningColor, X + 8.f, Y + 28.f, nullptr, .68f);
 
-		const float SX = Width / FMath::Max(1, SensorImage->SizeX), SY = Height / FMath::Max(1, SensorImage->SizeY);
-		const auto DrawOpening = [this, X, Y, SX, SY](const FVector2D& Center, const FVector2D& Extent)
-		{
-			const float BX = X + (Center.X - Extent.X) * SX, BY = Y + (Center.Y - Extent.Y) * SY, BW = Extent.X * 2.f * SX, BH = Extent.Y * 2.f * SY;
-			DrawRect(FLinearColor::Yellow, BX, BY, BW, 1.5f); DrawRect(FLinearColor::Yellow, BX, BY + BH, BW, 1.5f); DrawRect(FLinearColor::Yellow, BX, BY, 1.5f, BH); DrawRect(FLinearColor::Yellow, BX + BW, BY, 1.5f, BH);
-		};
-		DrawOpening(Detection.LeftCenter, Detection.LeftExtent); DrawOpening(Detection.RightCenter, Detection.RightExtent);
-		DrawText(FString::Printf(TEXT("OPENINGS: %.2f  dist %.0fcm lateral %.1fcm"), Detection.Confidence, Detection.EstimatedDistanceCm, Detection.EstimatedLateralCm), FLinearColor::Yellow, X + 8.f, Y + 28.f, nullptr, .75f);
-
 	}
+	}
+	DrawNavigationPanel();
+	// Draw last so the optional RGB-D preview cannot cover load telemetry.
+	DrawRect(FLinearColor(.015f, .025f, .04f, .92f), PhysicsPanelX, PhysicsPanelY, PhysicsPanelWidth, 128.f);
+	DrawText(TEXT("하중 / Chaos 물리 상태"), FLinearColor(0.f, .85f, 1.f), PhysicsPanelX + 10.f, PhysicsPanelY + 8.f, nullptr, .82f);
+	DrawText(FString::Printf(TEXT("지지 하중: %.0f kg  |  속도: %.0f%%"), Forklift->GetSupportedLoadKg(), Forklift->GetCurrentDriveSpeedMultiplier() * 100.f), FLinearColor::White, PhysicsPanelX + 10.f, PhysicsPanelY + 34.f, nullptr, .66f);
+	DrawText(FString::Printf(TEXT("표면 마찰: %.2f  |  충돌: %s"), Forklift->GetActiveLoadFriction(), *Forklift->GetActiveLoadCollisionStatus()), FLinearColor::White, PhysicsPanelX + 10.f, PhysicsPanelY + 54.f, nullptr, .60f);
+	DrawText(TEXT("질량/마찰/감쇠: C++ Chaos 적용"), FLinearColor(.65f, .9f, .7f), PhysicsPanelX + 10.f, PhysicsPanelY + 78.f, nullptr, .60f);
+	DrawText(TEXT("포크가 실제 지지할 때만 하중 반영"), FLinearColor(.75f, .8f, .9f), PhysicsPanelX + 10.f, PhysicsPanelY + 98.f, nullptr, .56f);
 }

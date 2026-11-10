@@ -22,6 +22,11 @@ public:
 	void SetSelectedDebug(bool bSelected) { bSelectedForPlacement = bSelected; }
 	bool IsSelectedDebug() const { return bSelectedForPlacement; }
 	bool GetRecentForkContact(float MaxAge, UPrimitiveComponent*& OutOther) const;
+	UPROPERTY(EditAnywhere, Category="Wood pallet|Physics", meta=(ClampMin="1.0")) float MassKg = 45.f;
+	UPROPERTY(EditAnywhere, Category="Wood pallet|Physics", meta=(ClampMin="0.0", ClampMax="2.0")) float SurfaceFriction = .9f;
+	float GetConfiguredMassKg() const { return MassKg; }
+	float GetSurfaceFriction() const { return SurfaceFriction; }
+	FString GetRecentCollisionStatus() const;
 	float GetBaseHeightCm() const { return 0.f; }
 	// Model assumptions derived from the supplied outer dimensions, not a product drawing.
 	static float LengthCm() { return 100.f; }
@@ -42,4 +47,5 @@ private:
 	FHitResult LastHit;
 	float LastHitTime = -BIG_NUMBER;
 	TWeakObjectPtr<UPrimitiveComponent> LastHitOther;
+	UPROPERTY(Transient) TObjectPtr<class UPhysicalMaterial> RuntimePhysicalMaterial;
 };

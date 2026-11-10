@@ -16,13 +16,13 @@ class USceneCaptureComponent2D;
 class UTextureRenderTarget2D;
 class UPhysicsConstraintComponent;
 class UForkliftNavigationSensorComponent;
+
 class APallet;
 
 UENUM()
-
 enum class EAutoPickupState : uint8 { Idle, Detecting, Approaching, Aligning, Inserting, Lifting, Complete, Stopped, Failed };
 
-enum class EAutoPickupState : uint8 { Idle, Detecting, Aligning, Inserting, Lifting, Complete, Stopped, Failed };
+class UForkliftSlamComponent;
 
 
 /** Pixel-space result from the existing pallet sensor render target. */
@@ -137,6 +137,8 @@ public:
 	/** Rates and turning radii; enter cm/s and cm. */
 	UPROPERTY(EditAnywhere, Category="R16 HD") FForkliftMotionSettings Motion;
 	UPROPERTY(EditAnywhere, Category="R16 HD") bool bIsLoaded = false;
+	/** The speed multiplier at RatedLoadKg.  Load is measured from the C++ Chaos pallet actors on the forks. */
+	UPROPERTY(EditAnywhere, Category="Load response", meta=(ClampMin="0.2", ClampMax="1.0")) float RatedLoadSpeedMultiplier = .72f;
 	UPROPERTY(EditAnywhere, Category="Drive debug") bool bEnableDriveDebug = false;
 	UPROPERTY(EditAnywhere, Category="Drive debug", meta=(ClampMin="0.05")) float DriveDebugIntervalSeconds = 0.25f;
 	UPROPERTY(EditAnywhere, Category="Drive debug") bool bDrawDriveDebug = false;
@@ -184,9 +186,18 @@ public:
 	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> RightForkCollision;
 	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> LeftSupportLegCollision;
 	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> RightSupportLegCollision;
+	/** Fixed, physical mast envelope.  Visual mast meshes deliberately have no
+	 * collision, so these rails prevent dynamic pallets/cargo from passing
+	 * through the two upright steel members. */
+	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> LeftMastRailCollision;
+	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> RightMastRailCollision;
+	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> MastTopCrossbarCollision;
 	/** Query-only self-occluders used by the LiDAR; they never participate in vehicle physics. */
 	UPROPERTY(VisibleAnywhere, Category="LiDAR") TObjectPtr<UBoxComponent> LidarBodyOccluder;
 	UPROPERTY(VisibleAnywhere, Category="LiDAR") TObjectPtr<UBoxComponent> LidarMastOccluder;
+
+	UPROPERTY(VisibleAnywhere, Category="SLAM") TObjectPtr<UForkliftSlamComponent> SlamComponent;
+
 	UPROPERTY(VisibleAnywhere, Category="Chaos") TObjectPtr<UBoxComponent> LiftPhysicsBody;
 	UPROPERTY(VisibleAnywhere, Category="Chaos") TObjectPtr<UBoxComponent> ReachPhysicsBody;
 	UPROPERTY(VisibleAnywhere, Category="Chaos") TObjectPtr<UBoxComponent> ForkPhysicsBody;
@@ -218,15 +229,27 @@ public:
 	/** Same carriage pose/projection as RGB. SCS_SceneDepth writes optical-axis scene depth to float R. */
 	UPROPERTY(VisibleAnywhere, Category="Pallet sensor|RGB-D") TObjectPtr<USceneCaptureComponent2D> PalletSensorDepthCapture;
 	UPROPERTY(VisibleAnywhere, Category="Pallet sensor|RGB-D") TObjectPtr<UTextureRenderTarget2D> PalletSensorDepthRenderTarget;
+	/** Sensor transport validity.  This is deliberately wider than both the
+	 * pickup working range and HUD display ranges; raw SceneDepth is retained. */
+	UPROPERTY(EditAnywhere, Category="Pallet sensor|RGB-D") float DepthSensorMinimumCm = 1.f;
+	UPROPERTY(EditAnywhere, Category="Pallet sensor|RGB-D") float DepthSensorMaximumCm = 100000.f;
+	/** Automatic pickup's trusted working interval, not a render-target clamp. */
 	UPROPERTY(EditAnywhere, Category="Pallet sensor|RGB-D") float DepthMinimumCm = 10.f;
 	UPROPERTY(EditAnywhere, Category="Pallet sensor|RGB-D") float DepthMaximumCm = 1200.f;
+	/** Fixed HUD ranges: U cycles close/wide and grey/false-colour views. */
+	UPROPERTY(EditAnywhere, Category="Pallet sensor|Depth display") float DepthCloseDisplayMinimumCm = 10.f;
+	UPROPERTY(EditAnywhere, Category="Pallet sensor|Depth display") float DepthCloseDisplayMaximumCm = 400.f;
+	UPROPERTY(EditAnywhere, Category="Pallet sensor|Depth display") float DepthWideDisplayMinimumCm = 10.f;
+	UPROPERTY(EditAnywhere, Category="Pallet sensor|Depth display") float DepthWideDisplayMaximumCm = 3000.f;
+	/** A manual exposure is used for a deterministic machine sensor.  It can be
+	 * disabled temporarily to compare with the scene's automatic exposure. */
+	UPROPERTY(EditAnywhere, Category="Pallet sensor|RGB") bool bPalletSensorUseManualExposure = true;
+	UPROPERTY(EditAnywhere, Category="Pallet sensor|RGB", meta=(EditCondition="bPalletSensorUseManualExposure")) float PalletSensorExposureBias = 0.f;
 	UPROPERTY(EditAnywhere, Category="Pallet sensor|RGB-D") float DepthRgbDisagreementCm = 90.f;
 	/** Depth is supporting evidence: it splits RGB body/background regions and
 	 * validates openings, never independently declares an opening. */
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Vision|RGB-D") float VisionDepthBodyContinuityCm = 32.f;
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Vision|RGB-D") float VisionDepthOpeningContrastCm = 18.f;
-
-	UPROPERTY(Transient, VisibleAnywhere, Category="Pallet sensor") TObjectPtr<UTextureRenderTarget2D> PalletSensorRenderTarget;
 
 	/** Drawing-verified offsets, converted from the backrest/fork coordinate system; not raw component XYZ. */
 	UPROPERTY(EditAnywhere, Category="Pallet sensor|Drawing dimensions") float PalletSensorHeightAboveForkTopCm = 19.f;
@@ -283,11 +306,6 @@ public:
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoApproachLateralToleranceCm = 6.f;
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoApproachTimeoutSeconds = 10.f;
 
-	/** Known test-pallet opening geometry. Used only to convert pixel spacing to range; never reads an Actor position. */
-	UPROPERTY(EditAnywhere, Category="Auto pickup|Vision|Known pallet") float VisionKnownOpeningCenterSpacingCm = 60.f;
-	UPROPERTY(EditAnywhere, Category="Auto pickup|Vision|Known pallet") float VisionKnownOpeningWidthCm = 36.f;
-	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoInsertSpeedScale = .20f;
-
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoLiftSpeedScale = .25f;
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoRequiredInsertionCm = 50.f;
 	UPROPERTY(EditAnywhere, Category="Auto pickup|Motion") float AutoMaximumInsertionCm = 75.f;
@@ -305,6 +323,12 @@ public:
 	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void BeginPlay() override;
 	UTextureRenderTarget2D* GetPalletSensorRenderTarget() const { return PalletSensorRenderTarget; }
+	float GetSupportedLoadKg() const { return SupportedLoadKg; }
+	float GetCurrentDriveSpeedMultiplier() const { return CurrentDriveSpeedMultiplier; }
+	float GetActiveLoadFriction() const { return ActiveLoadFriction; }
+	float GetTargetForwardSpeedCmPerSec() const { return TargetForwardSpeedCmPerSec; }
+	float GetCurrentForwardSpeedCmPerSec() const { return CurrentForwardSpeedCmPerSec; }
+	FString GetActiveLoadCollisionStatus() const { return ActiveLoadCollisionStatus; }
 
 	UTextureRenderTarget2D* GetPalletSensorDepthRenderTarget() const { return PalletSensorDepthRenderTarget; }
 	const TArray<float>& GetLatestDepthCm() const { return LatestDepthCm; }
@@ -316,13 +340,21 @@ public:
 	int32 GetDepthDebugViewMode() const { return DepthDebugViewMode; }
 	float GetDepthMinimumCm() const { return DepthMinimumCm; }
 	float GetDepthMaximumCm() const { return DepthMaximumCm; }
+	float GetDepthSensorMinimumCm() const { return DepthSensorMinimumCm; }
+	float GetDepthSensorMaximumCm() const { return DepthSensorMaximumCm; }
+	void GetDepthDisplayRange(float& OutMinimumCm, float& OutMaximumCm) const
+	{
+		const bool bWide = DepthDebugViewMode >= 2;
+		OutMinimumCm = bWide ? DepthWideDisplayMinimumCm : DepthCloseDisplayMinimumCm;
+		OutMaximumCm = bWide ? DepthWideDisplayMaximumCm : DepthCloseDisplayMaximumCm;
+	}
 	int32 GetDepthInvalidPixelCount() const { return DepthInvalidPixelCount; }
 	int32 GetDepthBelowRangePixelCount() const { return DepthBelowRangePixelCount; }
 	int32 GetDepthAboveRangePixelCount() const { return DepthAboveRangePixelCount; }
 	int32 GetPalletSensorDisplayMode() const { return PalletSensorDisplayMode; }
 	bool IsDetailedSensorDiagnostics() const { return bDetailedSensorDiagnostics; }
-
-	int32 GetPalletSensorDisplayMode() const { return PalletSensorDisplayMode; }
+	const FString& GetLastRgbReadStatistics() const { return LastRgbReadStatistics; }
+	const TArray<FColor>& GetLatestRgbCpuPixels() const { return LatestRgbCpuPixels; }
 
 	const FOpeningDetection& GetOpeningDetection() const { return OpeningDetection; }
 	const TArray<FVisionCandidateDebug>& GetVisionCandidates() const { return VisionCandidates; }
@@ -344,9 +376,6 @@ public:
 	const FIntRect& GetVisionBodyBounds() const { return VisionBodyBounds; }
 	const FString& GetVisionFailureReason() const { return LastVisionFailureReason; }
 
-	int32 GetVisionMaskWidth() const { return VisionMaskWidth; }
-	int32 GetVisionMaskHeight() const { return VisionMaskHeight; }
->>>>>>> origin/develop2
 	int32 GetVisionDebugViewMode() const { return VisionDebugViewMode; }
 	EAutoPickupState GetAutoPickupState() const { return AutoPickupState; }
 	const FString& GetAutoPickupStatus() const { return AutoPickupStatus; }
@@ -355,7 +384,6 @@ public:
 
 	void ToggleAutoPickup();
 
-		void ToggleAutoPickup();
 		bool IsNavigationActive() const { return bNavigationActive; }
 	static FBox2D NavigationButtonRect(float Height) { return FBox2D(FVector2D(24.f,Height-154.f),FVector2D(264.f,Height-112.f)); }
 	static FBox2D SlamMapRect(float Height) { const float Size=FMath::Min(300.f,Height*.40f); return FBox2D(FVector2D(20.f,100.f),FVector2D(20.f+Size,100.f+Size)); }
@@ -363,6 +391,7 @@ public:
 	void ToggleNavigation();
 	void StopNavigation();
 	const FString& GetNavigationStatus() const { return NavigationStatus; }
+	void GetNavigationDiagnosticLines(TArray<FString>& OutLines) const;
 	const TArray<FVector2D>& GetNavigationRoute() const { return NavigationRoute; }
 	bool HasNavigationGoal() const { return bNavigationGoalSet; }
 	FVector2D GetNavigationGoal() const { return NavigationGoal; }
@@ -370,6 +399,11 @@ public:
 	static FString AutoPickupStateToString(EAutoPickupState State);
 
 private:
+	void BeginNavigationRecovery(const FString& Reason);
+	float NavigationRecoveryStart = -1.f;
+	int32 NavigationRecoveryScan = 0, NavigationRecoveryAttempts = 0;
+	FString NavigationRecoveryReason;
+	TMap<FIntPoint, double> NavigationAvoidUntil;
 		void UpdateNavigation(float Dt);
 		bool PlanNavigationRoute(FVector2D Start);
 	bool SelectExplorationGoal(FVector2D Start);
@@ -391,13 +425,23 @@ private:
 	float LastAppliedDriveInput = 0.f, LastAppliedSteerInput = 0.f, LastAppliedLiftInput = 0.f, LastAppliedReachInput = 0.f, LastAppliedSideShiftInput = 0.f;
 	float LiftCm = 0.f, ReachCm = 0.f, SideShiftCm = 0.f;
 	float TargetForwardSpeedCmPerSec = 0.f, CurrentForwardSpeedCmPerSec = 0.f, DriveDebugElapsed = 0.f;
+	float SupportedLoadKg = 0.f, CurrentDriveSpeedMultiplier = 1.f, ActiveLoadFriction = 0.f;
+	FString ActiveLoadCollisionStatus = TEXT("No supported load");
 	float CameraPitchDeg = -24.f, CameraYawDeg = -35.f, CameraDistanceCm = 700.f;
 	float PalletSensorCaptureElapsed = 0.f;
 
 	int32 SensorFrameId = 0, DepthFrameId = -1;
+	/** IDs and transforms stamped when the paired capture requests are issued,
+	 * never at asynchronous CPU readback completion. */
+	int32 RgbCaptureId = -1, DepthCaptureId = -1;
 	float DepthFrameTimestampSeconds = -BIG_NUMBER;
-	FTransform DepthFrameCameraTransform;
+	FTransform RgbFrameCameraTransform, DepthFrameCameraTransform;
+	float LastRgbDepthCapturePositionDeltaCm = -BIG_NUMBER;
+	float LastRgbDepthCaptureRotationDeltaDeg = -BIG_NUMBER;
 	TArray<float> LatestDepthCm;
+	/** Exact FColor values passed to the detector after CPU readback.  HUD uses
+	 * this only in O mode 5 to compare CPU data against the render target. */
+	TArray<FColor> LatestRgbCpuPixels;
 	bool bDepthFrameValid = false;
 	int32 DepthValidPixelCount = 0;
 	int32 DepthInvalidPixelCount = 0, DepthBelowRangePixelCount = 0, DepthAboveRangePixelCount = 0;
@@ -448,20 +492,9 @@ private:
 	int32 LastVisionFrameNumber = 0, LastProcessedSensorFrameId = -1;
 	int32 AutoPickupAttemptId = 0, LastVisionSuccessSensorFrameId = -1, FirstVisionFailureAfterSuccessSensorFrameId = -1;
 
-	float VisionProcessElapsed = 0.f, AutoPickupStateElapsed = 0.f, AutoLiftStartCm = 0.f, AutoLiftPalletStartZ = 0.f, AutoRequiredForwardTravelCm = -BIG_NUMBER, AutoMaximumForwardTravelCm = -BIG_NUMBER;
-	FVector AutoInsertionStartLocation = FVector::ZeroVector;
-	int32 OpeningStableFrames = 0, AlignmentStableFrames = 0;
-	int32 LastVisionCandidateCount = -1;
-	TArray<FVisionCandidateDebug> VisionCandidates;
-	TArray<FString> VisionPairDiagnostics;
-	TArray<uint8> VisionMask;
-	int32 VisionMaskWidth = 0, VisionMaskHeight = 0, LastVisionSearchStartY = -1;
-	int32 VisionDebugViewMode = 0;
-	bool bSensorOcclusionDiagnosticHideForks = false;
-	int32 LastVisionFrameNumber = 0;
-
 	bool bLastVisionReadSucceeded = false;
 	bool bLastVisionHadValidPair = false;
+	FString LastRgbReadStatistics = TEXT("RGB CPU: not measured");
 	float LastVisionProcessTime = -BIG_NUMBER;
 	float LastButtonClickTime = -BIG_NUMBER;
 	FString LastButtonInput = TEXT("미입력");
@@ -517,15 +550,15 @@ private:
 	void ToggleDepthDebugView();
 	void ToggleDetailedSensorDiagnostics();
 	void ToggleAutoApproachStraightDiagnostic();
-
 	void ToggleSensorOcclusionDiagnostic();
 	void ToggleLidarDebug();
 	void UpdatePalletSensorSettings();
 	void ProcessOpeningVision();
-
 	bool ReadSynchronizedDepthFrame();
 	void UpdateDepthForOpeningDetection();
 	void SaveVisionTransitionArtifacts(const TArray<FColor>& Pixels, bool bValidFrame);
+
+	void ToggleSlamMapDebug();
 
 	void UpdateAutoPickup(float DeltaSeconds);
 	void SetAutoPickupState(EAutoPickupState NewState, const FString& Status);
@@ -537,9 +570,9 @@ private:
 	bool IsAutoPickupMotionActive() const;
 	float GetForkTipAheadOfSensorCm() const;
 
-	void ClearAutomaticCommands();
 	void ConfigureKinematicForkMechanism();
 	void ApplyKinematicForkControls(float DeltaSeconds);
+	void UpdateSupportedLoadState();
 	void SetConstraintFramesAtPose(UPhysicsConstraintComponent* Constraint, UPrimitiveComponent* Body1, UPrimitiveComponent* Body2, const FTransform& JointWorld, const FVector& Frame2Offset);
 	FVector GetConstraintFrameDelta(const UPhysicsConstraintComponent* Constraint, const UPrimitiveComponent* Body1, const UPrimitiveComponent* Body2) const;
 	float GetForkTopHeightAboveGroundCm() const;
