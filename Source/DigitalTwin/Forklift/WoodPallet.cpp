@@ -1,6 +1,7 @@
 #include "Forklift/WoodPallet.h"
 #include "Components/BoxComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "PhysicalMaterials/PhysicalMaterial.h"
 #include "UObject/ConstructorHelpers.h"
 
 AWoodPallet::AWoodPallet()
@@ -55,7 +56,20 @@ UBoxComponent* AWoodPallet::AddCollisionBox(const TCHAR* Name, const FVector& Lo
 	CollisionShapes.Add(Part);
 	return Part;
 }
-void AWoodPallet::BeginPlay() { Super::BeginPlay(); FinalizePlacement(); }
+void AWoodPallet::BeginPlay()
+{
+	Super::BeginPlay();
+	RuntimePhysicalMaterial = NewObject<UPhysicalMaterial>(this, TEXT("WoodPalletChaosMaterial"));
+	RuntimePhysicalMaterial->Friction = SurfaceFriction;
+	RuntimePhysicalMaterial->Restitution = .02f;
+	RuntimePhysicalMaterial->bOverrideFrictionCombineMode = true;
+	RuntimePhysicalMaterial->FrictionCombineMode = EFrictionCombineMode::Multiply;
+	for (UBoxComponent* Shape : CollisionShapes) Shape->SetPhysMaterialOverride(RuntimePhysicalMaterial);
+	PhysicsRoot->SetMassOverrideInKg(NAME_None, MassKg, true);
+	PhysicsRoot->SetLinearDamping(1.5f);
+	PhysicsRoot->SetAngularDamping(4.f);
+	FinalizePlacement();
+}
 void AWoodPallet::SetPlacementPreview(bool bPreview)
 {
 	bPlacementPreview = bPreview; PhysicsRoot->SetSimulatePhysics(false); PhysicsRoot->SetEnableGravity(false);
@@ -70,3 +84,4 @@ void AWoodPallet::FinalizePlacement()
 }
 void AWoodPallet::HandleHit(UPrimitiveComponent*, AActor*, UPrimitiveComponent* Other, FVector, const FHitResult& Hit) { LastHit = Hit; LastHitTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f; LastHitOther = Other; }
 bool AWoodPallet::GetRecentForkContact(float MaxAge, UPrimitiveComponent*& OutOther) const { OutOther = nullptr; if (!GetWorld() || GetWorld()->GetTimeSeconds() - LastHitTime > MaxAge) return false; OutOther = LastHitOther.Get(); return OutOther != nullptr; }
+FString AWoodPallet::GetRecentCollisionStatus() const { return !GetWorld() || GetWorld()->GetTimeSeconds() - LastHitTime > .5f ? TEXT("None") : GetNameSafe(LastHitOther.Get()); }

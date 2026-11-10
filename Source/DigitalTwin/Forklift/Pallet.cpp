@@ -1,6 +1,7 @@
 #include "Forklift/Pallet.h"
 #include "Components/BoxComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "PhysicalMaterials/PhysicalMaterial.h"
 #include "UObject/ConstructorHelpers.h"
 
 APallet::APallet()
@@ -112,12 +113,30 @@ float APallet::GetForkSupportSurfaceWorldZ() const
 void APallet::BeginPlay()
 {
 	Super::BeginPlay();
- CollisionShapes.Remove(CargoCollision);
- if (bHasCargo) CollisionShapes.AddUnique(CargoCollision);
- CargoVisual->SetVisibility(bHasCargo);
- CargoCollision->SetCollisionEnabled(bHasCargo ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
+	// Establish the optional cargo collision before applying the shared Chaos
+	// physical material.  Otherwise the cargo keeps the engine-default friction.
+	CollisionShapes.Remove(CargoCollision);
+	if (bHasCargo) CollisionShapes.AddUnique(CargoCollision);
+	CargoVisual->SetVisibility(bHasCargo);
+	CargoCollision->SetCollisionEnabled(bHasCargo ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
+
+	RuntimePhysicalMaterial = NewObject<UPhysicalMaterial>(this, TEXT("PalletChaosMaterial"));
+	RuntimePhysicalMaterial->Friction = SurfaceFriction;
+	RuntimePhysicalMaterial->Restitution = .02f;
+	RuntimePhysicalMaterial->bOverrideFrictionCombineMode = true;
+	RuntimePhysicalMaterial->FrictionCombineMode = EFrictionCombineMode::Multiply;
+	for (UBoxComponent* Shape : CollisionShapes) Shape->SetPhysMaterialOverride(RuntimePhysicalMaterial);
+	CollisionBody->SetMassOverrideInKg(NAME_None, GetConfiguredMassKg(), true);
+	CollisionBody->SetLinearDamping(1.25f);
+	CollisionBody->SetAngularDamping(3.5f);
 	SetCarriedState(false);
 	UE_LOG(LogTemp, Warning, TEXT("[R16HD_PALLET_PHYSICS] pallet=%s sim=%d gravity=%d collision=%d root=%s"), *GetName(), CollisionBody->IsSimulatingPhysics(), CollisionBody->IsGravityEnabled(), static_cast<int32>(CollisionBody->GetCollisionEnabled()), *CollisionBody->GetComponentLocation().ToString());
+}
+
+FString APallet::GetRecentCollisionStatus() const
+{
+	if (!GetWorld() || GetWorld()->GetTimeSeconds() - LastPhysicsHitTime > .5f) return TEXT("None");
+	return FString::Printf(TEXT("%s"), *GetNameSafe(LastPhysicsOther.Get()));
 }
 
 void APallet::SetCarriedState(bool bIsCarried)
@@ -167,9 +186,12 @@ UBoxComponent* APallet::AddCollisionShape(const TCHAR* Name, const FVector& Loca
 
 void APallet::OnConstruction(const FTransform& Transform)
 {
- Super::OnConstruction(Transform);
- CargoVisual->SetVisibility(bHasCargo);
- CargoCollision->SetCollisionEnabled(bHasCargo ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
- CollisionShapes.Remove(CargoCollision);
- if (bHasCargo) CollisionShapes.AddUnique(CargoCollision);
+	Super::OnConstruction(Transform);
+	CargoVisual->SetVisibility(bHasCargo);
+	CargoCollision->SetCollisionEnabled(bHasCargo ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
+	CollisionShapes.Remove(CargoCollision);
+	if (bHasCargo) CollisionShapes.AddUnique(CargoCollision);
+	// Keep the authored Chaos mass in sync with the optional box before PIE;
+	// BeginPlay also applies the runtime material and damping.
+	CollisionBody->SetMassOverrideInKg(NAME_None, GetConfiguredMassKg(), true);
 }

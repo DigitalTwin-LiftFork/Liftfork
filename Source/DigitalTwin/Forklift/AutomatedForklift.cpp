@@ -124,6 +124,18 @@ NavigationSensor->SetRelativeLocation(
 	RightForkFixedConstraint = CreateDefaultSubobject<UPhysicsConstraintComponent>(TEXT("RightForkFixedConstraint")); RightForkFixedConstraint->SetupAttachment(ForkPhysicsBody);
 	MastAssembly = CreateDefaultSubobject<USceneComponent>(TEXT("MastAssembly")); MastAssembly->SetupAttachment(BodyCollision);
 	LidarMastOccluder->SetupAttachment(MastAssembly);
+	LeftMastRailCollision = CreateDefaultSubobject<UBoxComponent>(TEXT("LeftMastRailCollision"));
+	RightMastRailCollision = CreateDefaultSubobject<UBoxComponent>(TEXT("RightMastRailCollision"));
+	MastTopCrossbarCollision = CreateDefaultSubobject<UBoxComponent>(TEXT("MastTopCrossbarCollision"));
+	for (UBoxComponent* MastPart : {LeftMastRailCollision.Get(), RightMastRailCollision.Get(), MastTopCrossbarCollision.Get()})
+	{
+		MastPart->SetupAttachment(MastAssembly);
+		MastPart->SetCollisionProfileName(TEXT("BlockAll"));
+		MastPart->SetCollisionObjectType(ECC_WorldDynamic);
+		MastPart->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		MastPart->SetSimulatePhysics(false);
+		MastPart->SetEnableGravity(false);
+	}
 
 	MastOuterVisual = CreateVisual(TEXT("MastOuterVisual_ReplaceMesh"), MastAssembly);
 	MastInnerVisual = CreateVisual(TEXT("MastInnerVisual_ReplaceMesh"), MastAssembly);
@@ -136,6 +148,15 @@ NavigationSensor->SetRelativeLocation(
 	PalletSensorCapture->SetupAttachment(ForkCarriage);
 	PalletSensorCapture->bCaptureEveryFrame = false;
 	PalletSensorCapture->bCaptureOnMovement = false;
+	// The RGB detector consumes FColor pixels.  Capture final LDR scene colour
+	// into the RGBA8 target explicitly; relying on the component default can
+	// select HDR scene colour and clamp most of the image white on readback.
+	PalletSensorCapture->CaptureSource = ESceneCaptureSource::SCS_FinalColorLDR;
+	PalletSensorCapture->PostProcessSettings.bOverride_AutoExposureMethod = true;
+	PalletSensorCapture->PostProcessSettings.AutoExposureMethod = EAutoExposureMethod::AEM_Manual;
+	PalletSensorCapture->PostProcessSettings.bOverride_AutoExposureBias = true;
+	PalletSensorCapture->PostProcessSettings.AutoExposureBias = PalletSensorExposureBias;
+	PalletSensorCapture->ShowFlags.SetEyeAdaptation(false);
 	// The sensor target is source imagery only. HUD content is drawn after
 	// capture, and editor-style debug primitives are excluded here.
 	PalletSensorCapture->ShowFlags.SetOnScreenDebug(false);
@@ -144,7 +165,12 @@ NavigationSensor->SetRelativeLocation(
 	PalletSensorRenderTarget = CreateDefaultSubobject<UTextureRenderTarget2D>(TEXT("PalletInsertionSensorRenderTarget"));
 	PalletSensorRenderTarget->RenderTargetFormat = RTF_RGBA8;
 	PalletSensorRenderTarget->ClearColor = FLinearColor::Black;
-	PalletSensorRenderTarget->InitAutoFormat(960, 540);
+	PalletSensorRenderTarget->bForceLinearGamma = false;
+	// FinalColorLDR must use a real 8-bit sRGB-like target.  InitAutoFormat can
+	// select an HDR resource from inherited defaults, then DrawTexture/ReadPixels
+	// each apply a different conversion and the preview looks clipped white.
+	PalletSensorRenderTarget->InitCustomFormat(960, 540, PF_B8G8R8A8, false);
+	PalletSensorRenderTarget->TargetGamma = 2.2f;
 	PalletSensorCapture->TextureTarget = PalletSensorRenderTarget;
 	PalletSensorDepthCapture = CreateDefaultSubobject<USceneCaptureComponent2D>(TEXT("PalletInsertionSensorDepthCapture"));
 	PalletSensorDepthCapture->SetupAttachment(ForkCarriage);
@@ -217,13 +243,12 @@ void AAutomatedForklift::BeginPlay()
 
 	bAutoApproachStraightDiagnostic = false; // diagnostics never persist into normal auto pickup
 
-	PalletSensorRenderTarget = NewObject<UTextureRenderTarget2D>(this, NAME_None, RF_Transient);
-	PalletSensorRenderTarget->RenderTargetFormat = RTF_RGBA8;
-	PalletSensorRenderTarget->ClearColor = FLinearColor::Black;
-	PalletSensorRenderTarget->InitAutoFormat(960, 540);
-	PalletSensorCapture->TextureTarget = PalletSensorRenderTarget;
-
-
+	// Keep the paired constructor-owned render targets.  develop2 recreated only
+	// the RGB target here, leaving depth on its original target; that split their
+	// lifetime/configuration after the merge and made RGB capture depend on an
+	// implicit SceneCapture default.  Both streams now retain their explicit
+	// format/source configuration and are rebound together below.
+	UpdatePalletSensorSettings();
 	// The root collision is centred on the actor. Map1 actors authored at floor Z=0 must be lifted to their collision centre.
 	const float MinimumCenterHeight = Dimensions.BodyHeightCm * .5f + 2.f;
 	if (GetActorLocation().Z < MinimumCenterHeight)
@@ -297,6 +322,19 @@ void AAutomatedForklift::ApplyDimensions()
 	LidarBodyOccluder->SetBoxExtent(BodyCollision->GetUnscaledBoxExtent());
 	LidarMastOccluder->SetRelativeLocation(FVector(0.f, 0.f, Dimensions.MaximumLiftHeightCm * .5f));
 	LidarMastOccluder->SetBoxExtent(FVector(12.f, Dimensions.MastWidthCm * .5f, Dimensions.MaximumLiftHeightCm * .5f));
+	// The imported mast visuals have collision disabled so they never interfere
+	// with the fork camera.  Keep their physical representation narrow and on
+	// the actual two uprights; do not close the central fork/carriage passage.
+	const float MastRailHalfThicknessCm = 6.f;
+	const float MastRailHalfWidthCm = 6.f;
+	const float MastRailYcm = FMath::Max(0.f, Dimensions.MastWidthCm * .5f - MastRailHalfWidthCm);
+	const float MastRailHalfHeightCm = Dimensions.MaximumLiftHeightCm * .5f;
+	LeftMastRailCollision->SetRelativeLocation(FVector(0.f, -MastRailYcm, MastRailHalfHeightCm));
+	RightMastRailCollision->SetRelativeLocation(FVector(0.f, MastRailYcm, MastRailHalfHeightCm));
+	LeftMastRailCollision->SetBoxExtent(FVector(MastRailHalfThicknessCm, MastRailHalfWidthCm, MastRailHalfHeightCm));
+	RightMastRailCollision->SetBoxExtent(FVector(MastRailHalfThicknessCm, MastRailHalfWidthCm, MastRailHalfHeightCm));
+	MastTopCrossbarCollision->SetRelativeLocation(FVector(0.f, 0.f, Dimensions.MaximumLiftHeightCm - MastRailHalfWidthCm));
+	MastTopCrossbarCollision->SetBoxExtent(FVector(MastRailHalfThicknessCm, Dimensions.MastWidthCm * .5f, MastRailHalfWidthCm));
 	// The original lowest fork datum is MastAssembly, not the body origin or
 	// a physics-body centre. Preserve it exactly for LiftCm=0.
 	LiftPhysicsBody->SetRelativeLocation(FVector(Dimensions.OverallLengthCm * .5f - 10.f, 0.f, -Dimensions.BodyHeightCm * .5f)); LiftPhysicsBody->SetBoxExtent(FVector(35.f, Dimensions.MastWidthCm * .5f, 80.f));
@@ -438,8 +476,6 @@ void AAutomatedForklift::UpdatePalletSensorSettings()
 
 	if (!PalletSensorCapture || !PalletSensorRenderTarget || !PalletSensorDepthCapture || !PalletSensorDepthRenderTarget) return;
 
-	if (!PalletSensorCapture || !PalletSensorRenderTarget) return;
-
 	// ForkCarriage's local origin is the side-shifting carriage.  The drawing
 	// offsets are referenced to physical fork/backrest geometry, so convert them
 	// here instead of treating 19/6.3/2.6 as arbitrary local XYZ values.
@@ -452,15 +488,27 @@ void AAutomatedForklift::UpdatePalletSensorSettings()
 	PalletSensorCapture->SetRelativeLocation(CarriageLocalLocation);
 	PalletSensorCapture->SetRelativeRotation(PalletSensorRelativeRotation);
 	PalletSensorCapture->FOVAngle = PalletSensorFieldOfViewDeg;
+	PalletSensorCapture->CaptureSource = ESceneCaptureSource::SCS_FinalColorLDR;
+	PalletSensorCapture->PostProcessSettings.bOverride_AutoExposureMethod = true;
+	PalletSensorCapture->PostProcessSettings.AutoExposureMethod = bPalletSensorUseManualExposure ? EAutoExposureMethod::AEM_Manual : EAutoExposureMethod::AEM_Histogram;
+	PalletSensorCapture->PostProcessSettings.bOverride_AutoExposureBias = bPalletSensorUseManualExposure;
+	PalletSensorCapture->PostProcessSettings.AutoExposureBias = PalletSensorExposureBias;
+	PalletSensorCapture->ShowFlags.SetEyeAdaptation(!bPalletSensorUseManualExposure);
+	PalletSensorCapture->TextureTarget = PalletSensorRenderTarget;
 
 	PalletSensorDepthCapture->SetRelativeLocation(CarriageLocalLocation);
 	PalletSensorDepthCapture->SetRelativeRotation(PalletSensorRelativeRotation);
 	PalletSensorDepthCapture->FOVAngle = PalletSensorFieldOfViewDeg;
+	PalletSensorDepthCapture->CaptureSource = ESceneCaptureSource::SCS_SceneDepth;
+	PalletSensorDepthCapture->TextureTarget = PalletSensorDepthRenderTarget;
 
-	if (PalletSensorRenderTarget->SizeX != PalletSensorWidthPx || PalletSensorRenderTarget->SizeY != PalletSensorHeightPx)
+	if (PalletSensorRenderTarget->SizeX != PalletSensorWidthPx || PalletSensorRenderTarget->SizeY != PalletSensorHeightPx || PalletSensorRenderTarget->GetFormat() != PF_B8G8R8A8)
 	{
-		PalletSensorRenderTarget->ResizeTarget(PalletSensorWidthPx, PalletSensorHeightPx);
+		PalletSensorRenderTarget->InitCustomFormat(PalletSensorWidthPx, PalletSensorHeightPx, PF_B8G8R8A8, false);
 	}
+	PalletSensorRenderTarget->RenderTargetFormat = RTF_RGBA8;
+	PalletSensorRenderTarget->bForceLinearGamma = false;
+	PalletSensorRenderTarget->TargetGamma = 2.2f;
 
 	if (PalletSensorDepthRenderTarget->SizeX != PalletSensorWidthPx || PalletSensorDepthRenderTarget->SizeY != PalletSensorHeightPx)
 	{
@@ -574,13 +622,13 @@ void AAutomatedForklift::TogglePalletSensorCapture()
 void AAutomatedForklift::ToggleVisionDebugView()
 {
 
-	VisionDebugViewMode = (VisionDebugViewMode + 1) % 5;
-	UE_LOG(LogTemp, Warning, TEXT("[R16HD_VISION] O debug view=%d (0=source, 1=colour region, 2=RGB body, 3=depth/refined body, 4=opening)"), VisionDebugViewMode);
+	VisionDebugViewMode = (VisionDebugViewMode + 1) % 6;
+	UE_LOG(LogTemp, Warning, TEXT("[R16HD_VISION] O debug view=%d (0=RT source, 1=colour region, 2=RGB body, 3=depth/refined body, 4=opening, 5=CPU FColor)"), VisionDebugViewMode);
 }
 void AAutomatedForklift::ToggleDepthDebugView()
 {
-	DepthDebugViewMode = (DepthDebugViewMode + 1) % 3;
-	UE_LOG(LogTemp, Warning, TEXT("[R16HD_RGBD] U depth debug=%d (0=RGB, 1=normalized depth, 2=RGB+depth edges)"), DepthDebugViewMode);
+	DepthDebugViewMode = (DepthDebugViewMode + 1) % 4;
+	UE_LOG(LogTemp, Warning, TEXT("[R16HD_RGBD] U depth view=%d (0=close grey, 1=close colour, 2=wide grey, 3=wide colour)"), DepthDebugViewMode);
 }
 void AAutomatedForklift::ToggleDetailedSensorDiagnostics()
 {
@@ -599,13 +647,21 @@ void AAutomatedForklift::ToggleAutoApproachStraightDiagnostic()
 void AAutomatedForklift::ToggleSensorOcclusionDiagnostic()
 {
 	bSensorOcclusionDiagnosticHideForks = !bSensorOcclusionDiagnosticHideForks;
-	if (!PalletSensorCapture) return;
+	if (!PalletSensorCapture || !PalletSensorDepthCapture) return;
+	// RGB and depth must keep the same visibility set.  Hiding fork geometry in
+	// only RGB creates a false image/depth correspondence during diagnostics.
 	PalletSensorCapture->ClearHiddenComponents();
+	PalletSensorDepthCapture->ClearHiddenComponents();
 	if (bSensorOcclusionDiagnosticHideForks)
 	{
-		for (UPrimitiveComponent* Part : {static_cast<UPrimitiveComponent*>(LeftForkVisual.Get()), static_cast<UPrimitiveComponent*>(RightForkVisual.Get()), static_cast<UPrimitiveComponent*>(ForkCarriageVisual.Get()), static_cast<UPrimitiveComponent*>(ReachVisual.Get())}) if (Part) PalletSensorCapture->HideComponent(Part);
+		for (UPrimitiveComponent* Part : {static_cast<UPrimitiveComponent*>(LeftForkVisual.Get()), static_cast<UPrimitiveComponent*>(RightForkVisual.Get()), static_cast<UPrimitiveComponent*>(ForkCarriageVisual.Get()), static_cast<UPrimitiveComponent*>(ReachVisual.Get())})
+		{
+			if (!Part) continue;
+			PalletSensorCapture->HideComponent(Part);
+			PalletSensorDepthCapture->HideComponent(Part);
+		}
 	}
-	UE_LOG(LogTemp, Warning, TEXT("[R16HD_VISION] I camera-only fork/carriage occlusion diagnostic=%d; this does not change the vehicle or final sensor mode."), bSensorOcclusionDiagnosticHideForks);
+	UE_LOG(LogTemp, Warning, TEXT("[R16HD_VISION] I paired RGB-D fork/carriage occlusion diagnostic=%d; this does not change vehicle physics."), bSensorOcclusionDiagnosticHideForks);
 }
 void AAutomatedForklift::ToggleLidarDebug()
 {
@@ -703,7 +759,7 @@ bool AAutomatedForklift::WouldForkRotationHitFixedObstacle(float DeltaYawDegrees
 	// Check the actual outer envelope for a steering step.  The support legs
 	// are deliberately included: the root box alone does not cover their full
 	// lateral sweep, and the fork tines can be raised or extended beyond it.
-	for (UBoxComponent* Tine : {LeftForkCollision.Get(), RightForkCollision.Get(), LeftSupportLegCollision.Get(), RightSupportLegCollision.Get()})
+	for (UBoxComponent* Tine : {LeftForkCollision.Get(), RightForkCollision.Get(), LeftSupportLegCollision.Get(), RightSupportLegCollision.Get(), LeftMastRailCollision.Get(), RightMastRailCollision.Get(), MastTopCrossbarCollision.Get()})
 	{
 		if (!Tine) continue;
 		const bool bCurrentOverlap = GetWorld()->OverlapAnyTestByObjectType(Tine->GetComponentLocation(), Tine->GetComponentQuat(), Objects, FCollisionShape::MakeBox(Tine->GetScaledBoxExtent()), Params);
@@ -774,7 +830,7 @@ void AAutomatedForklift::DrawCollisionDebug()
 		const bool bHighlighted = Component == LastBlockingComponent.Get() && GetWorld()->GetTimeSeconds() <= LastCollisionHitExpireTime;
 		DrawDebugBox(GetWorld(), Component->GetComponentLocation(), Component->GetScaledBoxExtent(), Component->GetComponentQuat(), bHighlighted ? FColor::Yellow : FColor::Red, false, 0.f, 0, 1.5f);
 	};
-	DrawBox(BodyCollision); DrawBox(LiftPhysicsBody); DrawBox(ReachPhysicsBody); DrawBox(ForkPhysicsBody); DrawBox(LeftForkCollision); DrawBox(RightForkCollision); DrawBox(LeftSupportLegCollision); DrawBox(RightSupportLegCollision);
+	DrawBox(BodyCollision); DrawBox(LiftPhysicsBody); DrawBox(ReachPhysicsBody); DrawBox(ForkPhysicsBody); DrawBox(LeftForkCollision); DrawBox(RightForkCollision); DrawBox(LeftSupportLegCollision); DrawBox(RightSupportLegCollision); DrawBox(LeftMastRailCollision); DrawBox(RightMastRailCollision); DrawBox(MastTopCrossbarCollision);
 	for (TActorIterator<APallet> It(GetWorld()); It; ++It)
 	{
 		for (UBoxComponent* Shape : It->GetCollisionShapes()) DrawBox(Shape);
@@ -839,6 +895,50 @@ void AAutomatedForklift::InteractWithPallet()
 	PalletSupportDebugStatus = TEXT("Pallet: physical fork contact (G attachment disabled)");
 }
 
+void AAutomatedForklift::UpdateSupportedLoadState()
+{
+	SupportedLoadKg = 0.f;
+	ActiveLoadFriction = 0.f;
+	ActiveLoadCollisionStatus = TEXT("No supported load");
+	if (!GetWorld() || !LeftForkCollision || !RightForkCollision) { CurrentDriveSpeedMultiplier = 1.f; return; }
+
+	// APallet has exact opening/insertion validation.  This keeps a nearby pallet
+	// from being counted until both physical tines actually support it.
+	for (TActorIterator<APallet> It(GetWorld()); It; ++It)
+	{
+		APallet* Pallet = *It;
+		FString Reason;
+		if (Pallet && Pallet->CanSupportFromForks(LeftForkCollision, RightForkCollision, MinimumPalletSupportInsertionCm, Reason))
+		{
+			SupportedLoadKg += Pallet->GetConfiguredMassKg();
+			ActiveLoadFriction = FMath::Max(ActiveLoadFriction, Pallet->GetSurfaceFriction());
+			ActiveLoadCollisionStatus = Pallet->GetRecentCollisionStatus();
+		}
+	}
+
+	// Spawned wood pallets have separated collision rails.  Their support is
+	// measured in the fork-carriage frame, after a recent physical fork contact.
+	for (TActorIterator<AWoodPallet> It(GetWorld()); It; ++It)
+	{
+		AWoodPallet* Pallet = *It;
+		if (!Pallet || Pallet->IsPlacementPreview()) continue;
+		UPrimitiveComponent* Contact = nullptr;
+		const bool bRecentForkContact = Pallet->GetRecentForkContact(.25f, Contact) && (Contact == LeftForkCollision || Contact == RightForkCollision);
+		const FVector Local = ForkCarriage->GetComponentTransform().InverseTransformPosition(Pallet->GetActorLocation());
+		const bool bAboveAndBetweenForks = Local.X > -20.f && Local.X < Dimensions.ForkLengthCm + 35.f && FMath::Abs(Local.Y) < 58.f && Local.Z > -8.f && Local.Z < 45.f;
+		if (bRecentForkContact && bAboveAndBetweenForks)
+		{
+			SupportedLoadKg += Pallet->GetConfiguredMassKg();
+			ActiveLoadFriction = FMath::Max(ActiveLoadFriction, Pallet->GetSurfaceFriction());
+			ActiveLoadCollisionStatus = Pallet->GetRecentCollisionStatus();
+		}
+	}
+
+	bIsLoaded = SupportedLoadKg > KINDA_SMALL_NUMBER;
+	const float LoadRatio = FMath::Clamp(SupportedLoadKg / FMath::Max(1.f, Dimensions.RatedLoadKg), 0.f, 1.f);
+	CurrentDriveSpeedMultiplier = FMath::Lerp(1.f, RatedLoadSpeedMultiplier, LoadRatio);
+}
+
 void AAutomatedForklift::ApplyKinematicForkControls(float Dt)
 {
 
@@ -846,7 +946,7 @@ void AAutomatedForklift::ApplyKinematicForkControls(float Dt)
 	LastAppliedLiftInput = bAuto ? AutoLiftInput : LiftInput;
 	LastAppliedReachInput = bAuto ? AutoReachInput : ReachInput;
 	LastAppliedSideShiftInput = bAuto ? AutoSideShiftInput : SideShiftInput;
-	const float LiftRate = LastAppliedLiftInput >= 0.f ? Motion.UnloadedLiftSpeedCmPerSec : Motion.UnloadedLowerSpeedCmPerSec;
+	const float LiftRate = LastAppliedLiftInput >= 0.f ? (bIsLoaded ? Motion.LoadedLiftSpeedCmPerSec : Motion.UnloadedLiftSpeedCmPerSec) : (bIsLoaded ? Motion.LoadedLowerSpeedCmPerSec : Motion.UnloadedLowerSpeedCmPerSec);
 	float DesiredLift = FMath::Clamp(LiftCm + LastAppliedLiftInput * LiftRate * Dt, 0.f, RequiredLiftStrokeCm);
 	float DesiredReach = FMath::Clamp(ReachCm + LastAppliedReachInput * Motion.ReachSpeedCmPerSec * Dt, 0.f, Dimensions.ReachTravelCm);
 	float DesiredSide = FMath::Clamp(SideShiftCm + LastAppliedSideShiftInput * Motion.SideShiftSpeedCmPerSec * Dt, -Dimensions.ForkSideShiftCm, Dimensions.ForkSideShiftCm);
@@ -1009,11 +1109,14 @@ void AAutomatedForklift::GetAutoPickupDiagnosticLines(TArray<FString>& OutLines)
 	OutLines.Add(FString::Printf(TEXT("버튼: %s (%s 전)"), *LastButtonInput, *AgeText(LastButtonClickTime)));
 	OutLines.Add(FString::Printf(TEXT("단계: %.1fs — %s"), AutoPickupStateElapsed, *AutoPickupStatus));
 	OutLines.Add(FString::Printf(TEXT("영상: 캡처 %s / RT %s / 처리 #%d (%s 전) / 픽셀 %s"), bPalletSensorCaptureActive ? TEXT("켜짐") : TEXT("꺼짐"), PalletSensorRenderTarget ? TEXT("유효") : TEXT("없음"), LastVisionFrameNumber, *AgeText(LastVisionProcessTime), *LastPixelReadStatus));
+	OutLines.Add(LastRgbReadStatistics);
 	OutLines.Add(FString::Printf(TEXT("Depth: %s / frame %d / 유효픽셀 %d / 범위 %s..%s / %s"), bDepthFrameValid ? TEXT("수신됨") : TEXT("미수신"), DepthFrameId, DepthValidPixelCount, *ValueText(DepthObservedMinimumCm,TEXT("cm")), *ValueText(DepthObservedMaximumCm,TEXT("cm")), *LastDepthReadStatus));
 	OutLines.Add(FString::Printf(TEXT("탐색: 16x16 색상 영역 병합 / 원본 2px 정밀 / 후보 ROI 시작 %s"), LastVisionSearchStartY >= 0 ? *FString::FromInt(LastVisionSearchStartY * 2) : TEXT("미측정")));
 	OutLines.Add(FString::Printf(TEXT("인식: 후보 %s / 쌍 %s / 신뢰도 %s / 안정 %d/3"), LastVisionCandidateCount >= 0 ? *FString::FromInt(LastVisionCandidateCount) : TEXT("미측정"), bLastVisionHadValidPair ? TEXT("유효") : TEXT("없음"), OpeningDetection.TimestampSeconds > -BIG_NUMBER * .5f ? *FString::Printf(TEXT("%.2f"), OpeningDetection.Confidence) : TEXT("미측정"), OpeningStableFrames));
 	OutLines.Add(FString::Printf(TEXT("Gates: RGB pair=%s | depth/front=%s | tracked=%s | height range=%s | motion=%s"), bLastVisionHadValidPair ? TEXT("valid") : TEXT("missing"), OpeningDetection.bDepthValid ? TEXT("valid") : TEXT("missing"), LastTrackedOpeningDetection.bValid ? TEXT("locked") : TEXT("none"), LastAllowedForkTopMinCm <= LastAllowedForkTopMaxCm ? TEXT("feasible") : TEXT("re-measure"), IsAutoPickupMotionActive() ? TEXT("permitted") : TEXT("held")));
 	OutLines.Add(FString::Printf(TEXT("Depth pixels: valid=%d invalid=%d below=%d above=%d"), DepthValidPixelCount, DepthInvalidPixelCount, DepthBelowRangePixelCount, DepthAboveRangePixelCount));
+	OutLines.Add(FString::Printf(TEXT("RGB-D sync: cycle RGB %d / depth %d / captured pose delta %.3fcm %.3fdeg"),
+		RgbCaptureId, DepthCaptureId, LastRgbDepthCapturePositionDeltaCm, LastRgbDepthCaptureRotationDeltaDeg));
 	OutLines.Add(FString::Printf(TEXT("Vision ms: total %.1f rgb %.1f depth %.1f coarse %.1f fine %.1f max %.1f"), LastVisionTotalMs, LastVisionRgbReadMs, LastVisionDepthReadMs, LastVisionCoarseMs, LastVisionFineMs, LastVisionMaxMs));
 	if (!LastAutoFailureReason.IsEmpty()) OutLines.Add(FString::Printf(TEXT("Last auto failure: frame %d age %s — %s"), LastAutoFailureSensorFrameId, *AgeText(LastAutoFailureTime), *LastAutoFailureReason));
 	const bool bObservationFresh = OpeningDetection.bValid && OpeningDetection.bDepthValid && OpeningDetection.TimestampSeconds > -BIG_NUMBER*.5f && Now-OpeningDetection.TimestampSeconds <= VisionMaximumFrameAgeSeconds;
@@ -1219,8 +1322,16 @@ bool AAutomatedForklift::ReadSynchronizedDepthFrame()
 {
 	bDepthFrameValid = false; DepthValidPixelCount = 0; DepthInvalidPixelCount = DepthBelowRangePixelCount = DepthAboveRangePixelCount = 0; DepthObservedMinimumCm = DepthObservedMaximumCm = -BIG_NUMBER;
 	if (!PalletSensorDepthRenderTarget || !PalletSensorCapture || !PalletSensorDepthCapture || SensorFrameId <= 0) return false;
-	const bool bSamePose = PalletSensorCapture->GetComponentTransform().Equals(DepthFrameCameraTransform, .01f);
-	if (!bSamePose) { LastDepthReadStatus = TEXT("synchronization rejected: capture poses differ"); return false; }
+	const bool bMatchingCaptureIds = RgbCaptureId == SensorFrameId && DepthCaptureId == SensorFrameId;
+	const float PositionDeltaCm = FVector::Dist(RgbFrameCameraTransform.GetLocation(), DepthFrameCameraTransform.GetLocation());
+	const float RotationDeltaDeg = RgbFrameCameraTransform.GetRotation().AngularDistance(DepthFrameCameraTransform.GetRotation()) * (180.f / PI);
+	const bool bSameCapturePose = PositionDeltaCm <= .01f && RotationDeltaDeg <= .01f;
+	if (!bMatchingCaptureIds || !bSameCapturePose)
+	{
+		LastDepthReadStatus = FString::Printf(TEXT("depth sync rejected: rgb cycle %d depth cycle %d current %d, pose delta %.3fcm %.3fdeg"),
+			RgbCaptureId, DepthCaptureId, SensorFrameId, PositionDeltaCm, RotationDeltaDeg);
+		return false;
+	}
 	FTextureRenderTargetResource* Resource = PalletSensorDepthRenderTarget->GameThread_GetRenderTargetResource();
 	TArray<FFloat16Color> Raw;
 	bool bRead = Resource && Resource->ReadFloat16Pixels(Raw);
@@ -1245,15 +1356,17 @@ bool AAutomatedForklift::ReadSynchronizedDepthFrame()
 		// Unreal cm; DeviceDepth is intentionally not used here.
 		const float Depth = Raw[Index].R.GetFloat();
 		LatestDepthCm[Index] = Depth;
-		if (!FMath::IsFinite(Depth) || Depth <= 0.f) { ++DepthInvalidPixelCount; continue; }
-		if (Depth < DepthMinimumCm) { ++DepthBelowRangePixelCount; continue; }
-		if (Depth > DepthMaximumCm) { ++DepthAboveRangePixelCount; continue; }
+		if (!FMath::IsFinite(Depth) || Depth < DepthSensorMinimumCm || Depth > DepthSensorMaximumCm) { ++DepthInvalidPixelCount; continue; }
+		// Do not discard valid distant SceneDepth values.  These counters only
+		// describe whether a value is outside the automatic pickup work range.
+		if (Depth < DepthMinimumCm) ++DepthBelowRangePixelCount;
+		if (Depth > DepthMaximumCm) ++DepthAboveRangePixelCount;
 		++DepthValidPixelCount; DepthObservedMinimumCm = DepthObservedMinimumCm <= -BIG_NUMBER*.5f ? Depth : FMath::Min(DepthObservedMinimumCm,Depth); DepthObservedMaximumCm = DepthObservedMaximumCm <= -BIG_NUMBER*.5f ? Depth : FMath::Max(DepthObservedMaximumCm,Depth);
 	}
-	DepthFrameId = SensorFrameId;
+	DepthFrameId = DepthCaptureId;
 	LastDepthReadTime = GetWorld() ? GetWorld()->GetTimeSeconds() : -BIG_NUMBER;
 	bDepthFrameValid = DepthValidPixelCount > Raw.Num() / 100;
-	LastDepthReadStatus = FString::Printf(TEXT("depth read %s: %d/%d valid, invalid=%d below=%d above=%d range %.1f..%.1f cm"), bDepthFrameValid ? TEXT("succeeded") : TEXT("no valid values"), DepthValidPixelCount, Raw.Num(), DepthInvalidPixelCount, DepthBelowRangePixelCount, DepthAboveRangePixelCount, DepthObservedMinimumCm, DepthObservedMaximumCm);
+	LastDepthReadStatus = FString::Printf(TEXT("depth read %s: %d/%d sensor-valid, invalid=%d work-below=%d work-above=%d raw %.1f..%.1f cm"), bDepthFrameValid ? TEXT("succeeded") : TEXT("no valid values"), DepthValidPixelCount, Raw.Num(), DepthInvalidPixelCount, DepthBelowRangePixelCount, DepthAboveRangePixelCount, DepthObservedMinimumCm, DepthObservedMaximumCm);
 	return bDepthFrameValid;
 }
 
@@ -1331,6 +1444,24 @@ void AAutomatedForklift::ProcessOpeningVision()
 	FTextureRenderTargetResource* Resource = PalletSensorRenderTarget->GameThread_GetRenderTargetResource(); TArray<FColor> Pixels;
 	if (!Resource || !Resource->ReadPixels(Pixels) || Pixels.Num() != PalletSensorWidthPx * PalletSensorHeightPx) { bLastVisionReadSucceeded = false; LastPixelReadStatus = TEXT("read failed"); LastVisionFailureReason = TEXT("Camera render target pixels unavailable"); return; }
 	LastVisionRgbReadMs = static_cast<float>((FPlatformTime::Seconds()-VisionStartSeconds)*1000.0);
+	// Preserve exactly what the detector consumes.  It is never converted back
+	// into the render target; O mode 5 only visualizes this CPU copy for a direct
+	// RT -> ReadPixels -> HUD comparison.
+	LatestRgbCpuPixels = Pixels;
+	uint8 MinR = 255, MinG = 255, MinB = 255, MaxR = 0, MaxG = 0, MaxB = 0;
+	uint64 SumR = 0, SumG = 0, SumB = 0;
+	int32 WhiteSaturated = 0;
+	for (const FColor& Pixel : Pixels)
+	{
+		MinR = FMath::Min(MinR, Pixel.R); MinG = FMath::Min(MinG, Pixel.G); MinB = FMath::Min(MinB, Pixel.B);
+		MaxR = FMath::Max(MaxR, Pixel.R); MaxG = FMath::Max(MaxG, Pixel.G); MaxB = FMath::Max(MaxB, Pixel.B);
+		SumR += Pixel.R; SumG += Pixel.G; SumB += Pixel.B;
+		if (Pixel.R >= 250 && Pixel.G >= 250 && Pixel.B >= 250) ++WhiteSaturated;
+	}
+	const float PixelCount = static_cast<float>(FMath::Max(1, Pixels.Num()));
+	LastRgbReadStatistics = FString::Printf(TEXT("RGB CPU frame %d: R %d..%d/%.0f G %d..%d/%.0f B %d..%d/%.0f white %.1f%%"),
+		SensorFrameId, MinR, MaxR, SumR / PixelCount, MinG, MaxG, SumG / PixelCount, MinB, MaxB, SumB / PixelCount,
+		100.f * static_cast<float>(WhiteSaturated) / PixelCount);
 	bLastVisionReadSucceeded = true; LastPixelReadStatus = TEXT("RGB read succeeded");
 	// RGB diagnostics deliberately continue without depth.  Automatic motion
 	// later requires bDepthValid, but coarse regions/candidates remain visible
@@ -1991,7 +2122,7 @@ void AAutomatedForklift::Tick(float Dt)
 	const FVector StartLocation = GetActorLocation(); FHitResult DriveHit;
 	FVector DriveDelta = GetActorForwardVector() * TargetForwardSpeedCmPerSec * Dt;
 	float EarliestPartHit = 1.f;
-	for (UBoxComponent* Part : {LeftSupportLegCollision.Get(), RightSupportLegCollision.Get()})
+	for (UBoxComponent* Part : {LeftSupportLegCollision.Get(), RightSupportLegCollision.Get(), LeftMastRailCollision.Get(), RightMastRailCollision.Get(), MastTopCrossbarCollision.Get()})
 	{
 		FHitResult PartHit;
 		if (SweepForkliftPart(Part, DriveDelta, TEXT("drive part sweep"), PartHit)) EarliestPartHit = FMath::Min(EarliestPartHit, PartHit.Time);
@@ -2067,8 +2198,13 @@ void AAutomatedForklift::Tick(float Dt)
 		{
 			PalletSensorCaptureElapsed = 0.f;
 			++SensorFrameId;
-			PalletSensorDepthCapture->SetWorldTransform(PalletSensorCapture->GetComponentTransform(), false, nullptr, ETeleportType::None);
-			DepthFrameCameraTransform = PalletSensorCapture->GetComponentTransform();
+			RgbCaptureId = SensorFrameId;
+			RgbFrameCameraTransform = PalletSensorCapture->GetComponentTransform();
+			PalletSensorDepthCapture->SetWorldTransform(RgbFrameCameraTransform, false, nullptr, ETeleportType::None);
+			DepthCaptureId = SensorFrameId;
+			DepthFrameCameraTransform = PalletSensorDepthCapture->GetComponentTransform();
+			LastRgbDepthCapturePositionDeltaCm = FVector::Dist(RgbFrameCameraTransform.GetLocation(), DepthFrameCameraTransform.GetLocation());
+			LastRgbDepthCaptureRotationDeltaDeg = RgbFrameCameraTransform.GetRotation().AngularDistance(DepthFrameCameraTransform.GetRotation()) * (180.f / PI);
 			DepthFrameTimestampSeconds = GetWorld()->GetTimeSeconds();
 			PalletSensorCapture->CaptureScene();
 			PalletSensorDepthCapture->CaptureScene();
@@ -2077,6 +2213,7 @@ void AAutomatedForklift::Tick(float Dt)
 	ProcessOpeningVision();
 	UpdateAutoPickup(Dt);
 	if (!IsAutoPickupMotionActive()) UpdateNavigation(Dt);
+	UpdateSupportedLoadState();
 
 	const bool bAutoMotion = IsAutoPickupMotionActive();
 	// The restored controller still writes the original command fields.  Prefer
@@ -2087,14 +2224,14 @@ void AAutomatedForklift::Tick(float Dt)
 	LastAppliedLiftInput = bAutoMotion ? (!FMath::IsNearlyZero(AutoLiftInput) ? AutoLiftInput : LiftInput) : LiftInput;
 	LastAppliedReachInput = bAutoMotion ? (!FMath::IsNearlyZero(AutoReachInput) ? AutoReachInput : ReachInput) : ReachInput;
 	LastAppliedSideShiftInput = bAutoMotion ? (!FMath::IsNearlyZero(AutoSideShiftInput) ? AutoSideShiftInput : SideShiftInput) : SideShiftInput;
-	const float Speed = LastAppliedDriveInput >= 0.f ? Motion.ForwardSpeedCmPerSec : Motion.ReverseSpeedCmPerSec;
+	const float Speed = (LastAppliedDriveInput >= 0.f ? Motion.ForwardSpeedCmPerSec : Motion.ReverseSpeedCmPerSec) * CurrentDriveSpeedMultiplier;
 	TargetForwardSpeedCmPerSec = LastAppliedDriveInput * Speed;
 
 	const FVector StartLocation = GetActorLocation();
 	FHitResult DriveHit;
 	FVector DriveDelta = GetActorForwardVector() * TargetForwardSpeedCmPerSec * Dt;
 	float EarliestPartHit = 1.f;
-	for (UBoxComponent* Part : {LeftSupportLegCollision.Get(), RightSupportLegCollision.Get()})
+	for (UBoxComponent* Part : {LeftSupportLegCollision.Get(), RightSupportLegCollision.Get(), LeftMastRailCollision.Get(), RightMastRailCollision.Get(), MastTopCrossbarCollision.Get()})
 	{
 		FHitResult PartHit;
 		if (SweepForkliftPart(Part, DriveDelta, TEXT("drive part sweep"), PartHit)) EarliestPartHit = FMath::Min(EarliestPartHit, PartHit.Time);
