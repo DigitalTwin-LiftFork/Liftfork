@@ -15,6 +15,8 @@ class DIGITALTWIN_API APallet : public AActor
 	GENERATED_BODY()
 
 public:
+	UPROPERTY(EditInstanceOnly, BlueprintReadOnly, Category="Pallet")
+	FName PalletId = NAME_None;
 	APallet();
 	virtual void BeginPlay() override;
  virtual void OnConstruction(const FTransform& Transform) override;

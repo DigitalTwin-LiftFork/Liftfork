@@ -29,6 +29,20 @@ void AForkliftPlayerController::ClickAutoPickupButton()
 	float MouseX = 0.f, MouseY = 0.f; int32 ViewX = 0, ViewY = 0;
 	GetViewportSize(ViewX, ViewY);
 	const bool bHasMouse = GetMousePosition(MouseX, MouseY);
+	if (bHasMouse)
+	{
+		const FVector2D MousePosition(MouseX, MouseY);
+		for (int32 Index = 0; Index < AAutomatedForklift::WorkStationCount; ++Index)
+		{
+			if (!AAutomatedForklift::WorkStationButtonRect(ViewY, Index).IsInside(MousePosition)) continue;
+			if (AAutomatedForklift* Forklift = Cast<AAutomatedForklift>(GetPawn()))
+			{
+				if (ActiveWoodPallet) CancelWoodPalletPlacement();
+				Forklift->GoToStation(Index);
+			}
+			return;
+		}
+	}
 		if (bHasMouse && AAutomatedForklift::NavigationButtonRect(ViewY).IsInside(FVector2D(MouseX,MouseY)))
 	{
 		if (AAutomatedForklift* Forklift=Cast<AAutomatedForklift>(GetPawn()))
