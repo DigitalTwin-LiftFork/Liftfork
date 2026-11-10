@@ -426,6 +426,7 @@ private:
 	float LiftCm = 0.f, ReachCm = 0.f, SideShiftCm = 0.f;
 	float TargetForwardSpeedCmPerSec = 0.f, CurrentForwardSpeedCmPerSec = 0.f, DriveDebugElapsed = 0.f;
 	float SupportedLoadKg = 0.f, CurrentDriveSpeedMultiplier = 1.f, ActiveLoadFriction = 0.f;
+	TArray<TWeakObjectPtr<AActor>> SupportedLoadActors;
 	FString ActiveLoadCollisionStatus = TEXT("No supported load");
 	float CameraPitchDeg = -24.f, CameraYawDeg = -35.f, CameraDistanceCm = 700.f;
 	float PalletSensorCaptureElapsed = 0.f;
@@ -583,11 +584,12 @@ private:
 	void SpawnPallet();
 	void InteractWithPallet();
 	bool SweepForkliftPart(UBoxComponent* Component, const FVector& WorldDelta, const TCHAR* Operation, FHitResult& OutHit, const AActor* ExtraIgnoredActor = nullptr);
+	bool SweepForkliftBody(const FVector& WorldDelta, const TCHAR* Operation, FHitResult& OutHit);
 	bool SweepForkPartAgainstFixedObstacle(UBoxComponent* Component, const FVector& WorldDelta, const TCHAR* Operation, FHitResult& OutHit);
 	bool IsForkAxisMotionBlockedByFixedObstacle(const FVector& WorldDelta, const TCHAR* Operation);
 	bool WouldForkRotationHitFixedObstacle(float DeltaYawDegrees) const;
 	bool SweepCarriedPallet(const FVector& WorldDelta, const TCHAR* Operation, FHitResult& OutHit);
-	bool SweepPalletAgainstExternal(APallet* Pallet, const FVector& WorldDelta, const TCHAR* Operation, FHitResult& OutHit);
+	bool SweepLoadAgainstExternal(AActor* LoadActor, const TArray<TObjectPtr<UBoxComponent>>& LoadShapes, const FVector& WorldDelta, const TCHAR* Operation, FHitResult& OutHit);
 	bool IsMovementDeeperIntoInitialOverlap(const FHitResult& Hit, const FVector& WorldDelta) const;
 	void RecordCollision(const TCHAR* Operation, UPrimitiveComponent* SourceComponent, const FHitResult& Hit, const FVector& WorldDelta, bool bBlocked);
 	void DrawCollisionDebug();

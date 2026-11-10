@@ -715,11 +715,25 @@ bool AAutomatedForklift::SweepForkliftPart(UBoxComponent* Component, const FVect
 	if (!Component || WorldDelta.IsNearlyZero()) return false;
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(ForkliftPartSweep), false, this);
 	if (CarriedPallet) Params.AddIgnoredActor(CarriedPallet);
+	for (const TWeakObjectPtr<AActor>& Load : SupportedLoadActors) if (Load.IsValid()) Params.AddIgnoredActor(Load.Get());
 	if (ExtraIgnoredActor) Params.AddIgnoredActor(ExtraIgnoredActor);
 	if (!GetWorld()->SweepSingleByChannel(OutHit, Component->GetComponentLocation(), Component->GetComponentLocation() + WorldDelta,
 		Component->GetComponentQuat(), ECC_WorldDynamic, FCollisionShape::MakeBox(Component->GetScaledBoxExtent()), Params) || !OutHit.bBlockingHit) return false;
 	const bool bBlocked = !OutHit.bStartPenetrating || IsMovementDeeperIntoInitialOverlap(OutHit, WorldDelta);
 	RecordCollision(Operation, Component, OutHit, WorldDelta, bBlocked);
+	return bBlocked;
+}
+
+bool AAutomatedForklift::SweepForkliftBody(const FVector& WorldDelta, const TCHAR* Operation, FHitResult& OutHit)
+{
+	if (!BodyCollision || WorldDelta.IsNearlyZero() || !GetWorld()) return false;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(ForkliftBodySweep), false, this);
+	if (CarriedPallet) Params.AddIgnoredActor(CarriedPallet);
+	for (const TWeakObjectPtr<AActor>& Load : SupportedLoadActors) if (Load.IsValid()) Params.AddIgnoredActor(Load.Get());
+	if (!GetWorld()->SweepSingleByChannel(OutHit, BodyCollision->GetComponentLocation(), BodyCollision->GetComponentLocation() + WorldDelta,
+		BodyCollision->GetComponentQuat(), ECC_Pawn, FCollisionShape::MakeBox(BodyCollision->GetScaledBoxExtent()), Params) || !OutHit.bBlockingHit) return false;
+	const bool bBlocked = !OutHit.bStartPenetrating || IsMovementDeeperIntoInitialOverlap(OutHit, WorldDelta);
+	RecordCollision(Operation, BodyCollision, OutHit, WorldDelta, bBlocked);
 	return bBlocked;
 }
 
@@ -782,23 +796,36 @@ bool AAutomatedForklift::WouldForkRotationHitFixedObstacle(float DeltaYawDegrees
 
 bool AAutomatedForklift::SweepCarriedPallet(const FVector& WorldDelta, const TCHAR* Operation, FHitResult& OutHit)
 {
-	return SweepPalletAgainstExternal(CarriedPallet, WorldDelta, Operation, OutHit);
+	if (CarriedPallet && !SupportedLoadActors.Contains(CarriedPallet) && SweepLoadAgainstExternal(CarriedPallet, CarriedPallet->GetCollisionShapes(), WorldDelta, Operation, OutHit)) return true;
+	for (const TWeakObjectPtr<AActor>& Load : SupportedLoadActors)
+	{
+		AActor* Actor = Load.Get();
+		if (APallet* Pallet = Cast<APallet>(Actor))
+		{
+			if (SweepLoadAgainstExternal(Pallet, Pallet->GetCollisionShapes(), WorldDelta, Operation, OutHit)) return true;
+		}
+		else if (AWoodPallet* WoodPallet = Cast<AWoodPallet>(Actor))
+		{
+			if (SweepLoadAgainstExternal(WoodPallet, WoodPallet->GetCollisionShapes(), WorldDelta, Operation, OutHit)) return true;
+		}
+	}
+	return false;
 }
 
-bool AAutomatedForklift::SweepPalletAgainstExternal(APallet* Pallet, const FVector& WorldDelta, const TCHAR* Operation, FHitResult& OutHit)
+bool AAutomatedForklift::SweepLoadAgainstExternal(AActor* LoadActor, const TArray<TObjectPtr<UBoxComponent>>& LoadShapes, const FVector& WorldDelta, const TCHAR* Operation, FHitResult& OutHit)
 {
-	if (!Pallet || WorldDelta.IsNearlyZero()) return false;
+	if (!LoadActor || WorldDelta.IsNearlyZero()) return false;
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(ForkliftCarriedPalletSweep), false, this);
 	// Actor ignores cover the normal case.  Add every participating component as
 	// well, so another collision component on this forklift or this same pallet
 	// can never be reported as an external carried-load obstacle.
-	Params.AddIgnoredActor(Pallet);
+	Params.AddIgnoredActor(LoadActor);
 	TArray<UPrimitiveComponent*> ForkliftPrimitives;
 	GetComponents<UPrimitiveComponent>(ForkliftPrimitives);
 	for (UPrimitiveComponent* Primitive : ForkliftPrimitives) Params.AddIgnoredComponent(Primitive);
-	for (UBoxComponent* PalletShape : Pallet->GetCollisionShapes()) if (PalletShape) Params.AddIgnoredComponent(PalletShape);
+	for (UBoxComponent* LoadShape : LoadShapes) if (LoadShape) Params.AddIgnoredComponent(LoadShape);
 	FCollisionObjectQueryParams ObjectParams(FCollisionObjectQueryParams::AllObjects);
-	for (UBoxComponent* Shape : Pallet->GetCollisionShapes())
+	for (UBoxComponent* Shape : LoadShapes)
 	{
 		if (!Shape) continue;
 		FHitResult ShapeHit;
@@ -898,6 +925,7 @@ void AAutomatedForklift::InteractWithPallet()
 void AAutomatedForklift::UpdateSupportedLoadState()
 {
 	SupportedLoadKg = 0.f;
+	SupportedLoadActors.Reset();
 	ActiveLoadFriction = 0.f;
 	ActiveLoadCollisionStatus = TEXT("No supported load");
 	if (!GetWorld() || !LeftForkCollision || !RightForkCollision) { CurrentDriveSpeedMultiplier = 1.f; return; }
@@ -917,6 +945,7 @@ void AAutomatedForklift::UpdateSupportedLoadState()
 			&& ForkTopZ <= SupportSurfaceZ + PalletSupportContactToleranceCm + 5.f)
 		{
 			SupportedLoadKg += Pallet->GetConfiguredMassKg();
+			SupportedLoadActors.AddUnique(Pallet);
 			ActiveLoadFriction = FMath::Max(ActiveLoadFriction, Pallet->GetSurfaceFriction());
 			ActiveLoadCollisionStatus = TEXT("Forks supporting pallet");
 		}
@@ -930,6 +959,7 @@ void AAutomatedForklift::UpdateSupportedLoadState()
 		if (Pallet && Pallet->CanSupportFromForks(LeftForkCollision, RightForkCollision, MinimumPalletSupportInsertionCm, PalletSupportContactToleranceCm))
 		{
 			SupportedLoadKg += Pallet->GetConfiguredMassKg();
+			SupportedLoadActors.AddUnique(Pallet);
 			ActiveLoadFriction = FMath::Max(ActiveLoadFriction, Pallet->GetSurfaceFriction());
 			ActiveLoadCollisionStatus = TEXT("Forks supporting wood pallet");
 		}
@@ -2237,6 +2267,8 @@ void AAutomatedForklift::Tick(float Dt)
 		FHitResult PartHit;
 		if (SweepForkliftPart(Part, DriveDelta, TEXT("drive part sweep"), PartHit)) EarliestPartHit = FMath::Min(EarliestPartHit, PartHit.Time);
 	}
+	FHitResult BodySweepHit;
+	if (SweepForkliftBody(DriveDelta, TEXT("body root sweep"), BodySweepHit)) EarliestPartHit = FMath::Min(EarliestPartHit, BodySweepHit.Time);
 	for (UBoxComponent* Tine : {LeftForkCollision.Get(), RightForkCollision.Get()})
 	{
 		FHitResult TineHit;
@@ -2245,8 +2277,8 @@ void AAutomatedForklift::Tick(float Dt)
 	FHitResult CarriedLoadHit;
 	if (SweepCarriedPallet(DriveDelta, TEXT("carried pallet drive sweep"), CarriedLoadHit)) EarliestPartHit = FMath::Min(EarliestPartHit, CarriedLoadHit.Time);
 	if (EarliestPartHit < 1.f) DriveDelta *= FMath::Max(0.f, EarliestPartHit - .01f);
-	AddActorWorldOffset(DriveDelta, true, &DriveHit);
-	if (DriveHit.bBlockingHit) RecordCollision(TEXT("body root sweep"), BodyCollision, DriveHit, DriveDelta, true);
+	DriveHit = BodySweepHit;
+	AddActorWorldOffset(DriveDelta, false);
 	const FVector EndLocation = GetActorLocation();
 	CurrentForwardSpeedCmPerSec = Dt > SMALL_NUMBER ? FVector::DotProduct((EndLocation - StartLocation) / Dt, GetActorForwardVector()) : 0.f;
 	const bool bIsDriving = !FMath::IsNearlyZero(LastAppliedDriveInput);
