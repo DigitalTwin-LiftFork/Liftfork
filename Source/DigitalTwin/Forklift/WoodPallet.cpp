@@ -84,4 +84,33 @@ void AWoodPallet::FinalizePlacement()
 }
 void AWoodPallet::HandleHit(UPrimitiveComponent*, AActor*, UPrimitiveComponent* Other, FVector, const FHitResult& Hit) { LastHit = Hit; LastHitTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f; LastHitOther = Other; }
 bool AWoodPallet::GetRecentForkContact(float MaxAge, UPrimitiveComponent*& OutOther) const { OutOther = nullptr; if (!GetWorld() || GetWorld()->GetTimeSeconds() - LastHitTime > MaxAge) return false; OutOther = LastHitOther.Get(); return OutOther != nullptr; }
+bool AWoodPallet::CanSupportFromForks(const UBoxComponent* LeftTine, const UBoxComponent* RightTine, float MinimumInsertionDepthCm, float ContactToleranceCm) const
+{
+	if (bPlacementPreview || !LeftTine || !RightTine) return false;
+
+	const FTransform PalletTransform = GetActorTransform();
+	const float LowerRunnerTopZ = 1.5f;
+	const float UpperDeckSupportZ = HeightCm() - 1.f;
+	const float OpeningHalfWidth = OpeningWidthCm() * .5f;
+	const float RequiredTipX = -LengthCm() * .5f + FMath::Max(0.f, MinimumInsertionDepthCm);
+	const auto IsSupportedTine = [&](const UBoxComponent* Tine, float OpeningCenterY)
+	{
+		const FVector Extent = Tine->GetScaledBoxExtent();
+		const FTransform TineTransform = Tine->GetComponentTransform();
+		FBox LocalBounds(ForceInit);
+		for (int32 XSign : {-1, 1})
+			for (int32 YSign : {-1, 1})
+				for (int32 ZSign : {-1, 1})
+					LocalBounds += PalletTransform.InverseTransformPosition(TineTransform.TransformPosition(FVector(Extent.X * XSign, Extent.Y * YSign, Extent.Z * ZSign)));
+
+		// Both complete tine sections must remain in their respective openings.
+		if (FMath::Abs(LocalBounds.GetCenter().Y - OpeningCenterY) + LocalBounds.GetExtent().Y > OpeningHalfWidth + ContactToleranceCm) return false;
+		if (LocalBounds.Min.Z < LowerRunnerTopZ - ContactToleranceCm) return false;
+		if (LocalBounds.Max.Z < UpperDeckSupportZ - ContactToleranceCm) return false;
+		return LocalBounds.Max.X >= RequiredTipX;
+	};
+
+	return IsSupportedTine(LeftTine, -OpeningCenterSpacingCm() * .5f)
+		&& IsSupportedTine(RightTine, OpeningCenterSpacingCm() * .5f);
+}
 FString AWoodPallet::GetRecentCollisionStatus() const { return !GetWorld() || GetWorld()->GetTimeSeconds() - LastHitTime > .5f ? TEXT("None") : GetNameSafe(LastHitOther.Get()); }

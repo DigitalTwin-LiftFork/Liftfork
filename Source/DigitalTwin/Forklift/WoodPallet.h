@@ -22,6 +22,8 @@ public:
 	void SetSelectedDebug(bool bSelected) { bSelectedForPlacement = bSelected; }
 	bool IsSelectedDebug() const { return bSelectedForPlacement; }
 	bool GetRecentForkContact(float MaxAge, UPrimitiveComponent*& OutOther) const;
+	/** Stable support test based on tine geometry and the pallet deck support plane. */
+	bool CanSupportFromForks(const UBoxComponent* LeftTine, const UBoxComponent* RightTine, float MinimumInsertionDepthCm, float ContactToleranceCm) const;
 	UPROPERTY(EditAnywhere, Category="Wood pallet|Physics", meta=(ClampMin="1.0")) float MassKg = 45.f;
 	UPROPERTY(EditAnywhere, Category="Wood pallet|Physics", meta=(ClampMin="0.0", ClampMax="2.0")) float SurfaceFriction = .9f;
 	float GetConfiguredMassKg() const { return MassKg; }

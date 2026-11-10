@@ -908,11 +908,15 @@ void AAutomatedForklift::UpdateSupportedLoadState()
 	{
 		APallet* Pallet = *It;
 		FString Reason;
-		if (Pallet && Pallet->CanSupportFromForks(LeftForkCollision, RightForkCollision, MinimumPalletSupportInsertionCm, Reason))
+		const float ForkTopZ = FMath::Min(
+			LeftForkCollision->GetComponentLocation().Z + LeftForkCollision->GetScaledBoxExtent().Z,
+			RightForkCollision->GetComponentLocation().Z + RightForkCollision->GetScaledBoxExtent().Z);
+		if (Pallet && Pallet->CanSupportFromForks(LeftForkCollision, RightForkCollision, MinimumPalletSupportInsertionCm, Reason)
+			&& ForkTopZ >= Pallet->GetForkSupportSurfaceWorldZ() - PalletSupportContactToleranceCm)
 		{
 			SupportedLoadKg += Pallet->GetConfiguredMassKg();
 			ActiveLoadFriction = FMath::Max(ActiveLoadFriction, Pallet->GetSurfaceFriction());
-			ActiveLoadCollisionStatus = Pallet->GetRecentCollisionStatus();
+			ActiveLoadCollisionStatus = TEXT("Forks supporting pallet");
 		}
 	}
 
@@ -921,16 +925,11 @@ void AAutomatedForklift::UpdateSupportedLoadState()
 	for (TActorIterator<AWoodPallet> It(GetWorld()); It; ++It)
 	{
 		AWoodPallet* Pallet = *It;
-		if (!Pallet || Pallet->IsPlacementPreview()) continue;
-		UPrimitiveComponent* Contact = nullptr;
-		const bool bRecentForkContact = Pallet->GetRecentForkContact(.25f, Contact) && (Contact == LeftForkCollision || Contact == RightForkCollision);
-		const FVector Local = ForkCarriage->GetComponentTransform().InverseTransformPosition(Pallet->GetActorLocation());
-		const bool bAboveAndBetweenForks = Local.X > -20.f && Local.X < Dimensions.ForkLengthCm + 35.f && FMath::Abs(Local.Y) < 58.f && Local.Z > -8.f && Local.Z < 45.f;
-		if (bRecentForkContact && bAboveAndBetweenForks)
+		if (Pallet && Pallet->CanSupportFromForks(LeftForkCollision, RightForkCollision, MinimumPalletSupportInsertionCm, PalletSupportContactToleranceCm))
 		{
 			SupportedLoadKg += Pallet->GetConfiguredMassKg();
 			ActiveLoadFriction = FMath::Max(ActiveLoadFriction, Pallet->GetSurfaceFriction());
-			ActiveLoadCollisionStatus = Pallet->GetRecentCollisionStatus();
+			ActiveLoadCollisionStatus = TEXT("Forks supporting wood pallet");
 		}
 	}
 
