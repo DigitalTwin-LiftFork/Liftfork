@@ -928,6 +928,7 @@ void AAutomatedForklift::UpdateSupportedLoadState()
 	SupportedLoadActors.Reset();
 	ActiveLoadFriction = 0.f;
 	ActiveLoadCollisionStatus = TEXT("No supported load");
+	bOverRatedCapacity = false;
 	if (!GetWorld() || !LeftForkCollision || !RightForkCollision) { CurrentDriveSpeedMultiplier = 1.f; return; }
 
 	// APallet has exact opening/insertion validation.  This keeps a nearby pallet
@@ -966,8 +967,92 @@ void AAutomatedForklift::UpdateSupportedLoadState()
 	}
 
 	bIsLoaded = SupportedLoadKg > KINDA_SMALL_NUMBER;
-	const float LoadRatio = FMath::Clamp(SupportedLoadKg / FMath::Max(1.f, Dimensions.RatedLoadKg), 0.f, 1.f);
+	const float RatedCapacityKg = FMath::Max(1.f, Dimensions.RatedLoadKg);
+	const float LoadRatio = FMath::Clamp(SupportedLoadKg / RatedCapacityKg, 0.f, 1.f);
+	bOverRatedCapacity = SupportedLoadKg > RatedCapacityKg + KINDA_SMALL_NUMBER;
 	CurrentDriveSpeedMultiplier = FMath::Lerp(1.f, RatedLoadSpeedMultiplier, LoadRatio);
+	if (bOverRatedCapacity)
+	{
+		CurrentDriveSpeedMultiplier = FMath::Min(CurrentDriveSpeedMultiplier, OverCapacityTravelSpeedMultiplier);
+		ActiveLoadCollisionStatus = FString::Printf(TEXT("OVER CAPACITY: %.0f / %.0f kg — lift/extend blocked"), SupportedLoadKg, RatedCapacityKg);
+		return;
+	}
+
+	if (bIsLoaded)
+	{
+		const float MaximumTravelHeightCm = FMath::Max(LoadedSafeTravelForkHeightCm + 1.f, MaximumForkTopHeightAboveGroundCm);
+		const float HeightRatio = FMath::Clamp(
+			(GetForkTopHeightAboveGroundCm() - LoadedSafeTravelForkHeightCm) /
+			(MaximumTravelHeightCm - LoadedSafeTravelForkHeightCm), 0.f, 1.f);
+		const float ReachRatio = FMath::Clamp(ReachCm / FMath::Max(1.f, Dimensions.ReachTravelCm), 0.f, 1.f);
+		const float HeightSpeedMultiplier = FMath::Lerp(1.f, LoadedTravelSpeedAtMaxLiftMultiplier, HeightRatio);
+		const float ReachSpeedMultiplier = FMath::Lerp(1.f, LoadedTravelSpeedAtFullReachMultiplier, ReachRatio);
+		CurrentDriveSpeedMultiplier = FMath::Min(CurrentDriveSpeedMultiplier, FMath::Min(HeightSpeedMultiplier, ReachSpeedMultiplier));
+	}
+}
+
+float AAutomatedForklift::ComputeStabilitySpeedMultiplier(float LongitudinalAccelerationCmPerSec2, float LateralAccelerationCmPerSec2)
+{
+	bStabilityLimitActive = false;
+	CurrentStabilityMarginCm = 0.f;
+	const float LateralGripLimitCmPerSec2 = FMath::Max(1.f, GroundFrictionCoefficient * 980.f);
+	const float LateralGripMultiplier = FMath::Abs(LateralAccelerationCmPerSec2) > LateralGripLimitCmPerSec2
+		? FMath::Clamp(LateralGripLimitCmPerSec2 / FMath::Abs(LateralAccelerationCmPerSec2), .15f, 1.f)
+		: 1.f;
+	if (!bIsLoaded || !BodyCollision || !GetWorld()) return LateralGripMultiplier;
+
+	FVector WeightedCenter = FVector::ZeroVector;
+	float TotalMassKg = 0.f;
+	auto AddMassAtWorldLocation = [this, &WeightedCenter, &TotalMassKg](float MassKg, const FVector& WorldLocation)
+	{
+		if (MassKg <= KINDA_SMALL_NUMBER) return;
+		const FVector LocalLocation = GetActorTransform().InverseTransformPosition(WorldLocation);
+		WeightedCenter += LocalLocation * MassKg;
+		TotalMassKg += MassKg;
+	};
+	AddMassAtWorldLocation(ChassisMassKg, BodyCollision->GetComponentLocation());
+	if (LiftCarriage) AddMassAtWorldLocation(LiftAssemblyMassKg, LiftCarriage->GetComponentLocation());
+	if (ReachCarriage) AddMassAtWorldLocation(ReachAssemblyMassKg, ReachCarriage->GetComponentLocation());
+	if (ForkCarriage) AddMassAtWorldLocation(ForkCarrierAssemblyMassKg, ForkCarriage->GetComponentLocation());
+	for (const TWeakObjectPtr<AActor>& LoadActor : SupportedLoadActors)
+	{
+		AActor* Actor = LoadActor.Get();
+		if (const APallet* CargoPallet = Cast<APallet>(Actor)) AddMassAtWorldLocation(CargoPallet->GetConfiguredMassKg(), CargoPallet->GetActorLocation());
+		else if (const AWoodPallet* WoodPallet = Cast<AWoodPallet>(Actor)) AddMassAtWorldLocation(WoodPallet->GetConfiguredMassKg(), WoodPallet->GetActorLocation());
+	}
+	if (TotalMassKg <= KINDA_SMALL_NUMBER) return 1.f;
+
+	const FVector Center = WeightedCenter / TotalMassKg;
+	const float CenterHeightAboveGroundCm = FMath::Max(1.f, Center.Z + Dimensions.BodyHeightCm * .5f + 2.f);
+	const FVector2D EffectiveCenter(
+		Center.X - LongitudinalAccelerationCmPerSec2 * CenterHeightAboveGroundCm / 980.f,
+		Center.Y - LateralAccelerationCmPerSec2 * CenterHeightAboveGroundCm / 980.f);
+
+	// The reach truck's drive wheel and two load wheels form a triangular support polygon.
+	const FVector2D RearWheel(Dimensions.DriveWheelXcm, 0.f);
+	const FVector2D FrontLeftWheel(Dimensions.DriveWheelXcm + Dimensions.WheelbaseCm, -Dimensions.LoadWheelLateralOffsetCm);
+	const FVector2D FrontRightWheel(Dimensions.DriveWheelXcm + Dimensions.WheelbaseCm, Dimensions.LoadWheelLateralOffsetCm);
+	auto SignedEdgeDistance = [&EffectiveCenter](const FVector2D& Start, const FVector2D& End)
+	{
+		const FVector2D Edge = End - Start;
+		const FVector2D ToPoint = EffectiveCenter - Start;
+		const float EdgeLength = FMath::Max(1.f, Edge.Size());
+		return (Edge.X * ToPoint.Y - Edge.Y * ToPoint.X) / EdgeLength;
+	};
+	CurrentStabilityMarginCm = FMath::Min(
+		FMath::Min(SignedEdgeDistance(RearWheel, FrontLeftWheel), SignedEdgeDistance(FrontLeftWheel, FrontRightWheel)),
+		SignedEdgeDistance(FrontRightWheel, RearWheel));
+	const float MarginMultiplier = FMath::Clamp(CurrentStabilityMarginCm / FMath::Max(1.f, StabilitySpeedReductionMarginCm), .15f, 1.f);
+	bStabilityLimitActive = CurrentStabilityMarginCm < StabilitySpeedReductionMarginCm || LateralGripMultiplier < .999f;
+	if (!bStabilityLimitActive) return LateralGripMultiplier;
+
+	if (!bOverRatedCapacity)
+	{
+		ActiveLoadCollisionStatus = CurrentStabilityMarginCm <= 0.f
+			? FString::Printf(TEXT("UNSTABLE LOAD: %.1f cm outside support polygon"), -CurrentStabilityMarginCm)
+			: FString::Printf(TEXT("STABILITY LIMIT: %.1f cm margin"), CurrentStabilityMarginCm);
+	}
+	return FMath::Min(MarginMultiplier, LateralGripMultiplier);
 }
 
 void AAutomatedForklift::ApplyKinematicForkControls(float Dt)
@@ -977,6 +1062,11 @@ void AAutomatedForklift::ApplyKinematicForkControls(float Dt)
 	LastAppliedLiftInput = bAuto ? AutoLiftInput : LiftInput;
 	LastAppliedReachInput = bAuto ? AutoReachInput : ReachInput;
 	LastAppliedSideShiftInput = bAuto ? AutoSideShiftInput : SideShiftInput;
+	if (bOverRatedCapacity || (bStabilityLimitActive && CurrentStabilityMarginCm <= 0.f))
+	{
+		if (LastAppliedLiftInput > 0.f) LastAppliedLiftInput = 0.f;
+		if (LastAppliedReachInput > 0.f) LastAppliedReachInput = 0.f;
+	}
 	const float LiftRate = LastAppliedLiftInput >= 0.f ? (bIsLoaded ? Motion.LoadedLiftSpeedCmPerSec : Motion.UnloadedLiftSpeedCmPerSec) : (bIsLoaded ? Motion.LoadedLowerSpeedCmPerSec : Motion.UnloadedLowerSpeedCmPerSec);
 	float DesiredLift = FMath::Clamp(LiftCm + LastAppliedLiftInput * LiftRate * Dt, 0.f, RequiredLiftStrokeCm);
 	float DesiredReach = FMath::Clamp(ReachCm + LastAppliedReachInput * Motion.ReachSpeedCmPerSec * Dt, 0.f, Dimensions.ReachTravelCm);
@@ -992,7 +1082,7 @@ void AAutomatedForklift::ApplyKinematicForkControls(float Dt)
 	ReachCarriage->SetRelativeLocation(FVector(ReachCm, 0.f, 0.f));
 	ForkCarriage->SetRelativeLocation(FVector(0.f, SideShiftCm, 0.f));
 	UpdateMastVisuals(LiftCm);
-	ActuatorDebugStatus = FString::Printf(TEXT("KINEMATIC | ForkTop %.1f / %.1fcm | E/Q %.1f | R/F %.1f / %.1f | Z/C %.1f"), GetForkTopHeightAboveGroundCm(), MaximumForkTopHeightAboveGroundCm, LiftCm, ReachCm, Dimensions.ReachTravelCm, SideShiftCm);
+	ActuatorDebugStatus = FString::Printf(TEXT("KINEMATIC | ForkTop %.1f / %.1fcm | E/Q %.1f | R/F %.1f / %.1f | Z/C %.1f%s%s"), GetForkTopHeightAboveGroundCm(), MaximumForkTopHeightAboveGroundCm, LiftCm, ReachCm, Dimensions.ReachTravelCm, SideShiftCm, bOverRatedCapacity ? TEXT(" | OVER CAPACITY: lift/reach out locked") : TEXT(""), bStabilityLimitActive ? *FString::Printf(TEXT(" | stability margin %.1fcm"), CurrentStabilityMarginCm) : TEXT(""));
 }
 
 FString AAutomatedForklift::AutoPickupStateToString(EAutoPickupState State)
@@ -2256,11 +2346,34 @@ void AAutomatedForklift::Tick(float Dt)
 	LastAppliedReachInput = bAutoMotion ? (!FMath::IsNearlyZero(AutoReachInput) ? AutoReachInput : ReachInput) : ReachInput;
 	LastAppliedSideShiftInput = bAutoMotion ? (!FMath::IsNearlyZero(AutoSideShiftInput) ? AutoSideShiftInput : SideShiftInput) : SideShiftInput;
 	const float Speed = (LastAppliedDriveInput >= 0.f ? Motion.ForwardSpeedCmPerSec : Motion.ReverseSpeedCmPerSec) * CurrentDriveSpeedMultiplier;
-	TargetForwardSpeedCmPerSec = LastAppliedDriveInput * Speed;
+	const float RequestedSpeedCmPerSec = LastAppliedDriveInput * Speed;
+	const float PreviousForwardSpeedCmPerSec = CurrentForwardSpeedCmPerSec;
+	const float GripAccelerationLimitCmPerSec2 = FMath::Max(1.f, GroundFrictionCoefficient * 980.f);
+	const bool bDirectionChange = RequestedSpeedCmPerSec * PreviousForwardSpeedCmPerSec < 0.f;
+	const bool bBrakingOrReversing = FMath::Abs(RequestedSpeedCmPerSec) < FMath::Abs(PreviousForwardSpeedCmPerSec) || bDirectionChange;
+	const float IntegrationTargetSpeedCmPerSec = bDirectionChange ? 0.f : RequestedSpeedCmPerSec;
+	const float AccelerationLimitCmPerSec2 = FMath::Min(
+		bBrakingOrReversing ? BrakeDecelerationCmPerSec2 : (bIsLoaded ? LoadedAccelerationCmPerSec2 : UnloadedAccelerationCmPerSec2),
+		GripAccelerationLimitCmPerSec2);
+	float CandidateSpeedCmPerSec = FMath::FInterpConstantTo(PreviousForwardSpeedCmPerSec, IntegrationTargetSpeedCmPerSec, Dt, AccelerationLimitCmPerSec2);
+	const float LongitudinalAccelerationCmPerSec2 = Dt > SMALL_NUMBER ? (CandidateSpeedCmPerSec - PreviousForwardSpeedCmPerSec) / Dt : 0.f;
+	const float WheelbaseCm = FMath::Max(1.f, Dimensions.WheelbaseCm);
+	const float MaxSteerAngleRad = FMath::Atan(WheelbaseCm / FMath::Max(1.f, Motion.AutoFrontTurningRadiusCm));
+	const float CandidateSteerAngleRad = LastAppliedSteerInput * MaxSteerAngleRad;
+	float CandidateYawRateRadPerSec = CandidateSpeedCmPerSec / WheelbaseCm * FMath::Tan(CandidateSteerAngleRad);
+	const float MaxYawRateRadPerSec = FMath::DegreesToRadians(Motion.SteeringRateDegPerSec);
+	CandidateYawRateRadPerSec = FMath::Clamp(CandidateYawRateRadPerSec, -MaxYawRateRadPerSec, MaxYawRateRadPerSec);
+	const float StabilityMultiplier = ComputeStabilitySpeedMultiplier(LongitudinalAccelerationCmPerSec2, CandidateSpeedCmPerSec * CandidateYawRateRadPerSec);
+	CurrentDriveSpeedMultiplier = FMath::Min(CurrentDriveSpeedMultiplier, StabilityMultiplier);
+	const bool bOutsideSupportPolygon = bStabilityLimitActive && CurrentStabilityMarginCm <= 0.f;
+	if (bOutsideSupportPolygon) LastAppliedSteerInput = 0.f;
+	TargetForwardSpeedCmPerSec = (bDirectionChange || bOutsideSupportPolygon) ? 0.f : RequestedSpeedCmPerSec * StabilityMultiplier;
+	const float FinalAccelerationLimit = bOutsideSupportPolygon ? FMath::Min(BrakeDecelerationCmPerSec2, GripAccelerationLimitCmPerSec2) : AccelerationLimitCmPerSec2;
+	CurrentForwardSpeedCmPerSec = FMath::FInterpConstantTo(PreviousForwardSpeedCmPerSec, TargetForwardSpeedCmPerSec, Dt, FinalAccelerationLimit);
 
 	const FVector StartLocation = GetActorLocation();
 	FHitResult DriveHit;
-	FVector DriveDelta = GetActorForwardVector() * TargetForwardSpeedCmPerSec * Dt;
+	FVector DriveDelta = GetActorForwardVector() * CurrentForwardSpeedCmPerSec * Dt;
 	float EarliestPartHit = 1.f;
 	for (UBoxComponent* Part : {LeftSupportLegCollision.Get(), RightSupportLegCollision.Get(), LeftMastRailCollision.Get(), RightMastRailCollision.Get(), MastTopCrossbarCollision.Get()})
 	{
@@ -2285,7 +2398,11 @@ void AAutomatedForklift::Tick(float Dt)
 	if (bIsDriving && !bWasDriving) LogInitialDriveOverlaps();
 	if (bIsDriving) EmitDriveDiagnostic(StartLocation, EndLocation, DriveHit);
 	bWasDriving = bIsDriving;
-	const float YawDelta = LastAppliedSteerInput * Motion.SteeringRateDegPerSec * Dt;
+	const float ActualSteerAngleRad = LastAppliedSteerInput * MaxSteerAngleRad;
+	float TargetYawRateDegPerSec = FMath::RadiansToDegrees(CurrentForwardSpeedCmPerSec / WheelbaseCm * FMath::Tan(ActualSteerAngleRad));
+	TargetYawRateDegPerSec = FMath::Clamp(TargetYawRateDegPerSec, -Motion.SteeringRateDegPerSec, Motion.SteeringRateDegPerSec);
+	CurrentYawRateDegPerSec = FMath::FInterpConstantTo(CurrentYawRateDegPerSec, TargetYawRateDegPerSec, Dt, SteeringAccelerationDegPerSec2);
+	const float YawDelta = CurrentYawRateDegPerSec * Dt;
 	LastAutoYawDeltaDeg = bAutoMotion ? YawDelta : 0.f;
 	if (bAutoMotion) AutoApproachAccumulatedYawDeg += YawDelta;
 	if (!WouldForkRotationHitFixedObstacle(YawDelta)) AddActorWorldRotation(FRotator(0.f, YawDelta, 0.f));

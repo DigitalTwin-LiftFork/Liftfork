@@ -139,6 +139,22 @@ public:
 	UPROPERTY(EditAnywhere, Category="R16 HD") bool bIsLoaded = false;
 	/** The speed multiplier at RatedLoadKg.  Load is measured from the C++ Chaos pallet actors on the forks. */
 	UPROPERTY(EditAnywhere, Category="Load response", meta=(ClampMin="0.2", ClampMax="1.0")) float RatedLoadSpeedMultiplier = .72f;
+	/** Simulation safety tuning: reduce travel speed as a supported load is raised or reached out. */
+	UPROPERTY(EditAnywhere, Category="Load safety", meta=(ClampMin="0.0")) float LoadedSafeTravelForkHeightCm = 45.f;
+	UPROPERTY(EditAnywhere, Category="Load safety", meta=(ClampMin="0.2", ClampMax="1.0")) float LoadedTravelSpeedAtMaxLiftMultiplier = .4f;
+	UPROPERTY(EditAnywhere, Category="Load safety", meta=(ClampMin="0.2", ClampMax="1.0")) float LoadedTravelSpeedAtFullReachMultiplier = .6f;
+	/** Over-capacity loads can still be lowered/retracted, but cannot be lifted or extended farther. */
+	UPROPERTY(EditAnywhere, Category="Load safety", meta=(ClampMin="0.1", ClampMax="1.0")) float OverCapacityTravelSpeedMultiplier = .25f;
+	UPROPERTY(VisibleAnywhere, Category="Load safety") bool bOverRatedCapacity = false;
+	/** Approximate planar chassis physics. Values are simulation tuning, not vehicle certification data. */
+	UPROPERTY(EditAnywhere, Category="Chassis physics", meta=(ClampMin="1.0")) float UnloadedAccelerationCmPerSec2 = 140.f;
+	UPROPERTY(EditAnywhere, Category="Chassis physics", meta=(ClampMin="1.0")) float LoadedAccelerationCmPerSec2 = 90.f;
+	UPROPERTY(EditAnywhere, Category="Chassis physics", meta=(ClampMin="1.0")) float BrakeDecelerationCmPerSec2 = 220.f;
+	UPROPERTY(EditAnywhere, Category="Chassis physics", meta=(ClampMin="1.0")) float SteeringAccelerationDegPerSec2 = 180.f;
+	UPROPERTY(EditAnywhere, Category="Chassis physics", meta=(ClampMin="0.1", ClampMax="1.5")) float GroundFrictionCoefficient = .7f;
+	UPROPERTY(EditAnywhere, Category="Stability", meta=(ClampMin="1.0")) float StabilitySpeedReductionMarginCm = 20.f;
+	UPROPERTY(VisibleAnywhere, Category="Stability") float CurrentStabilityMarginCm = 0.f;
+	UPROPERTY(VisibleAnywhere, Category="Stability") bool bStabilityLimitActive = false;
 	UPROPERTY(EditAnywhere, Category="Drive debug") bool bEnableDriveDebug = false;
 	UPROPERTY(EditAnywhere, Category="Drive debug", meta=(ClampMin="0.05")) float DriveDebugIntervalSeconds = 0.25f;
 	UPROPERTY(EditAnywhere, Category="Drive debug") bool bDrawDriveDebug = false;
@@ -324,6 +340,9 @@ public:
 	virtual void BeginPlay() override;
 	UTextureRenderTarget2D* GetPalletSensorRenderTarget() const { return PalletSensorRenderTarget; }
 	float GetSupportedLoadKg() const { return SupportedLoadKg; }
+	bool IsOverRatedCapacity() const { return bOverRatedCapacity; }
+	float GetCurrentStabilityMarginCm() const { return CurrentStabilityMarginCm; }
+	bool IsStabilityLimitActive() const { return bStabilityLimitActive; }
 	float GetCurrentDriveSpeedMultiplier() const { return CurrentDriveSpeedMultiplier; }
 	float GetActiveLoadFriction() const { return ActiveLoadFriction; }
 	float GetTargetForwardSpeedCmPerSec() const { return TargetForwardSpeedCmPerSec; }
@@ -424,7 +443,7 @@ private:
 	float AutoDriveInput = 0.f, AutoSteerInput = 0.f, AutoLiftInput = 0.f, AutoReachInput = 0.f, AutoSideShiftInput = 0.f;
 	float LastAppliedDriveInput = 0.f, LastAppliedSteerInput = 0.f, LastAppliedLiftInput = 0.f, LastAppliedReachInput = 0.f, LastAppliedSideShiftInput = 0.f;
 	float LiftCm = 0.f, ReachCm = 0.f, SideShiftCm = 0.f;
-	float TargetForwardSpeedCmPerSec = 0.f, CurrentForwardSpeedCmPerSec = 0.f, DriveDebugElapsed = 0.f;
+	float TargetForwardSpeedCmPerSec = 0.f, CurrentForwardSpeedCmPerSec = 0.f, CurrentYawRateDegPerSec = 0.f, DriveDebugElapsed = 0.f;
 	float SupportedLoadKg = 0.f, CurrentDriveSpeedMultiplier = 1.f, ActiveLoadFriction = 0.f;
 	TArray<TWeakObjectPtr<AActor>> SupportedLoadActors;
 	FString ActiveLoadCollisionStatus = TEXT("No supported load");
@@ -574,6 +593,7 @@ private:
 	void ConfigureKinematicForkMechanism();
 	void ApplyKinematicForkControls(float DeltaSeconds);
 	void UpdateSupportedLoadState();
+	float ComputeStabilitySpeedMultiplier(float LongitudinalAccelerationCmPerSec2, float LateralAccelerationCmPerSec2);
 	void SetConstraintFramesAtPose(UPhysicsConstraintComponent* Constraint, UPrimitiveComponent* Body1, UPrimitiveComponent* Body2, const FTransform& JointWorld, const FVector& Frame2Offset);
 	FVector GetConstraintFrameDelta(const UPhysicsConstraintComponent* Constraint, const UPrimitiveComponent* Body1, const UPrimitiveComponent* Body2) const;
 	float GetForkTopHeightAboveGroundCm() const;
