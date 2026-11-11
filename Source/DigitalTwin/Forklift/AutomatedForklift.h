@@ -467,6 +467,8 @@ private:
 	enum class ETransportPhase : uint8 { None, Raise, Lower, Settle, Retract, BackOut };
 	ETransportPhase TransportPhase = ETransportPhase::None;
 	bool bTransportHeightAdjusted = false;
+	bool bTransportPickupContactPending = false;
+	float TransportPickupRetryAt = 0.f;
 	float TransportPhaseElapsed = 0.f;
 	FVector TransportBackOutStart = FVector::ZeroVector;
 	float TransportBackOutTargetCm = 200.f;
@@ -476,6 +478,7 @@ private:
 	void UpdateTransportAutomation(float Dt);
 	void BeginTransportUnload(int32 StationIndex);
 	bool IsSupportedLoadFullyInserted() const;
+	bool IsGroundPalletReadyForLift() const;
 	float TargetForwardSpeedCmPerSec = 0.f, CurrentForwardSpeedCmPerSec = 0.f, DriveDebugElapsed = 0.f;
 	float SupportedLoadKg = 0.f, CurrentDriveSpeedMultiplier = 1.f, ActiveLoadFriction = 0.f;
 	TArray<TWeakObjectPtr<AActor>> SupportedLoadActors;

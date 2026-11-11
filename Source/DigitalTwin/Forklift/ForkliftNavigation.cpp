@@ -59,17 +59,36 @@ void AAutomatedForklift::UpdateTransportAutomation(float Dt)
 {
  const bool bSupported = bIsLoaded && !SupportedLoadActors.IsEmpty();
  if (!bSupported && TransportPhase == ETransportPhase::None) bTransportHeightAdjusted = false;
- if (TransportPhase == ETransportPhase::None && bSupported && !bTransportHeightAdjusted && !IsAutoPickupMotionActive() &&
-     FMath::IsNearlyZero(LiftInput) && IsSupportedLoadFullyInserted())
+ if (TransportPhase == ETransportPhase::None && !bTransportHeightAdjusted && !IsAutoPickupMotionActive() &&
+     !bNavigationActive && FMath::IsNearlyZero(LiftInput) &&
+     GetWorld()->GetTimeSeconds() >= TransportPickupRetryAt &&
+     ((bSupported && IsSupportedLoadFullyInserted()) || (!bSupported && IsGroundPalletReadyForLift())))
  {
+  bTransportPickupContactPending = !bSupported;
   TransportPhase = ETransportPhase::Raise;
   TransportPhaseElapsed = 0.f;
+  NavigationStatus = bTransportPickupContactPending ? TEXT("포크 완전 삽입 확인: 자동 인양 시작") : TEXT("운반 높이 조절 시작");
  }
  if (TransportPhase == ETransportPhase::None) return;
  TransportPhaseElapsed += Dt;
  DriveInput = SteerInput = LiftInput = ReachInput = SideShiftInput = 0.f;
  if (TransportPhase == ETransportPhase::Raise)
  {
+  if (bSupported) bTransportPickupContactPending = false;
+  if (bTransportPickupContactPending && !bSupported)
+  {
+   if (LiftCm >= 12.f || TransportPhaseElapsed > 3.f)
+   {
+    TransportPhase = ETransportPhase::None;
+    bTransportPickupContactPending = false;
+    TransportPickupRetryAt = GetWorld()->GetTimeSeconds() + 3.f;
+    NavigationStatus = TEXT("자동 인양 중지: 팔레트 지지 확인 실패 — 포크 위치 확인 필요");
+    return;
+   }
+   LiftInput = 0.35f;
+   NavigationStatus = FString::Printf(TEXT("완전 삽입 확인: 팔레트 접촉 인양 %.1fcm"), LiftCm);
+   return;
+  }
   if (!bSupported) { TransportPhase = ETransportPhase::None; bTransportHeightAdjusted = true; NavigationStatus = TEXT("운반 높이 조절 중지: 적재가 감지되지 않음"); return; }
   const float Difference = 25.f - LiftCm;
   if (FMath::Abs(Difference) <= 1.f) { TransportPhase = ETransportPhase::None; bTransportHeightAdjusted = true; NavigationStatus = TEXT("팔레트 운반 높이 25cm 준비 완료"); return; }

@@ -1062,6 +1062,43 @@ bool AAutomatedForklift::IsSupportedLoadFullyInserted() const
  }
  return true;
 }
+bool AAutomatedForklift::IsGroundPalletReadyForLift() const
+{
+ if (!GetWorld() || !LeftForkCollision || !RightForkCollision || !BodyCollision) return false;
+ const float FloorZ = GetActorLocation().Z - BodyCollision->GetScaledBoxExtent().Z;
+ const float ForkTopZ = FMath::Min(
+  LeftForkCollision->GetComponentLocation().Z + LeftForkCollision->GetScaledBoxExtent().Z,
+  RightForkCollision->GetComponentLocation().Z + RightForkCollision->GetScaledBoxExtent().Z);
+ const auto TipsReachBack = [this](const AActor* Pallet, float Depth)
+ {
+  const float Direction = FVector::DotProduct(GetActorForwardVector(), Pallet->GetActorForwardVector()) >= 0.f ? 1.f : -1.f;
+  for (const UBoxComponent* Tine : {LeftForkCollision.Get(), RightForkCollision.Get()})
+  {
+   const FVector Tip = Tine->GetComponentTransform().TransformPosition(FVector(Tine->GetScaledBoxExtent().X, 0.f, 0.f));
+   if (Pallet->GetActorTransform().InverseTransformPosition(Tip).X * Direction < Depth * .5f - 15.f) return false;
+  }
+  return true;
+ };
+ for (TActorIterator<APallet> It(GetWorld()); It; ++It)
+ {
+  const APallet* Pallet = *It;
+  if (Pallet->GetActorLocation().Z > FloorZ + 20.f) continue;
+  FString Reason;
+  if (Pallet->CanAcceptForkTines(LeftForkCollision, RightForkCollision) &&
+      Pallet->CanSupportFromForks(LeftForkCollision, RightForkCollision, 82.5f, Reason) &&
+      TipsReachBack(Pallet, 110.f) &&
+      Pallet->GetForkSupportSurfaceWorldZ() - ForkTopZ >= -2.f &&
+      Pallet->GetForkSupportSurfaceWorldZ() - ForkTopZ <= 9.f) return true;
+ }
+ for (TActorIterator<AWoodPallet> It(GetWorld()); It; ++It)
+ {
+  const AWoodPallet* Pallet = *It;
+  if (Pallet->IsPlacementPreview() || Pallet->GetActorLocation().Z > FloorZ + 20.f) continue;
+  if (Pallet->CanSupportFromForks(LeftForkCollision, RightForkCollision, 75.f, 7.f) &&
+      TipsReachBack(Pallet, AWoodPallet::LengthCm())) return true;
+ }
+ return false;
+}
 void AAutomatedForklift::ApplyKinematicForkControls(float Dt)
 {
 
