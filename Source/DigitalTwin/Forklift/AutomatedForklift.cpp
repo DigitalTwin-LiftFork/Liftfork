@@ -963,6 +963,16 @@ void AAutomatedForklift::UpdateSupportedLoadState()
 	const FBox LeftBounds = LocalBounds(LeftForkCollision);
 	const FBox RightBounds = LocalBounds(RightForkCollision);
 	const double FloorZ = GetActorLocation().Z - BodyCollision->GetScaledBoxExtent().Z;
+	const auto IsPalletOffFloor = [FloorZ](const AActor* Pallet)
+	{
+		if (!Pallet) return false;
+		TInlineComponentArray<UBoxComponent*> Shapes;
+		Pallet->GetComponents(Shapes);
+		double Bottom = TNumericLimits<double>::Max();
+		for (const UBoxComponent* Shape : Shapes)
+			if (Shape->IsQueryCollisionEnabled()) Bottom = FMath::Min(Bottom, Shape->Bounds.GetBox().Min.Z);
+		return Bottom > FloorZ + 2.0;
+	};
 	const auto IsRestingOnBothForks = [&](const AActor* Pallet)
 	{
 		if (LiftCm < 2.f) return false;
@@ -998,7 +1008,7 @@ void AAutomatedForklift::UpdateSupportedLoadState()
 			LeftForkCollision->GetComponentLocation().Z + LeftForkCollision->GetScaledBoxExtent().Z,
 			RightForkCollision->GetComponentLocation().Z + RightForkCollision->GetScaledBoxExtent().Z);
 		const float SupportSurfaceZ = Pallet ? Pallet->GetForkSupportSurfaceWorldZ() : 0.f;
-		if (Pallet && ((Pallet->CanSupportFromForks(LeftForkCollision, RightForkCollision, MinimumPalletSupportInsertionCm, Reason)
+		if (Pallet && LiftCm >= 2.f && IsPalletOffFloor(Pallet) && ((Pallet->CanSupportFromForks(LeftForkCollision, RightForkCollision, MinimumPalletSupportInsertionCm, Reason)
 			&& ForkTopZ >= SupportSurfaceZ - PalletSupportContactToleranceCm
 			&& ForkTopZ <= SupportSurfaceZ + PalletSupportContactToleranceCm + 5.f) || IsRestingOnBothForks(Pallet)))
 		{
@@ -1014,7 +1024,7 @@ void AAutomatedForklift::UpdateSupportedLoadState()
 	for (TActorIterator<AWoodPallet> It(GetWorld()); It; ++It)
 	{
 		AWoodPallet* Pallet = *It;
-		if (Pallet && !Pallet->IsPlacementPreview() && (Pallet->CanSupportFromForks(LeftForkCollision, RightForkCollision, MinimumPalletSupportInsertionCm, PalletSupportContactToleranceCm) || IsRestingOnBothForks(Pallet)))
+		if (Pallet && !Pallet->IsPlacementPreview() && LiftCm >= 2.f && IsPalletOffFloor(Pallet) && (Pallet->CanSupportFromForks(LeftForkCollision, RightForkCollision, MinimumPalletSupportInsertionCm, PalletSupportContactToleranceCm) || IsRestingOnBothForks(Pallet)))
 		{
 			SupportedLoadKg += Pallet->GetConfiguredMassKg();
 			SupportedLoadActors.AddUnique(Pallet);
@@ -1024,10 +1034,34 @@ void AAutomatedForklift::UpdateSupportedLoadState()
 	}
 
 	bIsLoaded = SupportedLoadKg > KINDA_SMALL_NUMBER;
-	const float LoadRatio = FMath::Clamp(SupportedLoadKg / FMath::Max(1.f, Dimensions.RatedLoadKg), 0.f, 1.f);
-	CurrentDriveSpeedMultiplier = FMath::Lerp(1.f, RatedLoadSpeedMultiplier, LoadRatio);
+	CurrentDriveSpeedMultiplier = 1.f;
 }
 
+bool AAutomatedForklift::IsSupportedLoadFullyInserted() const
+{
+ if (!LeftForkCollision || !RightForkCollision || SupportedLoadActors.IsEmpty()) return false;
+ for (const TWeakObjectPtr<AActor>& Load : SupportedLoadActors)
+ {
+  const AActor* Pallet = Load.Get();
+  if (!Pallet) return false;
+  const APallet* Standard = Cast<APallet>(Pallet);
+  const AWoodPallet* Wood = Cast<AWoodPallet>(Pallet);
+  if (!Standard && !Wood) return false;
+  const float Depth = Wood ? AWoodPallet::LengthCm() : 110.f;
+  const float MinimumOverlap = Depth * .75f;
+  FString Reason;
+  if (Standard && !Standard->CanSupportFromForks(LeftForkCollision, RightForkCollision, MinimumOverlap, Reason)) return false;
+  if (Wood && !Wood->CanSupportFromForks(LeftForkCollision, RightForkCollision, MinimumOverlap, PalletSupportContactToleranceCm)) return false;
+  const float Direction = FVector::DotProduct(GetActorForwardVector(), Pallet->GetActorForwardVector()) >= 0.f ? 1.f : -1.f;
+  for (const UBoxComponent* Tine : {LeftForkCollision.Get(), RightForkCollision.Get()})
+  {
+   const FVector TipWorld = Tine->GetComponentTransform().TransformPosition(FVector(Tine->GetScaledBoxExtent().X, 0.f, 0.f));
+   const float TipX = Pallet->GetActorTransform().InverseTransformPosition(TipWorld).X * Direction;
+   if (TipX < Depth * .5f - 15.f) return false;
+  }
+ }
+ return true;
+}
 void AAutomatedForklift::ApplyKinematicForkControls(float Dt)
 {
 
@@ -2302,7 +2336,8 @@ void AAutomatedForklift::Tick(float Dt)
 	ProcessOpeningVision();
 	UpdateAutoPickup(Dt);
 	UpdateSupportedLoadState();
-	if (!IsAutoPickupMotionActive()) UpdateNavigation(Dt);
+	UpdateTransportAutomation(Dt);
+	if (!IsAutoPickupMotionActive() && TransportPhase == ETransportPhase::None) UpdateNavigation(Dt);
 
 	const bool bAutoMotion = IsAutoPickupMotionActive();
 	// The restored controller still writes the original command fields.  Prefer

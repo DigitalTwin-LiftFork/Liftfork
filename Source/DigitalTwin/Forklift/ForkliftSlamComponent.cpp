@@ -206,7 +206,20 @@ void UForkliftSlamComponent::ProcessScan()
 		Confidence = 1.f;
 	}
 	// Never corrupt the map using a rejected pose.
-	if (!bPoseAccepted) return;
+	if (!bPoseAccepted)
+	{
+		// A long run of rejected scans cannot recover against a map left behind
+		// by manual driving. Re-seed from the next complete revolution, as B does.
+		if (ConsecutiveRejectedScans >= 8 && Scan.TimestampSeconds - LastAcceptedScan > 2.5 &&
+			ScanCount - LastAutoResetScanCount >= 20)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("SLAM auto reset after %d rejected scans (match %.1f%%)"), ConsecutiveRejectedScans, Confidence * 100.f);
+			ResetMap();
+			LastAutoResetScanCount = ScanCount;
+			Status = TEXT("정합 실패: 지도 자동 초기화 후 재스캔 중");
+		}
+		return;
+	}
 	PendingYaw = 0.f;
 	// Separate localization landmarks from the traversability map.
 	// Only accepted poses may insert either type of evidence.

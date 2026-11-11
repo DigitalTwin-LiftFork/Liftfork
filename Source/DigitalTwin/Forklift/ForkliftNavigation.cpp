@@ -8,7 +8,6 @@
 #include "Engine/StaticMeshActor.h"
 #include "Forklift/Pallet.h"
 
-
 namespace
 {
 	FVector2D NavRotate(FVector2D P, float A)
@@ -25,13 +24,130 @@ namespace
 	}
 }
 
+FVector2D AAutomatedForklift::GetNavigationMapPose() const
+{
+ const auto* S = FindComponentByClass<UForkliftSlamComponent>();
+ if (!S || !NavigationSensor) return FVector2D::ZeroVector;
+ if (bUsingFactoryOdometry && FactoryPoseGeneration == S->GetMapGeneration())
+ {
+  const FVector2D WorldPosition(GetActorLocation().X, GetActorLocation().Y);
+  return NavRotate(WorldPosition - FactoryMapOriginInWorld, -FactoryMapToWorldYaw);
+ }
+ return BodyPose(S, NavigationSensor);
+}
+
+float AAutomatedForklift::GetNavigationMapHeading() const
+{
+ const auto* S = FindComponentByClass<UForkliftSlamComponent>();
+ return S ? GetNavigationHeading(*S) : 0.f;
+}
+
+void AAutomatedForklift::BeginTransportUnload(int32 StationIndex)
+{
+ if (!bIsLoaded || SupportedLoadActors.IsEmpty()) return;
+ TransportStation = StationIndex;
+ TransportBackOutTargetCm = 200.f;
+ bNavigationEscapeBackOut = false;
+ TransportPhase = ETransportPhase::Lower;
+ TransportPhaseElapsed = 0.f;
+ DriveInput = SteerInput = ReachInput = SideShiftInput = 0.f;
+ NavigationStatus = TEXT("도착: 팔레트를 바닥에 내려놓는 중");
+ UE_LOG(LogTemp, Log, TEXT("Transport unload started at station %d, lift %.1f cm"), StationIndex, LiftCm);
+}
+
+void AAutomatedForklift::UpdateTransportAutomation(float Dt)
+{
+ const bool bSupported = bIsLoaded && !SupportedLoadActors.IsEmpty();
+ if (!bSupported && TransportPhase == ETransportPhase::None) bTransportHeightAdjusted = false;
+ if (TransportPhase == ETransportPhase::None && bSupported && !bTransportHeightAdjusted && !IsAutoPickupMotionActive() &&
+     FMath::IsNearlyZero(LiftInput) && IsSupportedLoadFullyInserted())
+ {
+  TransportPhase = ETransportPhase::Raise;
+  TransportPhaseElapsed = 0.f;
+ }
+ if (TransportPhase == ETransportPhase::None) return;
+ TransportPhaseElapsed += Dt;
+ DriveInput = SteerInput = LiftInput = ReachInput = SideShiftInput = 0.f;
+ if (TransportPhase == ETransportPhase::Raise)
+ {
+  if (!bSupported) { TransportPhase = ETransportPhase::None; bTransportHeightAdjusted = true; NavigationStatus = TEXT("운반 높이 조절 중지: 적재가 감지되지 않음"); return; }
+  const float Difference = 25.f - LiftCm;
+  if (FMath::Abs(Difference) <= 1.f) { TransportPhase = ETransportPhase::None; bTransportHeightAdjusted = true; NavigationStatus = TEXT("팔레트 운반 높이 25cm 준비 완료"); return; }
+  if (TransportPhaseElapsed > 8.f) { TransportPhase = ETransportPhase::None; bTransportHeightAdjusted = true; NavigationStatus = TEXT("운반 높이 조절 실패: 포크 이동이 막힘"); return; }
+  LiftInput = FMath::Sign(Difference) * FMath::Min(1.f, FMath::Abs(Difference) / FMath::Max(1.f, Motion.LoadedLiftSpeedCmPerSec * Dt));
+  NavigationStatus = FString::Printf(TEXT("적재 감지: 운반 높이 25cm 조절 중 (현재 %.1fcm)"), LiftCm);
+  return;
+ }
+ if (TransportPhase == ETransportPhase::Lower)
+ {
+  if (LiftCm > 1.f)
+  {
+   if (TransportPhaseElapsed > 15.f) { TransportPhase = ETransportPhase::None; NavigationStatus = TEXT("하역 중지: 포크 하강이 막힘"); return; }
+   LiftInput = -1.f;
+   NavigationStatus = FString::Printf(TEXT("팔레트 하역: 포크 하강 %.1fcm"), LiftCm);
+   return;
+  }
+  TransportPhase = ETransportPhase::Settle;
+  TransportPhaseElapsed = 0.f;
+ }
+ if (TransportPhase == ETransportPhase::Settle)
+ {
+  if (TransportPhaseElapsed < .5f) { NavigationStatus = TEXT("팔레트 하역: 바닥 안착 확인 중"); return; }
+  if (bSupported) { TransportPhase = ETransportPhase::None; NavigationStatus = TEXT("하역 중지: 팔레트가 아직 포크에 지지됨 — 수동 확인 필요"); return; }
+  TransportPhase = ETransportPhase::Retract;
+  TransportPhaseElapsed = 0.f;
+ }
+ if (TransportPhase == ETransportPhase::Retract)
+ {
+  if (ReachCm > 1.f)
+  {
+   if (TransportPhaseElapsed > 8.f) { TransportPhase = ETransportPhase::None; NavigationStatus = TEXT("하역 중지: 리치 복귀가 막힘"); return; }
+   ReachInput = -1.f;
+   NavigationStatus = TEXT("팔레트 하역: 리치 복귀 중");
+   return;
+  }
+  TransportPhase = ETransportPhase::BackOut;
+  TransportPhaseElapsed = 0.f;
+  TransportBackOutStart = GetActorLocation();
+ }
+ if (TransportPhase == ETransportPhase::BackOut)
+ {
+  const float BackedCm = FVector::DotProduct(TransportBackOutStart - GetActorLocation(), GetActorForwardVector());
+  if (BackedCm >= TransportBackOutTargetCm)
+  {
+   TransportPhase = ETransportPhase::None;
+   if (bNavigationEscapeBackOut)
+   {
+    bNavigationEscapeBackOut = false;
+    NavigationReplanTime = 0.f;
+    NavigationProgressTime = GetWorld()->GetTimeSeconds();
+    NavigationStatus = TEXT("충돌 회피 후진 완료: 경로 재계산 중");
+   }
+   else NavigationStatus = TEXT("팔레트 하역 완료: 포크 후퇴 및 2m 이탈");
+   return;
+  }
+  if (TransportPhaseElapsed > 15.f || (TransportPhaseElapsed > 1.f && FMath::Abs(CurrentForwardSpeedCmPerSec) < 2.f))
+  {
+   TransportPhase = ETransportPhase::None;
+   if (bNavigationEscapeBackOut)
+   {
+    bNavigationEscapeBackOut = false;
+    BeginNavigationRecovery(TEXT("후진 통로도 막힘"));
+   }
+   else NavigationStatus = TEXT("하역 후진 중지: 후방 통로 충돌 확인 필요");
+   return;
+  }
+  DriveInput = -20.f / FMath::Max(1.f, Motion.ReverseSpeedCmPerSec);
+  NavigationStatus = FString::Printf(TEXT("%s: 저속 후진 %.0f/%.0fcm"), bNavigationEscapeBackOut ? TEXT("충돌 회피") : TEXT("팔레트 하역"), BackedCm, TransportBackOutTargetCm);
+ }
+}
 void AAutomatedForklift::GetNavigationDiagnosticLines(TArray<FString>& OutLines) const
 {
 	const auto* S = FindComponentByClass<UForkliftSlamComponent>();
 	const float Now = GetWorld()->GetTimeSeconds();
 	OutLines.Add(FString::Printf(TEXT("주행 상태: %s"), bNavigationActive ? TEXT("자동 주행 활성") : TEXT("정지 / 수동")));
 	OutLines.Add(FString::Printf(TEXT("실제 속도 %.2f m/s | 명령 %.2f m/s"), CurrentForwardSpeedCmPerSec / 100.f, TargetForwardSpeedCmPerSec / 100.f));
-	OutLines.Add(bNavigationGoalSet && S && NavigationSensor ? FString::Printf(TEXT("목표까지 %.2f m | 경로점 %d"), FVector2D::Distance(BodyPose(S, NavigationSensor), NavigationGoal) / 100.f, NavigationRoute.Num()) : TEXT("목표: 미지정"));
+	OutLines.Add(bNavigationGoalSet && S && NavigationSensor ? FString::Printf(TEXT("목표까지 %.2f m | 경로점 %d"), FVector2D::Distance(GetNavigationMapPose(), NavigationGoal) / 100.f, NavigationRoute.Num()) : TEXT("목표: 미지정"));
 	OutLines.Add(S ? FString::Printf(TEXT("위치 신뢰도 %.0f%% | 추적 %s"), S->GetConfidence() * 100.f, S->IsTrackingFresh(Now) ? TEXT("정상") : TEXT("대기")) : TEXT("SLAM 센서 없음"));
 	const double Stamp = NavigationSensor ? NavigationSensor->GetLatestScan().TimestampSeconds : -1.;
 	OutLines.Add(Stamp >= 0. ? FString::Printf(TEXT("최근 스캔 %.2f초 전 | 복구 시도 %d/3"), Now - Stamp, NavigationRecoveryAttempts) : TEXT("첫 스캔 대기"));
@@ -40,6 +156,29 @@ void AAutomatedForklift::GetNavigationDiagnosticLines(TArray<FString>& OutLines)
 	OutLines.Add(FString::Printf(TEXT("상태 / 정지 이유: %s"), *NavigationStatus));
 }
 
+bool AAutomatedForklift::TryNavigationBackOut(const FString& Reason)
+{
+ if (TransportPhase != ETransportPhase::None || NavigationEscapeAttempts >= 3 || !GetWorld()) return false;
+ const FVector ReverseDelta = -GetActorForwardVector() * 30.f;
+ FHitResult Hit;
+ if (SweepForkliftBody(ReverseDelta, TEXT("navigation reverse body clearance"), Hit)) return false;
+ for (UBoxComponent* Part : {LeftSupportLegCollision.Get(), RightSupportLegCollision.Get(), LeftMastRailCollision.Get(), RightMastRailCollision.Get(), MastTopCrossbarCollision.Get()})
+  if (SweepForkliftPart(Part, ReverseDelta, TEXT("navigation reverse part clearance"), Hit) ||
+      SweepForkPartAgainstFixedObstacle(Part, ReverseDelta, TEXT("navigation reverse fixed clearance"), Hit)) return false;
+ for (UBoxComponent* Tine : {LeftForkCollision.Get(), RightForkCollision.Get()})
+  if (SweepForkPartAgainstFixedObstacle(Tine, ReverseDelta, TEXT("navigation reverse fork clearance"), Hit)) return false;
+ if (SweepCarriedPallet(ReverseDelta, TEXT("navigation reverse load clearance"), Hit)) return false;
+ ++NavigationEscapeAttempts;
+ bNavigationEscapeBackOut = true;
+ TransportBackOutTargetCm = 120.f;
+ TransportBackOutStart = GetActorLocation();
+ TransportPhaseElapsed = 0.f;
+ TransportPhase = ETransportPhase::BackOut;
+ DriveInput = SteerInput = 0.f;
+ NavigationStatus = FString::Printf(TEXT("충돌 회피 %d/3: 1.2m 후진 후 경로 재계산 — %s"), NavigationEscapeAttempts, *Reason);
+ UE_LOG(LogTemp, Warning, TEXT("Navigation back-out %d/3: %s"), NavigationEscapeAttempts, *Reason);
+ return true;
+}
 void AAutomatedForklift::BeginNavigationRecovery(const FString& Reason)
 {
 	DriveInput = SteerInput = 0.f;
@@ -63,6 +202,11 @@ void AAutomatedForklift::BeginNavigationRecovery(const FString& Reason)
 
 void AAutomatedForklift::StopNavigation()
 {
+	if (TransportPhase != ETransportPhase::None)
+	{
+		TransportPhase = ETransportPhase::None;
+		DriveInput = SteerInput = LiftInput = ReachInput = SideShiftInput = 0.f;
+	}
 	if (bNavigationActive) DriveInput = SteerInput = 0.f;
 	bNavigationActive = false;
 	bUsingFactoryOdometry = false;
@@ -84,12 +228,11 @@ bool AAutomatedForklift::SetNavigationGoalFromMapScreen(FVector2D ScreenPosition
 	const float Size = MapRect.GetSize().X;
 	const float Scale = Size / 3000.f;
 	const FVector2D Centre = MapRect.GetCenter();
-	const FVector2D MapPose = S->GetPosition();
+	const FVector2D MapPose = GetNavigationMapPose();
 	const FVector2D Offset((Centre.Y-ScreenPosition.Y)/Scale,(ScreenPosition.X-Centre.X)/Scale);
 	ActiveWorkStation = INDEX_NONE;
 	return SetNavigationGoalInMap(MapPose + Offset);
 }
-
 
 bool AAutomatedForklift::IsWorkStationRegistered(int32 Index) const
 {
@@ -151,6 +294,7 @@ bool AAutomatedForklift::SetNavigationGoalInMap(FVector2D Goal, int32 StationInd
 	bNavigationActive = true;
 	NavigationRecoveryStart = -1.f;
 	NavigationRecoveryAttempts = 0;
+	NavigationEscapeAttempts = 0;
 	NavigationAvoidUntil.Reset();
 	NavigationRoute.Reset();
 	NavigationMapGeneration = S->GetMapGeneration();
@@ -428,6 +572,15 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 	DriveInput=SteerInput=0.f;
 	const auto* S=FindComponentByClass<UForkliftSlamComponent>();
 	const float Now=GetWorld()->GetTimeSeconds();
+	if (S && NavigationMapGeneration != S->GetMapGeneration() && ActiveWorkStation != INDEX_NONE)
+	{
+		const int32 ResumeStation = ActiveWorkStation;
+		StopNavigation();
+		PendingWorkStation = ResumeStation;
+		NextWorkStationSearch = 0.f;
+		NavigationStatus = FString::Printf(TEXT("%s 이동 대기: 지도 자동 복구 후 경로 재계산"), *WorkStationLabel(ResumeStation));
+		return;
+	}
 	if (!S || !NavigationSensor || !NavigationSensor->bScanEnabled || NavigationMapGeneration!=S->GetMapGeneration())
 	{
 		StopNavigation(); NavigationStatus=TEXT("중지: 센서 꺼짐 또는 지도 초기화"); return;
@@ -472,6 +625,14 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 		NavigationTrackingWaitStart=-1.f;
 	}
 	const bool bCarryingLoad = CarriedPallet || bIsLoaded;
+	if (bCarryingLoad && !SupportedLoadActors.IsEmpty() && !bTransportHeightAdjusted && !IsSupportedLoadFullyInserted())
+	{
+		const int32 WaitingStation = ActiveWorkStation;
+		StopNavigation();
+		if (WaitingStation != INDEX_NONE) PendingWorkStation = WaitingStation;
+		NavigationStatus = TEXT("주행 대기: 포크를 팔레트 끝까지 넣은 뒤 운반 높이로 올리세요");
+		return;
+	}
 	const float TransportHeightLimit = bCarryingLoad ? 60.f : 20.f;
 	if (LiftCm > TransportHeightLimit || (!bCarryingLoad && ReachCm > 3.f) ||
 		!FMath::IsNearlyZero(LiftInput) || !FMath::IsNearlyZero(ReachInput) || !FMath::IsNearlyZero(SideShiftInput))
@@ -529,8 +690,11 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 						const float TurnRate = FMath::Clamp(FMath::RadiansToDegrees(HeadingError) * 2.f, -MaxTurnRate, MaxTurnRate);
 						if (WouldForkRotationHitFixedObstacle(TurnRate * Dt))
 						{
-							StopNavigation();
-							NavigationStatus = TEXT("구역 도착 방향 정렬 중지: 회전 공간 부족");
+							if (!TryNavigationBackOut(TEXT("구역 도착 방향 정렬 공간 부족")))
+							{
+								StopNavigation();
+								NavigationStatus = TEXT("구역 도착 방향 정렬 중지: 전후 공간 부족");
+							}
 							return;
 						}
 						SteerInput = TurnRate / FMath::Max(1.f, Motion.SteeringRateDegPerSec);
@@ -540,7 +704,8 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 				}
 			}
 			StopNavigation();
-			NavigationStatus = ArrivedStation != INDEX_NONE ? FString::Printf(TEXT("%s 선반 앞 도착"), *WorkStationLabel(ArrivedStation)) : TEXT("지정한 목표 위치에 도착했습니다");
+			if (bCarryingLoad && !SupportedLoadActors.IsEmpty()) BeginTransportUnload(ArrivedStation);
+			else NavigationStatus = ArrivedStation != INDEX_NONE ? FString::Printf(TEXT("%s 선반 앞 도착"), *WorkStationLabel(ArrivedStation)) : TEXT("지정한 목표 위치에 도착했습니다");
 			return;
 		}
 		ExplorationVisited.Add(NavigationGoal);
@@ -555,7 +720,7 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 	}
 	if (bNavigationGoalSet && Now-NavigationProgressTime>12.f)
 	{
-		BeginNavigationRecovery(TEXT("12초간 이동 진행 없음"));
+		if (!TryNavigationBackOut(TEXT("12초간 이동 진행 없음"))) BeginNavigationRecovery(TEXT("12초간 이동 진행 없음"));
 		return;
 	}
 	if (!bNavigationGoalSet)
@@ -654,8 +819,8 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 		{
 			if (Speed==0.f && Rate==0.f) continue;
 			if (HorizonSteps == 8 && Speed > 8.f) continue;
-			if (bCarryingLoad && (Speed > 30.f || FMath::Abs(Rate) > 15.f)) continue;
-			if ((bBridgingScan || bUsingFactoryOdometry) && (Speed > 15.f || FMath::Abs(Rate) > 15.f)) continue;
+
+			if (bBridgingScan && (Speed > 15.f || FMath::Abs(Rate) > 15.f)) continue;
 			FVector2D P=FVector2D::ZeroVector; float A=0.f; bool Clear=true;
 			for (int32 Step=0; Step < HorizonSteps && Clear; ++Step)
 			{
@@ -681,8 +846,9 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 	}
 	if (Best == -BIG_NUMBER)
 	{
-		BeginNavigationRecovery(FString::Printf(TEXT("전진·회전 공간 부족 (%d개 근접 측정점, 적재 %s)"),
-			Obstacles.Num(), bCarryingLoad ? TEXT("감지") : TEXT("미감지")));
+		const FString Reason = FString::Printf(TEXT("전진·회전 공간 부족 (%d개 근접 측정점, 적재 %s)"),
+			Obstacles.Num(), bCarryingLoad ? TEXT("감지") : TEXT("미감지"));
+		if (!TryNavigationBackOut(Reason)) BeginNavigationRecovery(Reason);
 		return;
 	}
 	// Simulation collision guard is separate from sensor-based planning.
@@ -707,13 +873,15 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 			if (GetWorld()->SweepSingleByObjectType(Hit,Part->GetComponentLocation(),End.GetLocation(),End.GetRotation(),Objects,
 				FCollisionShape::MakeBox(Part->GetScaledBoxExtent()),Params))
 			{
-				BeginNavigationRecovery(FString::Printf(TEXT("충돌 방지: %s"), *GetNameSafe(Hit.GetActor()))); return;
+				const FString Reason = FString::Printf(TEXT("충돌 방지: %s"), *GetNameSafe(Hit.GetActor()));
+				if (!TryNavigationBackOut(Reason)) BeginNavigationRecovery(Reason);
+				return;
 			}
 		}
 	}
 	DriveInput=BestSpeed/FMath::Max(Motion.ForwardSpeedCmPerSec,1.f);
 	SteerInput=BestRate/FMath::Max(Motion.SteeringRateDegPerSec,1.f);
-	NavigationStatus=FString::Printf(TEXT("%s: 전진 %.0fcm/s / 조향 %.0f°/s"),bUsingFactoryOdometry ? TEXT("Factory 위치로 저속 주행") : (bNavigationGoalIsManual ? TEXT("목표 주행") : TEXT("랜덤 순찰")),BestSpeed,BestRate);
+	NavigationStatus=FString::Printf(TEXT("%s: 전진 %.0fcm/s / 조향 %.0f°/s"),bUsingFactoryOdometry ? TEXT("Factory 위치로 주행") : (bNavigationGoalIsManual ? TEXT("목표 주행") : TEXT("랜덤 순찰")),BestSpeed,BestRate);
 }
 
 bool AAutomatedForklift::SelectExplorationGoal(FVector2D Start)

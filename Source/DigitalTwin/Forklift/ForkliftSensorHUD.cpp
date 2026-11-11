@@ -90,7 +90,7 @@ void AForkliftSensorHUD::DrawHUD()
 	{
 		const float MX = 20.f, MY = 100.f, Size = FMath::Min(300.f, Canvas->SizeY * .40f);
 		const float Scale = Size / 3000.f;
-		const FVector2D Pose = Slam->GetPosition();
+		const FVector2D Pose = Forklift->GetNavigationMapPose();
 		DrawRect(FLinearColor(.025f, .035f, .05f, .94f), MX, MY, Size, Size);
 		for (const auto& Cell : Slam->GetCells())
 		{
@@ -127,7 +127,7 @@ void AForkliftSensorHUD::DrawHUD()
 		}
 		const float CX = MX + Size * .5f, CY = MY + Size * .5f;
 		DrawRect(FLinearColor::Yellow, CX - 3.f, CY - 3.f, 6.f, 6.f);
-		DrawLine(CX, CY, CX + FMath::Sin(Slam->GetPredictedYaw()) * 18.f, CY - FMath::Cos(Slam->GetPredictedYaw()) * 18.f, FLinearColor::Yellow, 2.f);
+		DrawLine(CX, CY, CX + FMath::Sin(Forklift->GetNavigationMapHeading()) * 18.f, CY - FMath::Cos(Forklift->GetNavigationMapHeading()) * 18.f, FLinearColor::Yellow, 2.f);
 		DrawText(TEXT("LiDAR / SLAM | 클릭해 탐색된 목표 선택"), FLinearColor::White, MX, MY - 20.f, nullptr, .8f);
 		DrawText(Slam->GetStatus(), FLinearColor::Yellow, MX, MY + Size + 4.f, nullptr, .75f);
 		DrawText(FString::Printf(TEXT("x %.2f m  y %.2f m | match %.0f%%"), Pose.X / 100., Pose.Y / 100., Slam->GetConfidence() * 100.f), FLinearColor::White, MX, MY + Size + 22.f, nullptr, .75f);

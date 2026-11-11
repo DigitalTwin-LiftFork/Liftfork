@@ -50,6 +50,7 @@ private:
 	FVector2D Velocity = FVector2D::ZeroVector;
 	float Yaw = 0.f, PendingYaw = 0.f, Confidence = 0.f;
 	double LastScan = 0.0, LastAcceptedScan = -1.0;
+	int32 LastAutoResetScanCount = -100;
 	int32 MapGeneration = 0;
 	bool bInitialized = false;
 	int32 ScanCount = 0, MapUpdateCount = 0;

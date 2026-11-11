@@ -409,13 +409,15 @@ public:
 	const TArray<FVector2D>& GetNavigationRoute() const { return NavigationRoute; }
 	bool HasNavigationGoal() const { return bNavigationGoalSet; }
 	FVector2D GetNavigationGoal() const { return NavigationGoal; }
+	FVector2D GetNavigationMapPose() const;
+	float GetNavigationMapHeading() const;
 
 	static FString AutoPickupStateToString(EAutoPickupState State);
 
 private:
 	void BeginNavigationRecovery(const FString& Reason);
 	float NavigationRecoveryStart = -1.f;
-	int32 NavigationRecoveryScan = 0, NavigationRecoveryAttempts = 0;
+	int32 NavigationRecoveryScan = 0, NavigationRecoveryAttempts = 0, NavigationEscapeAttempts = 0;
 	FString NavigationRecoveryReason;
 	TMap<FIntPoint, double> NavigationAvoidUntil;
 		void UpdateNavigation(float Dt);
@@ -462,6 +464,18 @@ private:
 	float AutoDriveInput = 0.f, AutoSteerInput = 0.f, AutoLiftInput = 0.f, AutoReachInput = 0.f, AutoSideShiftInput = 0.f;
 	float LastAppliedDriveInput = 0.f, LastAppliedSteerInput = 0.f, LastAppliedLiftInput = 0.f, LastAppliedReachInput = 0.f, LastAppliedSideShiftInput = 0.f;
 	float LiftCm = 0.f, ReachCm = 0.f, SideShiftCm = 0.f;
+	enum class ETransportPhase : uint8 { None, Raise, Lower, Settle, Retract, BackOut };
+	ETransportPhase TransportPhase = ETransportPhase::None;
+	bool bTransportHeightAdjusted = false;
+	float TransportPhaseElapsed = 0.f;
+	FVector TransportBackOutStart = FVector::ZeroVector;
+	float TransportBackOutTargetCm = 200.f;
+	bool bNavigationEscapeBackOut = false;
+	bool TryNavigationBackOut(const FString& Reason);
+	int32 TransportStation = INDEX_NONE;
+	void UpdateTransportAutomation(float Dt);
+	void BeginTransportUnload(int32 StationIndex);
+	bool IsSupportedLoadFullyInserted() const;
 	float TargetForwardSpeedCmPerSec = 0.f, CurrentForwardSpeedCmPerSec = 0.f, DriveDebugElapsed = 0.f;
 	float SupportedLoadKg = 0.f, CurrentDriveSpeedMultiplier = 1.f, ActiveLoadFriction = 0.f;
 	TArray<TWeakObjectPtr<AActor>> SupportedLoadActors;
