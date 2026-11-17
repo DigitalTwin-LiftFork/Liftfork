@@ -84,4 +84,38 @@ void AWoodPallet::FinalizePlacement()
 }
 void AWoodPallet::HandleHit(UPrimitiveComponent*, AActor*, UPrimitiveComponent* Other, FVector, const FHitResult& Hit) { LastHit = Hit; LastHitTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f; LastHitOther = Other; }
 bool AWoodPallet::GetRecentForkContact(float MaxAge, UPrimitiveComponent*& OutOther) const { OutOther = nullptr; if (!GetWorld() || GetWorld()->GetTimeSeconds() - LastHitTime > MaxAge) return false; OutOther = LastHitOther.Get(); return OutOther != nullptr; }
+bool AWoodPallet::CanSupportFromForks(const UBoxComponent* LeftTine, const UBoxComponent* RightTine, float MinimumInsertionDepthCm, float ContactToleranceCm) const
+{
+	if (bPlacementPreview || !LeftTine || !RightTine) return false;
+
+	const FTransform PalletTransform = GetActorTransform();
+	const float LowerRunnerTopZ = 1.5f;
+	const float UpperDeckSupportZ = HeightCm() - 1.f;
+	const float OpeningHalfWidth = OpeningWidthCm() * .5f;
+	const float RequiredTipX = -LengthCm() * .5f + FMath::Max(0.f, MinimumInsertionDepthCm);
+	const auto IsSupportedTine = [&](const UBoxComponent* Tine, float OpeningCenterY)
+	{
+		const FVector Extent = Tine->GetScaledBoxExtent();
+		const FTransform TineTransform = Tine->GetComponentTransform();
+		FBox LocalBounds(ForceInit);
+		for (int32 XSign : {-1, 1})
+			for (int32 YSign : {-1, 1})
+				for (int32 ZSign : {-1, 1})
+					LocalBounds += PalletTransform.InverseTransformPosition(TineTransform.TransformPosition(FVector(Extent.X * XSign, Extent.Y * YSign, Extent.Z * ZSign)));
+
+		// A tine may be partly outside the ideal channel and still carry the
+		// pallet. Require meaningful overlap with its opening instead of demanding
+		// that the complete collision box be perfectly centred inside it.
+		const float OpeningOverlap = FMath::Min(LocalBounds.Max.Y, OpeningCenterY + OpeningHalfWidth)
+			- FMath::Max(LocalBounds.Min.Y, OpeningCenterY - OpeningHalfWidth);
+		if (OpeningOverlap < FMath::Max(2.f, LocalBounds.GetExtent().Y * .4f)) return false;
+		if (LocalBounds.Min.Z < LowerRunnerTopZ - ContactToleranceCm) return false;
+		if (LocalBounds.Max.Z < UpperDeckSupportZ - ContactToleranceCm || LocalBounds.Max.Z > UpperDeckSupportZ + ContactToleranceCm + 5.f) return false;
+		const float OverlapX = FMath::Min(LocalBounds.Max.X, LengthCm() * .5f) - FMath::Max(LocalBounds.Min.X, -LengthCm() * .5f);
+		return LocalBounds.Max.X >= RequiredTipX && OverlapX >= FMath::Max(1.f, MinimumInsertionDepthCm);
+	};
+
+	return IsSupportedTine(LeftTine, -OpeningCenterSpacingCm() * .5f)
+		&& IsSupportedTine(RightTine, OpeningCenterSpacingCm() * .5f);
+}
 FString AWoodPallet::GetRecentCollisionStatus() const { return !GetWorld() || GetWorld()->GetTimeSeconds() - LastHitTime > .5f ? TEXT("None") : GetNameSafe(LastHitOther.Get()); }
