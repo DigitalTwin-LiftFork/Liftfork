@@ -18,6 +18,10 @@
 #include "Engine/OverlapResult.h"
 #include "UnrealClient.h"
 #include "Engine/World.h"
+#include "Engine/Light.h"
+#include "Engine/RectLight.h"
+#include "Engine/PostProcessVolume.h"
+#include "Components/LightComponent.h"
 #include "InputCoreTypes.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Misc/FileHelper.h"
@@ -156,7 +160,19 @@ NavigationSensor->SetRelativeLocation(
 	PalletSensorCapture->PostProcessSettings.AutoExposureMethod = EAutoExposureMethod::AEM_Manual;
 	PalletSensorCapture->PostProcessSettings.bOverride_AutoExposureBias = true;
 	PalletSensorCapture->PostProcessSettings.AutoExposureBias = PalletSensorExposureBias;
-	PalletSensorCapture->ShowFlags.SetEyeAdaptation(false);
+	// Scene-capture post process settings have no effect when their blend weight
+	// is zero.  The merged actor did not explicitly protect this sensor from the
+	// level volume's EV/physical-camera settings; keep the exposure self-contained
+	// and record it per capture so PIE evidence can establish the actual cause.
+	PalletSensorCapture->PostProcessBlendWeight = 1.f;
+	PalletSensorCapture->PostProcessSettings.bOverride_AutoExposureApplyPhysicalCameraExposure = true;
+	PalletSensorCapture->PostProcessSettings.AutoExposureApplyPhysicalCameraExposure = false;
+	// Manual is still a fixed exposure method.  EyeAdaptation must remain enabled
+	// for UE to apply AutoExposureBias; disabling the show flag makes the renderer
+	// force the compensation to 1.0, so every EV sweep frame becomes identical.
+	PalletSensorCapture->ShowFlags.SetEyeAdaptation(true);
+	PalletSensorCapture->ShowFlags.SetTonemapper(true);
+	PalletSensorCapture->ShowFlags.SetPostProcessing(true);
 	// The sensor target is source imagery only. HUD content is drawn after
 	// capture, and editor-style debug primitives are excluded here.
 	PalletSensorCapture->ShowFlags.SetOnScreenDebug(false);
@@ -249,6 +265,7 @@ void AAutomatedForklift::BeginPlay()
 	// implicit SceneCapture default.  Both streams now retain their explicit
 	// format/source configuration and are rebound together below.
 	UpdatePalletSensorSettings();
+	ApplyFactoryRectLightCalibration();
 	// The root collision is centred on the actor. Map1 actors authored at floor Z=0 must be lifted to their collision centre.
 	const float MinimumCenterHeight = Dimensions.BodyHeightCm * .5f + 2.f;
 	if (GetActorLocation().Z < MinimumCenterHeight)
@@ -267,6 +284,7 @@ void AAutomatedForklift::BeginPlay()
 		PalletSensorCapture ? *PalletSensorCapture->GetRelativeLocation().ToString() : TEXT("(missing)"),
 		PalletSensorCapture ? *PalletSensorCapture->GetRelativeRotation().ToString() : TEXT("(missing)"), PalletSensorFieldOfViewDeg,
 		PalletSensorHeightAboveForkTopCm, PalletSensorLateralOffsetFromCenterCm, PalletSensorForwardOfBackrestCm);
+	LogSceneLightingAudit();
 }
 
 void AAutomatedForklift::ApplyDimensions()
@@ -489,11 +507,32 @@ void AAutomatedForklift::UpdatePalletSensorSettings()
 	PalletSensorCapture->SetRelativeRotation(PalletSensorRelativeRotation);
 	PalletSensorCapture->FOVAngle = PalletSensorFieldOfViewDeg;
 	PalletSensorCapture->CaptureSource = ESceneCaptureSource::SCS_FinalColorLDR;
+	const bool bLegacyProfile = bUseLegacyRgbCaptureProfile;
+	const bool bManualExposure = bLegacyProfile || bPalletSensorUseManualExposure;
 	PalletSensorCapture->PostProcessSettings.bOverride_AutoExposureMethod = true;
-	PalletSensorCapture->PostProcessSettings.AutoExposureMethod = bPalletSensorUseManualExposure ? EAutoExposureMethod::AEM_Manual : EAutoExposureMethod::AEM_Histogram;
-	PalletSensorCapture->PostProcessSettings.bOverride_AutoExposureBias = bPalletSensorUseManualExposure;
+	PalletSensorCapture->PostProcessSettings.AutoExposureMethod = bManualExposure ? EAutoExposureMethod::AEM_Manual : EAutoExposureMethod::AEM_Histogram;
+	PalletSensorCapture->PostProcessSettings.bOverride_AutoExposureBias = true;
 	PalletSensorCapture->PostProcessSettings.AutoExposureBias = PalletSensorExposureBias;
-	PalletSensorCapture->ShowFlags.SetEyeAdaptation(!bPalletSensorUseManualExposure);
+	PalletSensorCapture->PostProcessSettings.bOverride_AutoExposureMinBrightness = !bManualExposure;
+	PalletSensorCapture->PostProcessSettings.bOverride_AutoExposureMaxBrightness = !bManualExposure;
+	PalletSensorCapture->PostProcessSettings.bOverride_AutoExposureSpeedUp = !bManualExposure;
+	PalletSensorCapture->PostProcessSettings.bOverride_AutoExposureSpeedDown = !bManualExposure;
+	if (!bManualExposure)
+	{
+		PalletSensorCapture->PostProcessSettings.AutoExposureMinBrightness = PalletSensorAutoExposureMinEV100;
+		PalletSensorCapture->PostProcessSettings.AutoExposureMaxBrightness = PalletSensorAutoExposureMaxEV100;
+		PalletSensorCapture->PostProcessSettings.AutoExposureSpeedUp = PalletSensorAutoExposureSpeedUp;
+		PalletSensorCapture->PostProcessSettings.AutoExposureSpeedDown = PalletSensorAutoExposureSpeedDown;
+	}
+	PalletSensorCapture->PostProcessBlendWeight = 1.f;
+	PalletSensorCapture->PostProcessSettings.bOverride_AutoExposureApplyPhysicalCameraExposure = !bLegacyProfile;
+	PalletSensorCapture->PostProcessSettings.AutoExposureApplyPhysicalCameraExposure = false;
+	// This is the meaningful pre-merge/current split: the committed old capture
+	// explicitly disabled EyeAdaptation, while the corrected profile keeps it on
+	// so Manual EV compensation reaches the renderer.
+	PalletSensorCapture->ShowFlags.SetEyeAdaptation(!bLegacyProfile);
+	PalletSensorCapture->ShowFlags.SetTonemapper(true);
+	PalletSensorCapture->ShowFlags.SetPostProcessing(true);
 	PalletSensorCapture->TextureTarget = PalletSensorRenderTarget;
 
 	PalletSensorDepthCapture->SetRelativeLocation(CarriageLocalLocation);
@@ -508,7 +547,7 @@ void AAutomatedForklift::UpdatePalletSensorSettings()
 	}
 	PalletSensorRenderTarget->RenderTargetFormat = RTF_RGBA8;
 	PalletSensorRenderTarget->bForceLinearGamma = false;
-	PalletSensorRenderTarget->TargetGamma = 2.2f;
+	PalletSensorRenderTarget->TargetGamma = bLegacyProfile ? 0.f : 2.2f;
 
 	if (PalletSensorDepthRenderTarget->SizeX != PalletSensorWidthPx || PalletSensorDepthRenderTarget->SizeY != PalletSensorHeightPx)
 	{
@@ -540,6 +579,11 @@ void AAutomatedForklift::SetupPlayerInputComponent(UInputComponent* Input)
 	Input->BindKey(EKeys::O, IE_Pressed, this, &AAutomatedForklift::ToggleVisionDebugView);
 
 	Input->BindKey(EKeys::U, IE_Pressed, this, &AAutomatedForklift::ToggleDepthDebugView);
+	Input->BindKey(EKeys::One, IE_Pressed, this, &AAutomatedForklift::LogSceneLightingAudit);
+	Input->BindKey(EKeys::Two, IE_Pressed, this, &AAutomatedForklift::StartRgbExposureSweep);
+	Input->BindKey(EKeys::Three, IE_Pressed, this, &AAutomatedForklift::ToggleRgbCaptureProfile);
+	Input->BindKey(EKeys::Four, IE_Pressed, this, &AAutomatedForklift::TogglePalletSensorExposureMode);
+	Input->BindKey(EKeys::Five, IE_Pressed, this, &AAutomatedForklift::CaptureRgbExposureReference);
 	Input->BindKey(EKeys::P, IE_Pressed, this, &AAutomatedForklift::ToggleAutoApproachStraightDiagnostic);
 	Input->BindKey(EKeys::J, IE_Pressed, this, &AAutomatedForklift::ToggleDetailedSensorDiagnostics);
 
@@ -621,14 +665,157 @@ void AAutomatedForklift::TogglePalletSensorCapture()
 }
 void AAutomatedForklift::ToggleVisionDebugView()
 {
-
+	const int32 PreviousMode = VisionDebugViewMode;
 	VisionDebugViewMode = (VisionDebugViewMode + 1) % 6;
-	UE_LOG(LogTemp, Warning, TEXT("[R16HD_VISION] O debug view=%d (0=RT source, 1=colour region, 2=RGB body, 3=depth/refined body, 4=opening, 5=CPU FColor)"), VisionDebugViewMode);
+	bVisionDebugViewChangedByOInput = true;
+	LastVisionDebugViewStatus = FString::Printf(TEXT("O key: mode %d -> %d (%s), capture cycle %d, vision frame %d"), PreviousMode, VisionDebugViewMode, *GetVisionDebugViewName(), SensorFrameId, LastVisionFrameNumber);
+	UE_LOG(LogTemp, Warning, TEXT("[R16HD_VISION] %s"), *LastVisionDebugViewStatus);
+}
+FString AAutomatedForklift::GetVisionDebugViewName() const
+{
+	switch (VisionDebugViewMode)
+	{
+	case 0: return TEXT("RGB Render Target source");
+	case 1: return TEXT("colour-region mask");
+	case 2: return TEXT("RGB body mask");
+	case 3: return TEXT("depth-refined body mask");
+	case 4: return TEXT("opening-components mask");
+	case 5: return TEXT("CPU RGB readback");
+	default: return TEXT("unknown");
+	}
 }
 void AAutomatedForklift::ToggleDepthDebugView()
 {
 	DepthDebugViewMode = (DepthDebugViewMode + 1) % 4;
 	UE_LOG(LogTemp, Warning, TEXT("[R16HD_RGBD] U depth view=%d (0=close grey, 1=close colour, 2=wide grey, 3=wide colour)"), DepthDebugViewMode);
+}
+void AAutomatedForklift::StartRgbExposureSweep()
+{
+	if (!PalletSensorCapture || !bPalletSensorCaptureActive)
+	{
+		RgbExposureDiagnosticStatus = TEXT("2: capture unavailable/disabled");
+		UE_LOG(LogTemp, Warning, TEXT("[R16HD_RGB] exposure sweep not started: RGB capture is unavailable or disabled"));
+		return;
+	}
+	if (bRgbExposureSweepActive)
+	{
+		RgbExposureDiagnosticStatus = TEXT("2: exposure capture already running");
+		UE_LOG(LogTemp, Warning, TEXT("[R16HD_RGB] exposure sweep is already in progress"));
+		return;
+	}
+	// Key 2 is the corrected/current-profile experiment.  Do not silently run a
+	// legacy compatibility capture and label its output as current evidence.
+	if (bUseLegacyRgbCaptureProfile)
+	{
+		bUseLegacyRgbCaptureProfile = false;
+		UpdatePalletSensorSettings();
+		UE_LOG(LogTemp, Warning, TEXT("[R16HD_RGB] exposure sweep forced corrected/current capture profile"));
+	}
+	bRgbExposureSweepActive = true;
+	bRgbExposureSweepPreviousManual = bPalletSensorUseManualExposure;
+	RgbExposureSweepPreviousBias = PalletSensorExposureBias;
+	RgbExposureSweepStage = 0;
+	RgbExposureSweepPendingCaptureId = -1;
+	VisionProcessElapsed = VisionProcessIntervalSeconds;
+	RgbExposureDiagnosticStatus = TEXT("2: EV comparison 0/5 (current corrected profile) -> Saved/RgbExposureSweep");
+	UE_LOG(LogTemp, Warning, TEXT("[R16HD_RGB] 2 exposure sweep started: EV -4, -2, 0, +2, +4; artifacts will be written to Saved/RgbExposureSweep"));
+}
+void AAutomatedForklift::ToggleRgbCaptureProfile()
+{
+	if (bRgbExposureSweepActive)
+	{
+		RgbExposureDiagnosticStatus = TEXT("3: profile change held until EV comparison completes");
+		UE_LOG(LogTemp, Warning, TEXT("[R16HD_RGB] capture profile toggle ignored while exposure sweep is active"));
+		return;
+	}
+	bUseLegacyRgbCaptureProfile = !bUseLegacyRgbCaptureProfile;
+	UpdatePalletSensorSettings();
+	RgbExposureDiagnosticStatus = FString::Printf(TEXT("3: capture profile=%s; use 2 to compare EV frames"), bUseLegacyRgbCaptureProfile ? TEXT("legacy pre-merge") : TEXT("current corrected"));
+	UE_LOG(LogTemp, Warning, TEXT("[R16HD_RGB] 3 capture profile=%s"), bUseLegacyRgbCaptureProfile ? TEXT("legacy pre-merge") : TEXT("current corrected"));
+}
+void AAutomatedForklift::TogglePalletSensorExposureMode()
+{
+	if (bRgbExposureSweepActive)
+	{
+		RgbExposureDiagnosticStatus = TEXT("4: exposure mode change held until EV comparison completes");
+		return;
+	}
+	bPalletSensorUseManualExposure = !bPalletSensorUseManualExposure;
+	UpdatePalletSensorSettings();
+	RgbExposureDiagnosticStatus = bPalletSensorUseManualExposure
+		? TEXT("4: sensor exposure=manual fixed EV")
+		: FString::Printf(TEXT("4: sensor exposure=bounded histogram EV100 %.1f..%.1f, speeds %.1f/%.1f"), PalletSensorAutoExposureMinEV100, PalletSensorAutoExposureMaxEV100, PalletSensorAutoExposureSpeedUp, PalletSensorAutoExposureSpeedDown);
+	UE_LOG(LogTemp, Warning, TEXT("[R16HD_RGB] %s"), *RgbExposureDiagnosticStatus);
+}
+void AAutomatedForklift::CaptureRgbExposureReference()
+{
+	if (!PalletSensorCapture || !bPalletSensorCaptureActive || bRgbExposureSweepActive || RgbReferenceCapturePendingId > 0)
+	{
+		RgbExposureDiagnosticStatus = TEXT("5: reference capture unavailable or already pending");
+		return;
+	}
+	RgbReferenceCaptureLabel = bPalletSensorUseManualExposure ? TEXT("manual-reference") : TEXT("bounded-auto-reference");
+	RgbReferenceCapturePendingId = 0; // capture on the next normal sensor cycle
+	RgbExposureDiagnosticStatus = FString::Printf(TEXT("5: saving current %s exposure reference"), *RgbReferenceCaptureLabel);
+	UE_LOG(LogTemp, Warning, TEXT("[R16HD_RGB] %s"), *RgbExposureDiagnosticStatus);
+}
+void AAutomatedForklift::LogSceneLightingAudit()
+{
+	if (!GetWorld()) return;
+	RgbExposureDiagnosticStatus = TEXT("1: lighting/camera audit written to Output Log");
+	int32 LightCount = 0;
+	UE_LOG(LogTemp, Warning, TEXT("[R16HD_LIGHT_AUDIT] world=%s begin"), *GetWorld()->GetMapName());
+	for (TActorIterator<ALight> It(GetWorld()); It; ++It)
+	{
+		const ALight* Light = *It;
+		const ULightComponent* Component = Light ? Light->GetLightComponent() : nullptr;
+		++LightCount;
+		UE_LOG(LogTemp, Warning, TEXT("[R16HD_LIGHT_AUDIT] light[%d] class=%s name=%s loc=%s intensity=%.3f visible=%d"),
+			LightCount, *GetNameSafe(Light ? Light->GetClass() : nullptr), *GetNameSafe(Light),
+			Light ? *Light->GetActorLocation().ToString() : TEXT("(none)"), Component ? Component->Intensity : -1.f,
+			Component ? Component->IsVisible() : 0);
+	}
+	int32 VolumeCount = 0;
+	for (TActorIterator<APostProcessVolume> It(GetWorld()); It; ++It)
+	{
+		const APostProcessVolume* Volume = *It;
+		const FPostProcessSettings& Settings = Volume->Settings;
+		++VolumeCount;
+		UE_LOG(LogTemp, Warning, TEXT("[R16HD_LIGHT_AUDIT] pp[%d] name=%s unbound=%d priority=%.2f blend=%.2f radius=%.1f AEoverride=%d method=%d biasOverride=%d bias=%.2f physicalOverride=%d physical=%d"),
+			VolumeCount, *GetNameSafe(Volume), Volume->bUnbound, Volume->Priority, Volume->BlendWeight, Volume->BlendRadius,
+			Settings.bOverride_AutoExposureMethod, static_cast<int32>(Settings.AutoExposureMethod),
+			Settings.bOverride_AutoExposureBias, Settings.AutoExposureBias,
+			Settings.bOverride_AutoExposureApplyPhysicalCameraExposure, Settings.AutoExposureApplyPhysicalCameraExposure);
+	}
+	const FPostProcessSettings* SensorPP = PalletSensorCapture ? &PalletSensorCapture->PostProcessSettings : nullptr;
+	const FPostProcessSettings* MainPP = FollowCamera ? &FollowCamera->PostProcessSettings : nullptr;
+	UE_LOG(LogTemp, Warning, TEXT("[R16HD_LIGHT_AUDIT] totals lights=%d postprocessVolumes=%d; sensor blend=%.2f source=%d method=%d bias=%.2f physical=%d FOV=%.1f RT=%s; mainCamera blend=%.2f method=%d bias=%.2f physical=%d FOV=%.1f"),
+		LightCount, VolumeCount, PalletSensorCapture ? PalletSensorCapture->PostProcessBlendWeight : -1.f,
+		PalletSensorCapture ? static_cast<int32>(PalletSensorCapture->CaptureSource) : -1,
+		SensorPP ? static_cast<int32>(SensorPP->AutoExposureMethod) : -1,
+		SensorPP ? SensorPP->AutoExposureBias : 0.f,
+		SensorPP ? SensorPP->AutoExposureApplyPhysicalCameraExposure : 0,
+		PalletSensorCapture ? PalletSensorCapture->FOVAngle : -1.f,
+		PalletSensorRenderTarget ? *PalletSensorRenderTarget->GetName() : TEXT("missing"),
+		FollowCamera ? FollowCamera->PostProcessBlendWeight : -1.f,
+		MainPP ? static_cast<int32>(MainPP->AutoExposureMethod) : -1,
+		MainPP ? MainPP->AutoExposureBias : 0.f,
+		MainPP ? MainPP->AutoExposureApplyPhysicalCameraExposure : 0,
+		FollowCamera ? FollowCamera->FieldOfView : -1.f);
+}
+void AAutomatedForklift::ApplyFactoryRectLightCalibration()
+{
+	if (!bApplyFactoryRectLightOneStopCalibration || !GetWorld() || !GetWorld()->GetMapName().Contains(TEXT("Factory"))) return;
+	int32 AppliedCount = 0;
+	for (TActorIterator<ARectLight> It(GetWorld()); It; ++It)
+	{
+		ARectLight* RectLight = *It;
+		ULightComponent* Component = RectLight ? RectLight->GetLightComponent() : nullptr;
+		if (!Component) continue;
+		Component->SetIntensity(FactoryRectLightCalibratedIntensity);
+		++AppliedCount;
+	}
+	UE_LOG(LogTemp, Warning, TEXT("[R16HD_FACTORY_LIGHT] applied RectLight calibration: %d lights -> %.0f (Factory only)"), AppliedCount, FactoryRectLightCalibratedIntensity);
 }
 void AAutomatedForklift::ToggleDetailedSensorDiagnostics()
 {
@@ -639,10 +826,6 @@ void AAutomatedForklift::ToggleAutoApproachStraightDiagnostic()
 {
 	bAutoApproachStraightDiagnostic = !bAutoApproachStraightDiagnostic;
 	UE_LOG(LogTemp, Warning, TEXT("[R16HD_AUTO_APPROACH] straight-diagnostic=%d (P); approach steering is %s"), bAutoApproachStraightDiagnostic, bAutoApproachStraightDiagnostic ? TEXT("disabled") : TEXT("enabled"));
-
-	VisionDebugViewMode = (VisionDebugViewMode + 1) % 2;
-	UE_LOG(LogTemp, Warning, TEXT("[R16HD_VISION] O debug view=%d (0=source, 1=binary mask)"), VisionDebugViewMode);
-
 }
 void AAutomatedForklift::ToggleSensorOcclusionDiagnostic()
 {
@@ -1403,18 +1586,43 @@ bool AAutomatedForklift::ComputeAutoInsertionGeometry(const FOpeningDetection& D
 	OutReachRemainingCm = FMath::Max(0.f, Dimensions.ReachTravelCm - ReachCm);
 	OutChassisAdvanceCm = FMath::Max(0.f, OutRemainingForkAdvanceCm - OutReachRemainingCm);
 	OutLateralErrorCm = Detection.OpeningCenterInForkCm.Y - TipMid.Y;
+	float AllowedMin, AllowedMax, CurrentForkTop, TargetLift;
+	if (!ComputeOpeningHeightAlignment(Detection, AllowedMin, AllowedMax, CurrentForkTop, TargetLift)) return false;
+	// This correction and the actuator range check below share the same
+	// carriage-local fork-top reference.  Do not mix the camera's local Z with
+	// the absolute lift stroke.
+	OutLiftCorrectionCm = TargetLift - LiftCm;
+	return true;
+}
+
+bool AAutomatedForklift::ComputeOpeningHeightAlignment(const FOpeningDetection& Detection, float& OutAllowedForkTopMinCm, float& OutAllowedForkTopMaxCm, float& OutCurrentForkTopLocalCm, float& OutTargetLiftStrokeCm) const
+{
+	OutAllowedForkTopMinCm = OutAllowedForkTopMaxCm = OutCurrentForkTopLocalCm = OutTargetLiftStrokeCm = -BIG_NUMBER;
+	if (!Detection.bDepthValid || !ForkCarriage || !LeftForkCollision || !RightForkCollision) return false;
+	const FTransform ForkFrame = ForkCarriage->GetComponentTransform();
+	const auto ToFork = [&ForkFrame](const FVector& World) { return ForkFrame.InverseTransformPosition(World); };
+	const FVector LeftTop = ToFork(LeftForkCollision->GetComponentTransform().TransformPosition(FVector(0.f, 0.f, LeftForkCollision->GetScaledBoxExtent().Z)));
+	const FVector RightTop = ToFork(RightForkCollision->GetComponentTransform().TransformPosition(FVector(0.f, 0.f, RightForkCollision->GetScaledBoxExtent().Z)));
+	OutCurrentForkTopLocalCm = (LeftTop.Z + RightTop.Z) * .5f;
 	const float LeftHeight = Detection.LeftMeasuredOpeningHeightCm > 1.f ? Detection.LeftMeasuredOpeningHeightCm : (Detection.MeasuredOpeningHeightCm > 1.f ? Detection.MeasuredOpeningHeightCm : VisionKnownOpeningHeightCm);
 	const float RightHeight = Detection.RightMeasuredOpeningHeightCm > 1.f ? Detection.RightMeasuredOpeningHeightCm : (Detection.MeasuredOpeningHeightCm > 1.f ? Detection.MeasuredOpeningHeightCm : VisionKnownOpeningHeightCm);
 	const FVector LeftCenter = Detection.LeftMeasuredOpeningHeightCm > 1.f ? Detection.LeftOpeningCenterInForkCm : Detection.OpeningCenterInForkCm;
 	const FVector RightCenter = Detection.RightMeasuredOpeningHeightCm > 1.f ? Detection.RightOpeningCenterInForkCm : Detection.OpeningCenterInForkCm;
-	// Fork-top bounds are evaluated in the same moving carriage frame as the
-	// actual tine collision shapes.  Intersect both apertures; do not average a
-	// narrow/noisy opening into a range the other tine cannot enter.
-	const float AllowedMin = FMath::Max(LeftCenter.Z - LeftHeight*.5f + AutoForkOpeningBottomClearanceCm + Dimensions.ForkThicknessCm, RightCenter.Z - RightHeight*.5f + AutoForkOpeningBottomClearanceCm + Dimensions.ForkThicknessCm);
-	const float AllowedMax = FMath::Min(LeftCenter.Z + LeftHeight*.5f - AutoForkOpeningBottomClearanceCm, RightCenter.Z + RightHeight*.5f - AutoForkOpeningBottomClearanceCm);
-	const float DesiredForkTopZ = AllowedMin <= AllowedMax ? (AllowedMin + AllowedMax) * .5f : ForkTopZ;
-	OutLiftCorrectionCm = DesiredForkTopZ - ForkTopZ;
+	OutAllowedForkTopMinCm = FMath::Max(LeftCenter.Z - LeftHeight*.5f + AutoForkOpeningBottomClearanceCm + Dimensions.ForkThicknessCm, RightCenter.Z - RightHeight*.5f + AutoForkOpeningBottomClearanceCm + Dimensions.ForkThicknessCm);
+	OutAllowedForkTopMaxCm = FMath::Min(LeftCenter.Z + LeftHeight*.5f - AutoForkOpeningBottomClearanceCm, RightCenter.Z + RightHeight*.5f - AutoForkOpeningBottomClearanceCm);
+	const float DesiredForkTop = OutAllowedForkTopMinCm <= OutAllowedForkTopMaxCm ? (OutAllowedForkTopMinCm + OutAllowedForkTopMaxCm) * .5f : OutCurrentForkTopLocalCm;
+	OutTargetLiftStrokeCm = LiftCm + (DesiredForkTop - OutCurrentForkTopLocalCm);
 	return true;
+}
+
+void AAutomatedForklift::UpdateLockedTargetWorldMeasurement(const FOpeningDetection& Detection)
+{
+	if (!Detection.bDepthValid || !ForkCarriage) return;
+	const FTransform ForkFrame = ForkCarriage->GetComponentTransform();
+	LockedTargetFrontWorld = ForkFrame.TransformPosition(Detection.OpeningCenterInForkCm);
+	LockedTargetLeftWorld = ForkFrame.TransformPosition(Detection.LeftOpeningCenterInForkCm);
+	LockedTargetRightWorld = ForkFrame.TransformPosition(Detection.RightOpeningCenterInForkCm);
+	bLockedTargetWorldValid = true;
 }
 
 void AAutomatedForklift::ClearAutomaticCommands()
@@ -1423,7 +1631,14 @@ void AAutomatedForklift::ClearAutomaticCommands()
 }
 void AAutomatedForklift::SetAutoPickupState(EAutoPickupState NewState, const FString& Status)
 {
+	const EAutoPickupState PreviousState = AutoPickupState;
 	AutoPickupState = NewState; AutoPickupStatus = Status; AutoPickupStateElapsed = 0.f;
+	if (NewState == EAutoPickupState::Aligning && PreviousState == EAutoPickupState::Detecting && OpeningDetection.bControlEligible)
+	{
+		++LockedTargetId;
+		UpdateLockedTargetWorldMeasurement(OpeningDetection);
+		UE_LOG(LogTemp, Warning, TEXT("[R16HD_TARGET] id=%d locked frame=%d front=%s confidence=%.2f"), LockedTargetId, SensorFrameId, *LockedTargetFrontWorld.ToString(), OpeningDetection.Confidence);
+	}
 	if (NewState == EAutoPickupState::Aligning) { AlignmentStableFrames = 0; LastStableAlignmentVisionFrame = -1; }
 	if (NewState == EAutoPickupState::Approaching && GetWorld())
 	{
@@ -1457,7 +1672,7 @@ void AAutomatedForklift::SetAutoPickupState(EAutoPickupState NewState, const FSt
 		LastAutoApproachTravelForHeadingCm = 0.f; AutoApproachHeadingErrorRad = 0.f; LastAutoYawDeltaDeg = 0.f;
 		bApproachSteeringInDeadband = FMath::Abs(FilteredApproachLateralCm) <= AutoApproachLateralDeadbandCm;
 	}
-	UE_LOG(LogTemp, Warning, TEXT("[R16HD_AUTO_PICK] state=%s reason=%s"), *AutoPickupStateToString(NewState), *Status);
+	UE_LOG(LogTemp, Warning, TEXT("[R16HD_AUTO_PICK] target=%d state=%s reason=%s"), LockedTargetId, *AutoPickupStateToString(NewState), *Status);
 }
 void AAutomatedForklift::CancelAutoPickup(const FString& Reason, bool bFailure)
 {
@@ -1485,6 +1700,7 @@ void AAutomatedForklift::ToggleAutoPickup()
 	LastAutoFailureReason.Reset(); LastAutoFailureSensorFrameId = -1; LastAutoFailureTime = -BIG_NUMBER;
 	bSavedLastValidVisionArtifact = bSavedFirstVisionFailureArtifact = false; LastSuccessfulVisionPixels.Reset();
 	LastTrackedOpeningDetection = FOpeningDetection(); LastTrackedOpeningTime = -BIG_NUMBER; LastTrackedActorLocation = FVector::ZeroVector; LastTrackedOpeningSeparationPx = 0.f; LockedTargetMissFrames = 0;
+	LockedTargetId = 0; LockedTargetFrontWorld = LockedTargetLeftWorld = LockedTargetRightWorld = FVector::ZeroVector; bLockedTargetWorldValid = false; bLastVisionPartialTargetEvidence = false; TrackingRecoveryStartTime = -BIG_NUMBER; bResumeAlignmentAfterTracking = false;
 	FilteredApproachLateralCm = PreviousApproachLateralCm = AutoApproachHeadingErrorRad = 0.f; LastAutoApproachTravelForHeadingCm = 0.f; LastAutoYawDeltaDeg = AutoApproachAccumulatedYawDeg = 0.f; bApproachSteeringInDeadband = false; LastStableOpeningVisionFrame = LastStableAlignmentVisionFrame = -1; InvalidHeightRangeVisionFrames = 0; LastVisionTotalMs = LastVisionMaxMs = 0.f;
 	OpeningStableFrames = AlignmentStableFrames = 0; LastVisionCandidateCount = -1; LastVisionFrameNumber = 0; LastProcessedSensorFrameId = -1; LastVisionSuccessSensorFrameId = FirstVisionFailureAfterSuccessSensorFrameId = -1; LastVisionProcessTime = -BIG_NUMBER; bLastVisionReadSucceeded = bLastVisionHadValidPair = false; LastPixelReadStatus = TEXT("카메라 프레임 대기"); LastAlignmentLateralErrorCm = LastAlignmentLiftCorrectionCm = LastMeasuredOpeningBottomCm = LastMeasuredOpeningTopCm = LastAllowedForkTopMinCm = LastAllowedForkTopMaxCm = LastForkTopLocalCm = LastHeightTargetLiftCm = LastAutoInsertionTravelCm = LastAutoApproachTravelCm = LastAutoCameraDistanceCm = LastAutoForkTipRemainingCm = AutoApproachRequiredTravelCm = AutoApproachPlannedTravelCm = AutoApproachTravelBudgetCm = AutoRequiredForkAdvanceCm = AutoChassisAdvanceNeededCm = AutoReachTargetCm = AutoInsertionStartReachCm = LastPhysicalPalletRiseCm = AutoRequiredForwardTravelCm = AutoMaximumForwardTravelCm = -BIG_NUMBER; bPreApproachHeightAlignment = false; AutoApproachReplanCount = 0; bLastAutoDriveBlocked = bLastAutoApproachBlocked = bLastPhysicalPalletContact = false;
 	SetAutoPickupState(EAutoPickupState::Detecting, TEXT("시작 버튼 입력됨 — 안정적인 삽입구 쌍 영상 대기 중"));
@@ -1512,17 +1728,22 @@ void AAutomatedForklift::GetAutoPickupDiagnosticLines(TArray<FString>& OutLines)
 	OutLines.Add(FString::Printf(TEXT("Depth: %s / frame %d / 유효픽셀 %d / 범위 %s..%s / %s"), bDepthFrameValid ? TEXT("수신됨") : TEXT("미수신"), DepthFrameId, DepthValidPixelCount, *ValueText(DepthObservedMinimumCm,TEXT("cm")), *ValueText(DepthObservedMaximumCm,TEXT("cm")), *LastDepthReadStatus));
 	OutLines.Add(FString::Printf(TEXT("탐색: 16x16 색상 영역 병합 / 원본 2px 정밀 / 후보 ROI 시작 %s"), LastVisionSearchStartY >= 0 ? *FString::FromInt(LastVisionSearchStartY * 2) : TEXT("미측정")));
 	OutLines.Add(FString::Printf(TEXT("인식: 후보 %s / 쌍 %s / 신뢰도 %s / 안정 %d/3"), LastVisionCandidateCount >= 0 ? *FString::FromInt(LastVisionCandidateCount) : TEXT("미측정"), bLastVisionHadValidPair ? TEXT("유효") : TEXT("없음"), OpeningDetection.TimestampSeconds > -BIG_NUMBER * .5f ? *FString::Printf(TEXT("%.2f"), OpeningDetection.Confidence) : TEXT("미측정"), OpeningStableFrames));
-	OutLines.Add(FString::Printf(TEXT("Gates: RGB pair=%s | depth/front=%s | tracked=%s | height range=%s | motion=%s"), bLastVisionHadValidPair ? TEXT("valid") : TEXT("missing"), OpeningDetection.bDepthValid ? TEXT("valid") : TEXT("missing"), LastTrackedOpeningDetection.bValid ? TEXT("locked") : TEXT("none"), LastAllowedForkTopMinCm <= LastAllowedForkTopMaxCm ? TEXT("feasible") : TEXT("re-measure"), IsAutoPickupMotionActive() ? TEXT("permitted") : TEXT("held")));
+	OutLines.Add(FString::Printf(TEXT("Gates: RGB pair=%s | depth/front=%s | control=%s | tracked=%s | height range=%s | motion=%s"), bLastVisionHadValidPair ? TEXT("valid") : TEXT("missing"), OpeningDetection.bDepthValid ? TEXT("measured") : TEXT("missing"), OpeningDetection.bControlEligible ? TEXT("eligible") : TEXT("held"), LastTrackedOpeningDetection.bValid ? TEXT("locked") : TEXT("none"), LastAllowedForkTopMinCm <= LastAllowedForkTopMaxCm ? TEXT("feasible") : TEXT("re-measure"), IsAutoPickupMotionActive() ? TEXT("permitted") : TEXT("held")));
+	OutLines.Add(FString::Printf(TEXT("Target: id=%d | tracking=%s | current=%s | last-observation=%s"), LockedTargetId, bLastVisionPartialTargetEvidence ? TEXT("partial/reacquire") : (LastTrackedOpeningDetection.bValid ? TEXT("locked") : TEXT("none")), OpeningDetection.bControlEligible ? TEXT("RGB-D") : TEXT("not usable"), *AgeText(LastTrackedOpeningTime)));
 	OutLines.Add(FString::Printf(TEXT("Depth pixels: valid=%d invalid=%d below=%d above=%d"), DepthValidPixelCount, DepthInvalidPixelCount, DepthBelowRangePixelCount, DepthAboveRangePixelCount));
 	OutLines.Add(FString::Printf(TEXT("RGB-D sync: cycle RGB %d / depth %d / captured pose delta %.3fcm %.3fdeg"),
 		RgbCaptureId, DepthCaptureId, LastRgbDepthCapturePositionDeltaCm, LastRgbDepthCaptureRotationDeltaDeg));
 	OutLines.Add(FString::Printf(TEXT("Vision ms: total %.1f rgb %.1f depth %.1f coarse %.1f fine %.1f max %.1f"), LastVisionTotalMs, LastVisionRgbReadMs, LastVisionDepthReadMs, LastVisionCoarseMs, LastVisionFineMs, LastVisionMaxMs));
 	if (!LastAutoFailureReason.IsEmpty()) OutLines.Add(FString::Printf(TEXT("Last auto failure: frame %d age %s — %s"), LastAutoFailureSensorFrameId, *AgeText(LastAutoFailureTime), *LastAutoFailureReason));
-	const bool bObservationFresh = OpeningDetection.bValid && OpeningDetection.bDepthValid && OpeningDetection.TimestampSeconds > -BIG_NUMBER*.5f && Now-OpeningDetection.TimestampSeconds <= VisionMaximumFrameAgeSeconds;
+	const bool bObservationFresh = OpeningDetection.bValid && OpeningDetection.bControlEligible && OpeningDetection.TimestampSeconds > -BIG_NUMBER*.5f && Now-OpeningDetection.TimestampSeconds <= VisionMaximumFrameAgeSeconds;
 	OutLines.Add(FString::Printf(TEXT("관측: %s / 현재 프레임 경과 %s / 마지막 잠금 경과 %s"), bObservationFresh ? TEXT("현재 RGB-D") : TEXT("오래됨/미측정"), *AgeText(OpeningDetection.TimestampSeconds), *AgeText(LastTrackedOpeningTime)));
 	OutLines.Add(FString::Printf(TEXT("검출 단계: %s"), *LastVisionStageStatus));
 	if (VisionPairDiagnostics.IsEmpty()) OutLines.Add(TEXT("쌍 판정: 미측정 또는 후보 부족"));
 	else for (int32 Index = FMath::Max(0, VisionPairDiagnostics.Num()-2); Index < VisionPairDiagnostics.Num(); ++Index) OutLines.Add(VisionPairDiagnostics[Index]);
+	if (bDetailedSensorDiagnostics)
+	{
+		for (int32 Index = FMath::Max(0, VisionSubdivisionDiagnostics.Num()-3); Index < VisionSubdivisionDiagnostics.Num(); ++Index) OutLines.Add(VisionSubdivisionDiagnostics[Index]);
+	}
 	OutLines.Add(FString::Printf(TEXT("정렬: 좌우 %s / 높이 %s / 명령 E/Q %.2f Z/C %.2f / 실제 높이 %.1f 좌우 %.1f"), *ValueText(LastAlignmentLateralErrorCm, TEXT("cm")), *ValueText(LastAlignmentLiftCorrectionCm, TEXT("cm")), LiftInput, SideShiftInput, LiftCm, SideShiftCm));
 	OutLines.Add(FString::Printf(TEXT("접근: 명령 W/S %.2f 조향 %.2f / 실제속도 %.1fcm/s / 누적 %s / 시작계획 %s / 현재잔여 %s / 한계 %s / 재계획 %d / 차단 %s"), LastAppliedDriveInput, LastAppliedSteerInput, CurrentForwardSpeedCmPerSec, *ValueText(LastAutoApproachTravelCm, TEXT("cm")), *ValueText(AutoApproachPlannedTravelCm, TEXT("cm")), *ValueText(AutoApproachRequiredTravelCm, TEXT("cm")), *ValueText(AutoApproachTravelBudgetCm, TEXT("cm")), AutoApproachReplanCount, bLastAutoApproachBlocked ? TEXT("예") : TEXT("아니오")));
 	const float ReachRemaining = FMath::Max(0.f, Dimensions.ReachTravelCm - ReachCm);
@@ -1713,8 +1934,39 @@ void AAutomatedForklift::SaveVisionTransitionArtifacts(const TArray<FColor>& Pix
 	}
 	FString Metadata = FString::Printf(TEXT("frame=%d valid=%d state=%s\nreason=%s\n"), LastVisionFrameNumber, bValidFrame, *AutoPickupStateToString(AutoPickupState), *LastVisionFailureReason);
 	for (const FString& Line : VisionPairDiagnostics) Metadata += Line + TEXT("\n");
+	Metadata += TEXT("subdivision diagnostics:\n");
+	for (const FString& Line : VisionSubdivisionDiagnostics) Metadata += Line + TEXT("\n");
 	FFileHelper::SaveStringToFile(Metadata, *FPaths::Combine(Root, Prefix + TEXT("_diagnostics.txt")));
 	UE_LOG(LogTemp, Log, TEXT("[R16HD_AUTO_VISION] saved %s source/masks/diagnostics to %s"), *Prefix, *Root);
+}
+
+void AAutomatedForklift::SaveRgbExposureSweepArtifact(const TArray<FColor>& Pixels, float ExposureBias, int32 CaptureId, const FString& CaptureKind) const
+{
+	// Both images are deliberately written from the same readback.  The first is
+	// the RT resource exactly as ReadPixels returned it; the second is the copy
+	// handed to the detector.  If these differ on disk, a later code path—not the
+	// scene capture or the CPU conversion—has modified detector input.
+	if (Pixels.Num() != PalletSensorWidthPx * PalletSensorHeightPx) return;
+	const FString Root = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("RgbExposureSweep"));
+	IFileManager::Get().MakeDirectory(*Root, true);
+	const int32 BiasTenths = FMath::RoundToInt(ExposureBias * 10.f);
+	const FString Prefix = FString::Printf(TEXT("cycle_%06d_%s_ev_%+03d"), CaptureId, *CaptureKind, BiasTenths);
+	const auto SavePpm = [&Root, &Prefix, this](const TCHAR* Suffix, const TArray<FColor>& Image)
+	{
+		if (Image.Num() != PalletSensorWidthPx * PalletSensorHeightPx) return;
+		FTCHARToUTF8 Header(*FString::Printf(TEXT("P6\n%d %d\n255\n"), PalletSensorWidthPx, PalletSensorHeightPx));
+		TArray<uint8> Bytes;
+		Bytes.Append(reinterpret_cast<const uint8*>(Header.Get()), Header.Length());
+		Bytes.Reserve(Bytes.Num() + Image.Num() * 3);
+		for (const FColor& Pixel : Image) { Bytes.Add(Pixel.R); Bytes.Add(Pixel.G); Bytes.Add(Pixel.B); }
+		FFileHelper::SaveArrayToFile(Bytes, *FPaths::Combine(Root, Prefix + TEXT("_") + Suffix + TEXT(".ppm")));
+	};
+	SavePpm(TEXT("rt_readback"), Pixels);
+	SavePpm(TEXT("detector_cpu"), LatestRgbCpuPixels);
+	FString Metadata = FString::Printf(TEXT("capture_cycle=%d\ncapture_kind=%s\nprofile=%s\nexposure_bias=%.2f\n%s\n%s\n"), CaptureId, *CaptureKind, bUseLegacyRgbCaptureProfile ? TEXT("legacy") : TEXT("current-corrected"), ExposureBias, *LastRgbCaptureSettings, *LastRgbReadStatistics);
+	Metadata += TEXT("hud_path=DrawTexture(RenderTarget) for O=0; DrawItem(FLinearColor::FromSRGBColor(CPU)) for O=5\n");
+	FFileHelper::SaveStringToFile(Metadata, *FPaths::Combine(Root, Prefix + TEXT("_metadata.txt")));
+	UE_LOG(LogTemp, Warning, TEXT("[R16HD_RGB] saved same-cycle RT/CPU evidence: %s"), *Prefix);
 }
 
 bool AAutomatedForklift::ReadSynchronizedDepthFrame()
@@ -1834,12 +2086,20 @@ void AAutomatedForklift::ProcessOpeningVision()
 	if (!PalletSensorRenderTarget || !GetWorld()) return;
 	const bool bAutoNeedsAnalysis = AutoPickupState == EAutoPickupState::Detecting || AutoPickupState == EAutoPickupState::Approaching || AutoPickupState == EAutoPickupState::Aligning || AutoPickupState == EAutoPickupState::Inserting;
 	const bool bPreviewNeedsAnalysis = PalletSensorDisplayMode != 0;
-	if (!bAutoNeedsAnalysis && !bPreviewNeedsAnalysis && !RackHeightTarget.IsSet()) return;
+	const bool bExposureSweepNeedsReadback = bRgbExposureSweepActive && RgbExposureSweepPendingCaptureId > 0;
+	const bool bReferenceNeedsReadback = RgbReferenceCapturePendingId > 0;
+	if (!bAutoNeedsAnalysis && !bPreviewNeedsAnalysis && !bExposureSweepNeedsReadback && !bReferenceNeedsReadback && !RackHeightTarget.IsSet()) return;
+	if ((bExposureSweepNeedsReadback || bReferenceNeedsReadback) && !RgbExposureSweepCaptureFence.IsFenceComplete())
+	{
+		LastPixelReadStatus = TEXT("waiting for same-cycle GPU capture fence");
+		return;
+	}
+	if (bExposureSweepNeedsReadback || bReferenceNeedsReadback) VisionProcessElapsed = VisionProcessIntervalSeconds;
 	VisionProcessElapsed += GetWorld()->GetDeltaSeconds(); if (VisionProcessElapsed < VisionProcessIntervalSeconds) return; VisionProcessElapsed = 0.f;
 	if (SensorFrameId <= 0 || SensorFrameId == LastProcessedSensorFrameId) { LastPixelReadStatus = SensorFrameId <= 0 ? TEXT("capture frame not available") : TEXT("waiting for next capture frame"); return; }
 	LastProcessedSensorFrameId = SensorFrameId;
 	const double VisionStartSeconds = FPlatformTime::Seconds();
-	++LastVisionFrameNumber; LastVisionProcessTime = GetWorld()->GetTimeSeconds(); LastVisionCandidateCount = -1; bLastVisionHadValidPair = false; OpeningDetection = FOpeningDetection(); VisionCandidates.Reset(); VisionPairDiagnostics.Reset(); VisionSubdivisionCells.Reset(); VisionSubdivisionDepths.Reset(); LastVisionFailureReason.Reset(); LastVisionStageStatus = TEXT("RGB coarse/merge pending");
+	++LastVisionFrameNumber; LastVisionProcessTime = GetWorld()->GetTimeSeconds(); LastVisionCandidateCount = -1; bLastVisionHadValidPair = false; bLastVisionPartialTargetEvidence = false; OpeningDetection = FOpeningDetection(); VisionCandidates.Reset(); VisionPairDiagnostics.Reset(); VisionSubdivisionCells.Reset(); VisionSubdivisionDepths.Reset(); VisionSubdivisionDiagnostics.Reset(); LastVisionFailureReason.Reset(); LastVisionStageStatus = TEXT("RGB coarse/merge pending");
 	FTextureRenderTargetResource* Resource = PalletSensorRenderTarget->GameThread_GetRenderTargetResource(); TArray<FColor> Pixels;
 	if (!Resource || !Resource->ReadPixels(Pixels) || Pixels.Num() != PalletSensorWidthPx * PalletSensorHeightPx) { bLastVisionReadSucceeded = false; LastPixelReadStatus = TEXT("read failed"); LastVisionFailureReason = TEXT("Camera render target pixels unavailable"); return; }
 	LastVisionRgbReadMs = static_cast<float>((FPlatformTime::Seconds()-VisionStartSeconds)*1000.0);
@@ -1862,6 +2122,28 @@ void AAutomatedForklift::ProcessOpeningVision()
 		SensorFrameId, MinR, MaxR, SumR / PixelCount, MinG, MaxG, SumG / PixelCount, MinB, MaxB, SumB / PixelCount,
 		100.f * static_cast<float>(WhiteSaturated) / PixelCount);
 	bLastVisionReadSucceeded = true; LastPixelReadStatus = TEXT("RGB read succeeded");
+	if (bRgbExposureSweepActive && RgbExposureSweepPendingCaptureId == SensorFrameId)
+	{
+		SaveRgbExposureSweepArtifact(Pixels, PalletSensorExposureBias, SensorFrameId, TEXT("ev-sweep"));
+		RgbExposureSweepPendingCaptureId = -1;
+		++RgbExposureSweepStage;
+		RgbExposureDiagnosticStatus = FString::Printf(TEXT("2: EV comparison %d/5 saved -> Saved/RgbExposureSweep"), RgbExposureSweepStage);
+		if (RgbExposureSweepStage >= 5)
+		{
+			bRgbExposureSweepActive = false;
+			bPalletSensorUseManualExposure = bRgbExposureSweepPreviousManual;
+			PalletSensorExposureBias = RgbExposureSweepPreviousBias;
+			UpdatePalletSensorSettings();
+			RgbExposureDiagnosticStatus = TEXT("2: EV comparison complete -> Saved/RgbExposureSweep");
+			UE_LOG(LogTemp, Warning, TEXT("[R16HD_RGB] exposure sweep complete; restored requested exposure mode/bias"));
+		}
+	}
+	if (RgbReferenceCapturePendingId == SensorFrameId)
+	{
+		SaveRgbExposureSweepArtifact(Pixels, PalletSensorExposureBias, SensorFrameId, RgbReferenceCaptureLabel.IsEmpty() ? TEXT("reference") : RgbReferenceCaptureLabel);
+		RgbReferenceCapturePendingId = -1;
+		RgbExposureDiagnosticStatus = TEXT("5: current exposure reference saved -> Saved/RgbExposureSweep");
+	}
 	// RGB diagnostics deliberately continue without depth.  Automatic motion
 	// later requires bDepthValid, but coarse regions/candidates remain visible
 	// so a depth transport failure cannot hide the RGB diagnosis.
@@ -1902,8 +2184,25 @@ void AAutomatedForklift::ProcessOpeningVision()
 	// pallet cannot be rejected merely because a coarse cell clipped its edge.
 	if ((AutoPickupState == EAutoPickupState::Approaching || AutoPickupState == EAutoPickupState::Aligning) && LastTrackedOpeningDetection.bValid)
 	{
-		const FVector2D Centre = (LastTrackedOpeningDetection.LeftCenter + LastTrackedOpeningDetection.RightCenter) * .5f;
-		const FVector2D Extent = LastTrackedOpeningDetection.LeftExtent + LastTrackedOpeningDetection.RightExtent;
+		FVector2D Centre = (LastTrackedOpeningDetection.LeftCenter + LastTrackedOpeningDetection.RightCenter) * .5f;
+		FVector2D Extent = LastTrackedOpeningDetection.LeftExtent + LastTrackedOpeningDetection.RightExtent;
+		// Predict the *search ROI* from the 3D target measurement when the
+		// carriage/camera moved.  This is not an observation: pixels are still
+		// re-read and must pass the full pair/depth validation before motion resumes.
+		if (bLockedTargetWorldValid && PalletSensorCapture)
+		{
+			const FTransform CameraFrame = PalletSensorCapture->GetComponentTransform();
+			const FVector LocalFront = CameraFrame.InverseTransformPosition(LockedTargetFrontWorld);
+			if (LocalFront.X > DepthMinimumCm)
+			{
+				const float ProjectionFocal = W/(2.f*FMath::Tan(FMath::DegreesToRadians(PalletSensorFieldOfViewDeg*.5f)));
+				Centre = FVector2D(W*.5f + LocalFront.Y*ProjectionFocal/LocalFront.X, H*.5f - LocalFront.Z*ProjectionFocal/LocalFront.X);
+				const float PreviousDepth = FMath::Max(1.f, LastTrackedOpeningDetection.FrontOpticalDepthCm);
+				const float Scale = FMath::Clamp(PreviousDepth/LocalFront.X, .45f, 3.5f);
+				Extent *= Scale;
+				VisionPairDiagnostics.Add(FString::Printf(TEXT("tracked 3D ROI: z %.1fcm scale %.2f"), LocalFront.X, Scale));
+			}
+		}
 		const float Expand = 2.5f + FMath::Min(2.f, LockedTargetMissFrames * .5f);
 		const int32 MinPX = FMath::Clamp(FMath::FloorToInt(Centre.X - Extent.X * Expand - VisionFineSearchPaddingPx * 2), 0, W - 1);
 		const int32 MaxPX = FMath::Clamp(FMath::CeilToInt(Centre.X + Extent.X * Expand + VisionFineSearchPaddingPx * 2), MinPX + 1, W);
@@ -1946,7 +2245,32 @@ void AAutomatedForklift::ProcessOpeningVision()
 		// rear scene from being merged into the pallet body.
 		TArray<float> BodyDepths; if (bDepthAvailable) for(int32 Y=TY;Y<BY;++Y)for(int32 X=LX;X<RX;++X)if(Reg[Y*SW+X]){const float D=LatestDepthCm[(Y*Step)*W+X*Step];if(FMath::IsFinite(D)&&D>=DepthMinimumCm&&D<=DepthMaximumCm)BodyDepths.Add(D);} float BodyDepth=-1.f; if(BodyDepths.Num()>=12){BodyDepths.Sort();BodyDepth=BodyDepths[BodyDepths.Num()/2];int32 SurfaceSupport=0;for(const float D:BodyDepths)if(FMath::Abs(D-BodyDepth)<=VisionDepthBodyContinuityCm)++SurfaceSupport;const bool bRepresentativeSurface=SurfaceSupport*100>=BodyDepths.Num()*55;if(bRepresentativeSurface)for(int32 Y=TY;Y<BY;++Y)for(int32 X=LX;X<RX;++X)if(Reg[Y*SW+X]&&FMath::Abs(LatestDepthCm[(Y*Step)*W+X*Step]-BodyDepth)>VisionDepthBodyContinuityCm)Reg[Y*SW+X]=0;else { BodyDepth=-1.f; if(VisionPairDiagnostics.Num()<48)VisionPairDiagnostics.Add(FString::Printf(TEXT("region %d depth skipped: mixed surface support %d/%d"),R.Label,SurfaceSupport,BodyDepths.Num())); }}
 		// 2) Actual 2x2 refinement on original pixels, bounded by depth and budget.
-		const int32 SubdivisionStart=VisionSubdivisionCells.Num();TFunction<void(FIntRect,int32)> Split=[&](FIntRect Cell,int32 Depth){if(VisionSubdivisionCells.Num()>=VisionMaximumFineCells)return;VisionSubdivisionCells.Add(Cell);VisionSubdivisionDepths.Add(Depth);if(Depth>=VisionMaximumSubdivisionDepth||Cell.Width()<=VisionMinimumSubdivisionCellPx||Cell.Height()<=VisionMinimumSubdivisionCellPx)return;FVector Mean=FVector::ZeroVector;float MeanL=0.f;int32 N=0;for(int32 Y=Cell.Min.Y;Y<Cell.Max.Y;Y+=4)for(int32 X=Cell.Min.X;X<Cell.Max.X;X+=4){Mean+=Feature(Pixels[Y*W+X]);MeanL+=Bright(Pixels[Y*W+X]);++N;}Mean/=FMath::Max(1,N);MeanL/=FMath::Max(1,N);float Var=0.f;for(int32 Y=Cell.Min.Y;Y<Cell.Max.Y;Y+=5)for(int32 X=Cell.Min.X;X<Cell.Max.X;X+=5)Var+=FVector::Dist(Feature(Pixels[Y*W+X]),Mean)+FMath::Abs(Bright(Pixels[Y*W+X])-MeanL);if(Var/FMath::Max(1,N/2)<.10f)return;const int32 MX=(Cell.Min.X+Cell.Max.X)/2,MY=(Cell.Min.Y+Cell.Max.Y)/2;Split(FIntRect(Cell.Min.X,Cell.Min.Y,MX,MY),Depth+1);Split(FIntRect(MX,Cell.Min.Y,Cell.Max.X,MY),Depth+1);Split(FIntRect(Cell.Min.X,MY,MX,Cell.Max.Y),Depth+1);Split(FIntRect(MX,MY,Cell.Max.X,Cell.Max.Y),Depth+1);};Split(B,0);
+		const int32 SubdivisionStart = VisionSubdivisionCells.Num();
+		int32 LeafCount = 0, MaxDepthStops = 0, MinimumSizeStops = 0, UniformStops = 0, BudgetStops = 0, SplitCount = 0;
+		TFunction<void(FIntRect, int32)> Split = [&](FIntRect Cell, int32 Depth)
+		{
+			if (VisionSubdivisionCells.Num() >= VisionMaximumFineCells) { ++BudgetStops; return; }
+			VisionSubdivisionCells.Add(Cell); VisionSubdivisionDepths.Add(Depth);
+			if (Depth >= VisionMaximumSubdivisionDepth) { ++LeafCount; ++MaxDepthStops; return; }
+			if (Cell.Width() <= VisionMinimumSubdivisionCellPx || Cell.Height() <= VisionMinimumSubdivisionCellPx) { ++LeafCount; ++MinimumSizeStops; return; }
+			FVector Mean = FVector::ZeroVector; float MeanL = 0.f; int32 N = 0;
+			for (int32 Y = Cell.Min.Y; Y < Cell.Max.Y; Y += 4) for (int32 X = Cell.Min.X; X < Cell.Max.X; X += 4) { Mean += Feature(Pixels[Y * W + X]); MeanL += Bright(Pixels[Y * W + X]); ++N; }
+			Mean /= FMath::Max(1, N); MeanL /= FMath::Max(1, N);
+			float Variation = 0.f;
+			for (int32 Y = Cell.Min.Y; Y < Cell.Max.Y; Y += 5) for (int32 X = Cell.Min.X; X < Cell.Max.X; X += 5) Variation += FVector::Dist(Feature(Pixels[Y * W + X]), Mean) + FMath::Abs(Bright(Pixels[Y * W + X]) - MeanL);
+			if (Variation / FMath::Max(1, N / 2) < .10f) { ++LeafCount; ++UniformStops; return; }
+			++SplitCount;
+			const int32 MX = (Cell.Min.X + Cell.Max.X) / 2, MY = (Cell.Min.Y + Cell.Max.Y) / 2;
+			Split(FIntRect(Cell.Min.X, Cell.Min.Y, MX, MY), Depth + 1);
+			Split(FIntRect(MX, Cell.Min.Y, Cell.Max.X, MY), Depth + 1);
+			Split(FIntRect(Cell.Min.X, MY, MX, Cell.Max.Y), Depth + 1);
+			Split(FIntRect(MX, MY, Cell.Max.X, Cell.Max.Y), Depth + 1);
+		};
+		Split(B, 0);
+		if (VisionSubdivisionDiagnostics.Num() < 32)
+		{
+			VisionSubdivisionDiagnostics.Add(FString::Printf(TEXT("region %d ROI %dx%d: cells=%d leaves=%d splits=%d stop(depth=%d size=%d uniform=%d budget=%d)"), R.Label, B.Width(), B.Height(), VisionSubdivisionCells.Num() - SubdivisionStart, LeafCount, SplitCount, MaxDepthStops, MinimumSizeStops, UniformStops, BudgetStops));
+		}
 		// The quadtree is not merely debug output: every subdivided cell is
 		// re-evaluated from the original render-target pixels and replaces the
 		// coarse body decision at the corresponding Step=2 samples.  Mixed edge
@@ -1958,7 +2282,7 @@ void AAutomatedForklift::ProcessOpeningVision()
 		// leaving only a stale last-success mask on the HUD/disk.
 		VisionRegionMask=Reg; VisionBodyMask=Reg; VisionMask=Open; VisionMaskWidth=SW; VisionMaskHeight=SH; VisionBodyBounds=FIntRect(LX,TY,RX,BY);
 		struct FC{FVector2D C,E;int32 A,Contact;bool Edge;};TArray<FC> Cs;TArray<uint8> Work=Open;
-		for(int32 Seed=0;Seed<Work.Num();++Seed)if(Work[Seed]){Queue.Reset();Queue.Add(Seed);Work[Seed]=0;int32 MinX=SW,MaxX=0,MinY=SH,MaxY=0;for(int32 I=0;I<Queue.Num();++I){const int32 P=Queue[I],X=P%SW,Y=P/SW;MinX=FMath::Min(MinX,X);MaxX=FMath::Max(MaxX,X);MinY=FMath::Min(MinY,Y);MaxY=FMath::Max(MaxY,Y);for(int32 DY=-1;DY<=1;++DY)for(int32 DX=-1;DX<=1;++DX){const int32 NX=X+DX,NY=Y+DY;if(NX>=LX&&NX<RX&&NY>=TY&&NY<BY&&Work[NY*SW+NX]){Work[NY*SW+NX]=0;Queue.Add(NY*SW+NX);}}}int32 Contact=0;for(int32 X=MinX;X<=MaxX;++X){Contact+=Reg[FMath::Max(TY,MinY-1)*SW+X];Contact+=Reg[FMath::Min(BY-1,MaxY+1)*SW+X];}for(int32 Y=MinY;Y<=MaxY;++Y){Contact+=Reg[Y*SW+FMath::Max(LX,MinX-1)];Contact+=Reg[Y*SW+FMath::Min(RX-1,MaxX+1)];}const float BW=(MaxX-MinX+1)*Step,BH=(MaxY-MinY+1)*Step;const bool Edge=MinX<=0||MaxX>=SW-1||MinY<=0||MaxY>=SH-1;const bool bRoiClipped=MinX<=LX||MaxX>=RX-1||MinY<=TY||MaxY>=BY-1;++TotalOpeningComponents;const bool bUsable=Queue.Num()>=12&&BW>=12&&BH>=8&&Contact>=2&&!Edge;if(bUsable){++UsableOpeningComponents;if(bRoiClipped&&VisionPairDiagnostics.Num()<48)VisionPairDiagnostics.Add(FString::Printf(TEXT("region %d opening touches ROI boundary; retained for expanded/global search"),R.Label));Cs.Add({FVector2D((MinX+MaxX+1)*Step*.5f,(MinY+MaxY+1)*Step*.5f),FVector2D(BW*.5f,BH*.5f),Queue.Num(),Contact,Edge});}else if(VisionPairDiagnostics.Num()<48)VisionPairDiagnostics.Add(FString::Printf(TEXT("region %d opening reject: area=%d size=%.0fx%.0f contact=%d edge=%d"),R.Label,Queue.Num(),BW,BH,Contact,Edge));}
+		for(int32 Seed=0;Seed<Work.Num();++Seed)if(Work[Seed]){Queue.Reset();Queue.Add(Seed);Work[Seed]=0;int32 MinX=SW,MaxX=0,MinY=SH,MaxY=0;for(int32 I=0;I<Queue.Num();++I){const int32 P=Queue[I],X=P%SW,Y=P/SW;MinX=FMath::Min(MinX,X);MaxX=FMath::Max(MaxX,X);MinY=FMath::Min(MinY,Y);MaxY=FMath::Max(MaxY,Y);for(int32 DY=-1;DY<=1;++DY)for(int32 DX=-1;DX<=1;++DX){const int32 NX=X+DX,NY=Y+DY;if(NX>=LX&&NX<RX&&NY>=TY&&NY<BY&&Work[NY*SW+NX]){Work[NY*SW+NX]=0;Queue.Add(NY*SW+NX);}}}int32 Contact=0;for(int32 X=MinX;X<=MaxX;++X){Contact+=Reg[FMath::Max(TY,MinY-1)*SW+X];Contact+=Reg[FMath::Min(BY-1,MaxY+1)*SW+X];}for(int32 Y=MinY;Y<=MaxY;++Y){Contact+=Reg[Y*SW+FMath::Max(LX,MinX-1)];Contact+=Reg[Y*SW+FMath::Min(RX-1,MaxX+1)];}const float BW=(MaxX-MinX+1)*Step,BH=(MaxY-MinY+1)*Step;const bool Edge=MinX<=0||MaxX>=SW-1||MinY<=0||MaxY>=SH-1;const bool bRoiClipped=MinX<=LX||MaxX>=RX-1||MinY<=TY||MaxY>=BY-1;++TotalOpeningComponents;const bool bUsable=Queue.Num()>=12&&BW>=12&&BH>=8&&Contact>=2&&!Edge;if(bUsable){++UsableOpeningComponents;const FVector2D CandidateCenter((MinX+MaxX+1)*Step*.5f,(MinY+MaxY+1)*Step*.5f),CandidateExtent(BW*.5f,BH*.5f);VisionCandidates.Add({CandidateCenter,CandidateExtent,Queue.Num(),false,bRoiClipped,bRoiClipped?TEXT("opening proposal touches ROI boundary"):TEXT("opening proposal awaiting pair/depth validation")});if(bRoiClipped&&VisionPairDiagnostics.Num()<48)VisionPairDiagnostics.Add(FString::Printf(TEXT("region %d opening touches ROI boundary; retained for expanded/global search"),R.Label));Cs.Add({CandidateCenter,CandidateExtent,Queue.Num(),Contact,Edge});}else if(VisionPairDiagnostics.Num()<48)VisionPairDiagnostics.Add(FString::Printf(TEXT("region %d opening reject: area=%d size=%.0fx%.0f contact=%d edge=%d"),R.Label,Queue.Num(),BW,BH,Contact,Edge));}
 		// Depth geometry rejects dark regions painted on the floor.  The four
 		// material-border samples are unprojected to world space; a floor patch has
 		// a normal close to world up, while a pallet front is approximately vertical.
@@ -1992,7 +2316,14 @@ void AAutomatedForklift::ProcessOpeningVision()
 	}
 	if(Best<MinimumOpeningConfidence)
 	{
-		++LockedTargetMissFrames;
+		// A component inside the predicted target ROI with valid depth is useful
+		// partial evidence for reacquisition, but never sufficient to move or to
+		// overwrite the locked target geometry.
+		bLastVisionPartialTargetEvidence = bHaveTrackedRoi && bDepthAvailable && UsableOpeningComponents > 0;
+		// Initial full-frame searching is not a tracker miss.  Only a lost trusted
+		// target expands the ROI and advances the reacquire failure counter.
+		if (LastTrackedOpeningDetection.bValid && (SensorFrameId % 3) == 0) ++LockedTargetMissFrames;
+		else LockedTargetMissFrames = 0;
 		if (LastVisionSuccessSensorFrameId >= 0 && FirstVisionFailureAfterSuccessSensorFrameId < 0) FirstVisionFailureAfterSuccessSensorFrameId = SensorFrameId;
 		LastVisionFineMs = static_cast<float>((FPlatformTime::Seconds()-FineStartSeconds)*1000.0);
 		LastVisionTotalMs = static_cast<float>((FPlatformTime::Seconds()-VisionStartSeconds)*1000.0); LastVisionMaxMs = FMath::Max(LastVisionMaxMs, LastVisionTotalMs);
@@ -2005,7 +2336,10 @@ void AAutomatedForklift::ProcessOpeningVision()
 	LastVisionFineMs = static_cast<float>((FPlatformTime::Seconds()-FineStartSeconds)*1000.0);
 	LastVisionTotalMs = static_cast<float>((FPlatformTime::Seconds()-VisionStartSeconds)*1000.0); LastVisionMaxMs = FMath::Max(LastVisionMaxMs, LastVisionTotalMs);
 	VisionRegionMask=MoveTemp(BestRegion);VisionBodyMask=MoveTemp(BestBody);VisionMask=MoveTemp(BestOpen);VisionMaskWidth=SW;VisionMaskHeight=SH;VisionBodyBounds=BestBounds;VisionCandidates.Add({BestLC,BestLE,0,true,false,TEXT("selected opening")});VisionCandidates.Add({BestRC,BestRE,0,true,false,TEXT("selected opening")});
-	const float Sep=BestRC.X-BestLC.X,Focal=W/(2.f*FMath::Tan(FMath::DegreesToRadians(PalletSensorFieldOfViewDeg*.5f)));OpeningDetection.bValid=true;OpeningDetection.Confidence=Best;OpeningDetection.TimestampSeconds=GetWorld()->GetTimeSeconds();bLastVisionHadValidPair=true;OpeningDetection.LeftCenter=BestLC;OpeningDetection.RightCenter=BestRC;OpeningDetection.LeftExtent=BestLE;OpeningDetection.RightExtent=BestRE;OpeningDetection.EstimatedDistanceCm=VisionKnownOpeningCenterSpacingCm*Focal/FMath::Max(1.f,Sep);OpeningDetection.MonocularDistanceCm=OpeningDetection.EstimatedDistanceCm;const float CenterX=(BestLC.X+BestRC.X)*.5f;OpeningDetection.EstimatedLateralCm=PalletSensorLateralOffsetFromCenterCm+(CenterX-W*.5f)*OpeningDetection.EstimatedDistanceCm/Focal;if (bDepthAvailable) UpdateDepthForOpeningDetection(); if (!OpeningDetection.bDepthValid || FMath::Abs(OpeningDetection.FrontOpticalDepthCm-OpeningDetection.MonocularDistanceCm)>DepthRgbDisagreementCm) { LastVisionFailureReason=FString::Printf(TEXT("RGB pair valid; depth unavailable/discordant — automatic motion held: mono %.1fcm depth %s"),OpeningDetection.MonocularDistanceCm,OpeningDetection.bDepthValid ? *FString::Printf(TEXT("%.1fcm"),OpeningDetection.FrontOpticalDepthCm) : TEXT("unmeasured")); }
+	const float Sep=BestRC.X-BestLC.X,Focal=W/(2.f*FMath::Tan(FMath::DegreesToRadians(PalletSensorFieldOfViewDeg*.5f)));OpeningDetection.bValid=true;OpeningDetection.Confidence=Best;OpeningDetection.TimestampSeconds=GetWorld()->GetTimeSeconds();bLastVisionHadValidPair=true;OpeningDetection.LeftCenter=BestLC;OpeningDetection.RightCenter=BestRC;OpeningDetection.LeftExtent=BestLE;OpeningDetection.RightExtent=BestRE;OpeningDetection.EstimatedDistanceCm=VisionKnownOpeningCenterSpacingCm*Focal/FMath::Max(1.f,Sep);OpeningDetection.MonocularDistanceCm=OpeningDetection.EstimatedDistanceCm;const float CenterX=(BestLC.X+BestRC.X)*.5f;OpeningDetection.EstimatedLateralCm=PalletSensorLateralOffsetFromCenterCm+(CenterX-W*.5f)*OpeningDetection.EstimatedDistanceCm/Focal;if (bDepthAvailable) UpdateDepthForOpeningDetection();
+	const float RgbDepthDifferenceCm = OpeningDetection.bDepthValid ? FMath::Abs(OpeningDetection.FrontOpticalDepthCm-OpeningDetection.MonocularDistanceCm) : BIG_NUMBER;
+	OpeningDetection.bControlEligible = OpeningDetection.bDepthValid && RgbDepthDifferenceCm <= DepthRgbDisagreementCm;
+	if (!OpeningDetection.bControlEligible) { LastVisionFailureReason=FString::Printf(TEXT("RGB-D candidate retained but not control-eligible: mono %.1fcm front %s delta %s (limit %.1fcm)"), OpeningDetection.MonocularDistanceCm, OpeningDetection.bDepthValid ? *FString::Printf(TEXT("%.1fcm"), OpeningDetection.FrontOpticalDepthCm) : TEXT("unmeasured"), OpeningDetection.bDepthValid ? *FString::Printf(TEXT("%.1fcm"), RgbDepthDifferenceCm) : TEXT("unmeasured"), DepthRgbDisagreementCm); }
 	// Reject a discontinuous candidate rather than silently switching targets.
 	if ((AutoPickupState == EAutoPickupState::Approaching || AutoPickupState == EAutoPickupState::Aligning) && LastTrackedOpeningDetection.bValid)
 	{
@@ -2035,7 +2369,17 @@ void AAutomatedForklift::ProcessOpeningVision()
 			return;
 		}
 	}
-	LastVisionStageStatus=FString::Printf(TEXT("RGB body/opening/pair accepted; depth %s"), OpeningDetection.bDepthValid?TEXT("front verified"):TEXT("not usable for control")); LastTrackedOpeningDetection=OpeningDetection; LastTrackedOpeningTime=OpeningDetection.TimestampSeconds; LastTrackedActorLocation=GetActorLocation(); LastTrackedOpeningSeparationPx=Sep; LockedTargetMissFrames=0; LastVisionSuccessSensorFrameId=SensorFrameId; FirstVisionFailureAfterSuccessSensorFrameId=-1;
+	LastVisionStageStatus=FString::Printf(TEXT("RGB body/opening/pair accepted; depth %s; control %s"), OpeningDetection.bDepthValid ? TEXT("front measured") : TEXT("not usable"), OpeningDetection.bControlEligible ? TEXT("eligible") : TEXT("held"));
+	// Preserve the last trusted target when a newly observed pair is merely a
+	// measurable RGB-D candidate.  In particular, do not let distant shelves
+	// or background geometry overwrite position/scale/time used for control.
+	if (OpeningDetection.bControlEligible)
+	{
+		LastTrackedOpeningDetection=OpeningDetection; LastTrackedOpeningTime=OpeningDetection.TimestampSeconds; LastTrackedActorLocation=GetActorLocation(); LastTrackedOpeningSeparationPx=Sep; LockedTargetMissFrames=0; TrackingRecoveryStartTime=-BIG_NUMBER; bLastVisionPartialTargetEvidence=false; LastVisionSuccessSensorFrameId=SensorFrameId; FirstVisionFailureAfterSuccessSensorFrameId=-1;
+		// Once detecting has assigned an ID, measurements may update only this
+		// continuity-checked target's world geometry.  No actor metadata enters it.
+		if (LockedTargetId > 0) UpdateLockedTargetWorldMeasurement(OpeningDetection);
+	}
 	LastSuccessfulVisionPixels = Pixels; bSavedLastValidVisionArtifact = true; bSavedFirstVisionFailureArtifact = false;
 	UE_LOG(LogTemp, Log, TEXT("[R16HD_AUTO_VISION] target=locked frame=%d pair=(%.0f,%.0f)-(%.0f,%.0f) dist=%.1f lateral=%.1f confidence=%.2f"), LastVisionFrameNumber, BestLC.X, BestLC.Y, BestRC.X, BestRC.Y, OpeningDetection.EstimatedDistanceCm, OpeningDetection.EstimatedLateralCm, Best);
 }
@@ -2224,12 +2568,19 @@ void AAutomatedForklift::UpdateAutoPickup(float DeltaSeconds)
 	// be erased by the input system's per-frame zero-valued axis callbacks.
 	ClearAutomaticCommands();
 	AutoPickupStateElapsed += DeltaSeconds;
-	const bool bFresh = OpeningDetection.bValid && OpeningDetection.bDepthValid && GetWorld()->GetTimeSeconds() - OpeningDetection.TimestampSeconds <= VisionMaximumFrameAgeSeconds;
+	const bool bFresh = OpeningDetection.bValid && OpeningDetection.bControlEligible && GetWorld()->GetTimeSeconds() - OpeningDetection.TimestampSeconds <= VisionMaximumFrameAgeSeconds;
 	if (AutoPickupState == EAutoPickupState::Detecting) { if (bFresh) { if (LastStableOpeningVisionFrame != LastVisionFrameNumber) { ++OpeningStableFrames; LastStableOpeningVisionFrame = LastVisionFrameNumber; } } else { OpeningStableFrames = 0; LastStableOpeningVisionFrame = -1; } AutoPickupStatus = !OpeningDetection.bValid ? FString::Printf(TEXT("RGB 삽입구 후보 %d개 — 유효한 쌍 없음"), LastVisionCandidateCount) : (!OpeningDetection.bDepthValid ? FString::Printf(TEXT("RGB 쌍은 확인됨 — Depth 대기/실패: %s"), *LastDepthReadStatus) : FString::Printf(TEXT("삽입구 쌍 확인 — 서로 다른 프레임 안정 %d/3"), OpeningStableFrames)); if (OpeningStableFrames >= 3) { LockedOpeningDetection = OpeningDetection; bPreApproachHeightAlignment = true; SetAutoPickupState(EAutoPickupState::Aligning, TEXT("안정 RGB-D 쌍 잠금 — 차체 정지 상태에서 포크 높이·좌우 사전 정렬")); } else if (AutoPickupStateElapsed > 5.f) CancelAutoPickup(OpeningDetection.bValid && !OpeningDetection.bDepthValid ? TEXT("RGB 쌍은 있으나 유효한 SceneDepth가 없음 — 자동 제어 보류") : TEXT("유효한 두 삽입구를 찾지 못함 — 수동 접근 위치 조정 필요"), true); return; }
 	if (AutoPickupState == EAutoPickupState::Approaching)
 	{
+		if (bFresh && bResumeAlignmentAfterTracking)
+		{
+			bResumeAlignmentAfterTracking = false;
+			SetAutoPickupState(EAutoPickupState::Aligning, TEXT("fresh RGB-D target reacquired; resume fork alignment"));
+			return;
+		}
 		if (!bFresh)
 		{
+			if (TrackingRecoveryStartTime <= -BIG_NUMBER*.5f) TrackingRecoveryStartTime = GetWorld()->GetTimeSeconds();
 			// Stop first.  The next vision passes use the expanding tracked ROI and
 			// still run the global proposal search; no old detection is used to drive.
 			AutoPickupStatus = FString::Printf(TEXT("접근 중 현재 관측 상실 — ROI 확대 재탐색 %d/6 (마지막 유효 %.1fs 전)"), LockedTargetMissFrames, LastTrackedOpeningTime > -BIG_NUMBER*.5f ? GetWorld()->GetTimeSeconds()-LastTrackedOpeningTime : -1.f);
@@ -2314,6 +2665,16 @@ void AAutomatedForklift::UpdateAutoPickup(float DeltaSeconds)
 	}
 	if (AutoPickupState == EAutoPickupState::Aligning)
 	{
+		if (!bFresh)
+		{
+			bResumeAlignmentAfterTracking = true;
+			if (TrackingRecoveryStartTime <= -BIG_NUMBER*.5f) TrackingRecoveryStartTime = GetWorld()->GetTimeSeconds();
+			SetAutoPickupState(EAutoPickupState::Approaching, TEXT("alignment observation lost; hold and reacquire locked target"));
+			return;
+		}
+	}
+	if (AutoPickupState == EAutoPickupState::Aligning)
+	{
 		if (!bFresh) { CancelAutoPickup(TEXT("정렬 중 현재 RGB-D 측정 상실 — 오래된 구멍 좌표로 포크를 움직이지 않음"), true); return; }
 		const float DirectionErrorDeg = FMath::Abs(FMath::RadiansToDegrees(OpeningDetection.FrontYawErrorRad));
 		if (DirectionErrorDeg > AutoDirectionToleranceDeg) { SetAutoPickupState(EAutoPickupState::Approaching, TEXT("전면 방향 오차는 사이드시프트로 보정 불가 — 차체 방향 재정렬")); return; }
@@ -2325,20 +2686,16 @@ void AAutomatedForklift::UpdateAutoPickup(float DeltaSeconds)
 			CancelAutoPickup(TEXT("정렬 기하 계산 실패 — 현재 ForkCarriage 좌표 미측정"), true); return;
 		}
 		LastAlignmentLateralErrorCm = LateralError; LastAlignmentLiftCorrectionCm = LiftCorrection;
-		const float LeftHeightCm = OpeningDetection.LeftMeasuredOpeningHeightCm > 1.f ? OpeningDetection.LeftMeasuredOpeningHeightCm : (OpeningDetection.MeasuredOpeningHeightCm > 1.f ? OpeningDetection.MeasuredOpeningHeightCm : VisionKnownOpeningHeightCm);
-		const float RightHeightCm = OpeningDetection.RightMeasuredOpeningHeightCm > 1.f ? OpeningDetection.RightMeasuredOpeningHeightCm : (OpeningDetection.MeasuredOpeningHeightCm > 1.f ? OpeningDetection.MeasuredOpeningHeightCm : VisionKnownOpeningHeightCm);
-		const FVector LeftOpening = OpeningDetection.LeftMeasuredOpeningHeightCm > 1.f ? OpeningDetection.LeftOpeningCenterInForkCm : OpeningDetection.OpeningCenterInForkCm;
-		const FVector RightOpening = OpeningDetection.RightMeasuredOpeningHeightCm > 1.f ? OpeningDetection.RightOpeningCenterInForkCm : OpeningDetection.OpeningCenterInForkCm;
-		const float LeftBottom = LeftOpening.Z - LeftHeightCm * .5f, LeftTop = LeftOpening.Z + LeftHeightCm * .5f;
-		const float RightBottom = RightOpening.Z - RightHeightCm * .5f, RightTop = RightOpening.Z + RightHeightCm * .5f;
-		LastMeasuredOpeningBottomCm = FMath::Max(LeftBottom, RightBottom);
-		LastMeasuredOpeningTopCm = FMath::Min(LeftTop, RightTop);
-		// Fork top: bottom clearance and its physical thickness occupy the lower
-		// aperture limit; the upper clearance occupies the upper limit once.
-		LastAllowedForkTopMinCm = LastMeasuredOpeningBottomCm + AutoForkOpeningBottomClearanceCm + Dimensions.ForkThicknessCm;
-		LastAllowedForkTopMaxCm = LastMeasuredOpeningTopCm - AutoForkOpeningBottomClearanceCm;
-		LastForkTopLocalCm = (LastAllowedForkTopMinCm + LastAllowedForkTopMaxCm) * .5f - LiftCorrection;
-		LastHeightTargetLiftCm = LiftCm + LiftCorrection;
+		// One geometry path is used for both the displayed feasible interval and
+		// the actuator-stroke decision.  The camera rides with ForkCarriage, so
+		// camera-local height must never be compared directly with lift stroke.
+		if (!ComputeOpeningHeightAlignment(OpeningDetection, LastAllowedForkTopMinCm, LastAllowedForkTopMaxCm, LastForkTopLocalCm, LastHeightTargetLiftCm))
+		{
+			SetAutoPickupState(EAutoPickupState::Approaching, TEXT("opening height not measured; hold and reacquire"));
+			return;
+		}
+		LastMeasuredOpeningBottomCm = LastAllowedForkTopMinCm - AutoForkOpeningBottomClearanceCm - Dimensions.ForkThicknessCm;
+		LastMeasuredOpeningTopCm = LastAllowedForkTopMaxCm + AutoForkOpeningBottomClearanceCm;
 		if (LastAllowedForkTopMinCm > LastAllowedForkTopMaxCm)
 		{
 			if (LastStableAlignmentVisionFrame != LastVisionFrameNumber) { ++InvalidHeightRangeVisionFrames; LastStableAlignmentVisionFrame=LastVisionFrameNumber; }
@@ -2347,6 +2704,17 @@ void AAutomatedForklift::UpdateAutoPickup(float DeltaSeconds)
 			return;
 		}
 		InvalidHeightRangeVisionFrames=0;
+		const bool bTargetLiftOutsideStroke = LastHeightTargetLiftCm < -AutoVerticalToleranceCm || LastHeightTargetLiftCm > RequiredLiftStrokeCm + AutoVerticalToleranceCm;
+		if (bTargetLiftOutsideStroke)
+		{
+			if (LastStableAlignmentVisionFrame != LastVisionFrameNumber) { ++InvalidHeightRangeVisionFrames; LastStableAlignmentVisionFrame=LastVisionFrameNumber; }
+			const float LeftHeight = OpeningDetection.LeftMeasuredOpeningHeightCm > 1.f ? OpeningDetection.LeftMeasuredOpeningHeightCm : OpeningDetection.MeasuredOpeningHeightCm;
+			const float RightHeight = OpeningDetection.RightMeasuredOpeningHeightCm > 1.f ? OpeningDetection.RightMeasuredOpeningHeightCm : OpeningDetection.MeasuredOpeningHeightCm;
+			UE_LOG(LogTemp, Warning, TEXT("[R16HD_HEIGHT] attempt=%d target=%d frame=%d function=Aligning target-outside-stroke currentLift=%.2f targetLift=%.2f stroke=0..%.2f forkTopLocal=%.2f allowed=%.2f..%.2f leftZ=%.2f h=%.2f rightZ=%.2f h=%.2f forkThickness=%.2f clearance=%.2f"), AutoPickupAttemptId, LockedTargetId, SensorFrameId, LiftCm, LastHeightTargetLiftCm, RequiredLiftStrokeCm, LastForkTopLocalCm, LastAllowedForkTopMinCm, LastAllowedForkTopMaxCm, OpeningDetection.LeftOpeningCenterInForkCm.Z, LeftHeight, OpeningDetection.RightOpeningCenterInForkCm.Z, RightHeight, Dimensions.ForkThicknessCm, AutoForkOpeningBottomClearanceCm);
+			AutoPickupStatus=FString::Printf(TEXT("height target %.1fcm outside stroke 0..%.1f; RGB-D remeasure %d/3"), LastHeightTargetLiftCm, RequiredLiftStrokeCm, InvalidHeightRangeVisionFrames);
+			if (InvalidHeightRangeVisionFrames >= 3) CancelAutoPickup(TEXT("measured opening height is outside physical lift stroke on three distinct RGB-D frames"), true);
+			return;
+		}
 		if (FMath::Abs(LateralError) > Dimensions.ForkSideShiftCm) { SetAutoPickupState(EAutoPickupState::Approaching, TEXT("포크 좌우 행정을 초과 — 차체 접근·방향 정렬로 복귀")); return; }
 		if (LiftCm + LiftCorrection < -AutoVerticalToleranceCm || LiftCm + LiftCorrection > RequiredLiftStrokeCm + AutoVerticalToleranceCm) { CancelAutoPickup(TEXT("포크 인양 범위를 벗어남 — 수동 높이 조정 필요"), true); return; }
 		AutoSideShiftInput = FMath::IsNearlyZero(LateralError, 1.2f) ? 0.f : FMath::Sign(LateralError) * .7f;
@@ -2485,6 +2853,16 @@ void AAutomatedForklift::EmitDriveDiagnostic(const FVector& StartLocation, const
 void AAutomatedForklift::Tick(float Dt)
 {
 	Super::Tick(Dt);
+	if (LastObservedVisionDebugViewMode != VisionDebugViewMode)
+	{
+		if (LastObservedVisionDebugViewMode >= 0 && !bVisionDebugViewChangedByOInput)
+		{
+			LastVisionDebugViewStatus = FString::Printf(TEXT("non-O mode change %d -> %d at capture cycle %d / vision frame %d"), LastObservedVisionDebugViewMode, VisionDebugViewMode, SensorFrameId, LastVisionFrameNumber);
+			UE_LOG(LogTemp, Warning, TEXT("[R16HD_VISION] %s"), *LastVisionDebugViewStatus);
+		}
+		LastObservedVisionDebugViewMode = VisionDebugViewMode;
+		bVisionDebugViewChangedByOInput = false;
+	}
 
 	// Capture/process first, then create automatic commands before the movement
 	// integration of this same Tick.  Manual axis callbacks may provide zero
@@ -2504,6 +2882,12 @@ void AAutomatedForklift::Tick(float Dt)
 			DepthFrameTimestampSeconds = GetWorld()->GetTimeSeconds();
 			PalletSensorCapture->CaptureScene();
 			PalletSensorDepthCapture->CaptureScene();
+			if (bRgbExposureSweepActive)
+			{
+				// ReadPixels in ProcessOpeningVision runs only after this fence.  Without
+				// it, a same-Tick read can save the previous EV's RT contents repeatedly.
+				RgbExposureSweepCaptureFence.BeginFence();
+			}
 		}
 	}
 	ProcessOpeningVision();
@@ -2587,15 +2971,38 @@ void AAutomatedForklift::Tick(float Dt)
 void AAutomatedForklift::Tick(float Dt)
 {
 	Super::Tick(Dt);
+	if (LastObservedVisionDebugViewMode != VisionDebugViewMode)
+	{
+		if (LastObservedVisionDebugViewMode >= 0 && !bVisionDebugViewChangedByOInput)
+		{
+			LastVisionDebugViewStatus = FString::Printf(TEXT("non-O mode change %d -> %d at capture cycle %d / vision frame %d"), LastObservedVisionDebugViewMode, VisionDebugViewMode, SensorFrameId, LastVisionFrameNumber);
+			UE_LOG(LogTemp, Warning, TEXT("[R16HD_VISION] %s"), *LastVisionDebugViewStatus);
+		}
+		LastObservedVisionDebugViewMode = VisionDebugViewMode;
+		bVisionDebugViewChangedByOInput = false;
+	}
 
 	// RGB-D capture is kept separate from the rear-body LiDAR.  Both pallet
 	// captures are requested together before their one vision consumer runs.
 	if ((bPalletSensorCaptureActive || RackHeightTarget.IsSet()) && PalletSensorCapture && PalletSensorDepthCapture)
 	{
 		PalletSensorCaptureElapsed += Dt;
-		if (PalletSensorCaptureElapsed >= PalletSensorCaptureIntervalSeconds)
+		const bool bSweepCapturePending = bRgbExposureSweepActive && RgbExposureSweepPendingCaptureId > 0;
+		const bool bReferenceCapturePending = RgbReferenceCapturePendingId > 0;
+		if (PalletSensorCaptureElapsed >= PalletSensorCaptureIntervalSeconds && !bSweepCapturePending && !bReferenceCapturePending)
 		{
 			PalletSensorCaptureElapsed = 0.f;
+			if (bRgbExposureSweepActive)
+			{
+				static const float SweepBiases[] = {-4.f, -2.f, 0.f, 2.f, 4.f};
+				bPalletSensorUseManualExposure = true;
+				PalletSensorExposureBias = SweepBiases[FMath::Clamp(RgbExposureSweepStage, 0, UE_ARRAY_COUNT(SweepBiases) - 1)];
+				PalletSensorCapture->PostProcessSettings.bOverride_AutoExposureMethod = true;
+				PalletSensorCapture->PostProcessSettings.AutoExposureMethod = EAutoExposureMethod::AEM_Manual;
+				PalletSensorCapture->PostProcessSettings.bOverride_AutoExposureBias = true;
+				PalletSensorCapture->PostProcessSettings.AutoExposureBias = PalletSensorExposureBias;
+				PalletSensorCapture->ShowFlags.SetEyeAdaptation(!bUseLegacyRgbCaptureProfile);
+			}
 			++SensorFrameId;
 			RgbCaptureId = SensorFrameId;
 			const FRotator OriginalCameraRotation = PalletSensorCapture->GetRelativeRotation();
@@ -2614,9 +3021,28 @@ void AAutomatedForklift::Tick(float Dt)
 			LastRgbDepthCapturePositionDeltaCm = FVector::Dist(RgbFrameCameraTransform.GetLocation(), DepthFrameCameraTransform.GetLocation());
 			LastRgbDepthCaptureRotationDeltaDeg = RgbFrameCameraTransform.GetRotation().AngularDistance(DepthFrameCameraTransform.GetRotation()) * (180.f / PI);
 			DepthFrameTimestampSeconds = GetWorld()->GetTimeSeconds();
+			LastRgbCaptureSettings = FString::Printf(
+				TEXT("RGB capture cycle %d: source=%d target=%s fmt=%d gamma=%.2f linear=%d blend=%.2f method=%d bias=%.2f EV100=%.1f..%.1f speeds=%.1f/%.1f physicalOverride=%d physical=%d eyeAdapt=%d FOV=%.1f %dx%d"),
+				SensorFrameId, static_cast<int32>(PalletSensorCapture->CaptureSource),
+				PalletSensorCapture->TextureTarget == PalletSensorRenderTarget ? TEXT("RGB") : TEXT("OTHER"),
+				static_cast<int32>(PalletSensorRenderTarget->GetFormat()), PalletSensorRenderTarget->TargetGamma,
+				PalletSensorRenderTarget->bForceLinearGamma, PalletSensorCapture->PostProcessBlendWeight,
+				static_cast<int32>(PalletSensorCapture->PostProcessSettings.AutoExposureMethod), PalletSensorCapture->PostProcessSettings.AutoExposureBias,
+				PalletSensorCapture->PostProcessSettings.AutoExposureMinBrightness, PalletSensorCapture->PostProcessSettings.AutoExposureMaxBrightness,
+				PalletSensorCapture->PostProcessSettings.AutoExposureSpeedUp, PalletSensorCapture->PostProcessSettings.AutoExposureSpeedDown,
+				PalletSensorCapture->PostProcessSettings.bOverride_AutoExposureApplyPhysicalCameraExposure,
+				PalletSensorCapture->PostProcessSettings.AutoExposureApplyPhysicalCameraExposure,
+				bUseLegacyRgbCaptureProfile ? 0 : 1, PalletSensorCapture->FOVAngle,
+				PalletSensorRenderTarget->SizeX, PalletSensorRenderTarget->SizeY);
+			if (bRgbExposureSweepActive) RgbExposureSweepPendingCaptureId = SensorFrameId;
+			if (RgbReferenceCapturePendingId == 0) RgbReferenceCapturePendingId = SensorFrameId;
 			PalletSensorCapture->CaptureScene();
 			PalletSensorDepthCapture->CaptureScene();
 			PalletSensorCapture->SetRelativeRotation(OriginalCameraRotation);
+			if (bRgbExposureSweepActive || RgbReferenceCapturePendingId > 0)
+			{
+				RgbExposureSweepCaptureFence.BeginFence();
+			}
 		}
 	}
 	ProcessOpeningVision();

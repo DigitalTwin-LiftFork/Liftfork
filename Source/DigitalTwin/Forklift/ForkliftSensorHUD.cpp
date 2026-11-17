@@ -200,13 +200,17 @@ void AForkliftSensorHUD::DrawHUD()
 	DrawText(FString::Printf(TEXT("centre Z: %s | purple=invalid cyan=below-display orange=above-display"), CentreDepth > 0.f ? *FString::Printf(TEXT("%.1f cm"), CentreDepth) : TEXT("unmeasured")),FLinearColor::White,DepthX+8.f,DepthY+23.f,nullptr,.50f);
 	for (int32 Tick=0; Tick<=4; ++Tick) { const float TX=DepthX+Width*Tick/4.f; DrawLine(TX,DepthY+Height-8.f,TX,DepthY+Height,FLinearColor::White,.5f); DrawText(FString::Printf(TEXT("%.0f"),FMath::Lerp(MinD,MaxD,Tick/4.f)),FLinearColor::White,TX-10.f,DepthY+Height-20.f,nullptr,.38f); }
 	const bool bCpuView = DebugView == 5;
-	const bool bMaskView = !bCpuView && DebugView != 0 && Forklift->GetVisionMaskWidth() > 0;
-	if (!bMaskView && !bCpuView) DrawTexture(SensorImage, X, Y, Width, Height, 0.f, 0.f, 1.f, 1.f, FLinearColor::White, BLEND_Opaque);
+	const bool bMaskView = !bCpuView && DebugView >= 1 && DebugView <= 4;
+	if (DebugView == 0) DrawTexture(SensorImage, X, Y, Width, Height, 0.f, 0.f, 1.f, 1.f, FLinearColor::White, BLEND_Opaque);
 	else if (bCpuView)
 	{
 		DrawRect(FLinearColor::Black, X, Y, Width, Height);
 		const TArray<FColor>& Cpu = Forklift->GetLatestRgbCpuPixels();
-		for (int32 PY=0; PY<DH; PY+=8) for (int32 PX=0; PX<DW; PX+=8) if (Cpu.IsValidIndex(PY*DW+PX))
+		if (Cpu.Num() != DW * DH)
+		{
+			DrawText(FString::Printf(TEXT("CPU RGB unavailable for capture cycle %d (have %d / need %d pixels)"), Forklift->GetSensorFrameId(), Cpu.Num(), DW * DH), FLinearColor::Yellow, X + 12.f, Y + Height * .5f, nullptr, .65f);
+		}
+		else for (int32 PY=0; PY<DH; PY+=8) for (int32 PX=0; PX<DW; PX+=8)
 			DrawRect(FLinearColor::FromSRGBColor(Cpu[PY*DW+PX]), X+Width*PX/DW, Y+Height*PY/DH, Width*8.f/DW+1.f, Height*8.f/DH+1.f);
 	}
 	else
@@ -216,7 +220,11 @@ void AForkliftSensorHUD::DrawHUD()
 
 		// A 2x decimated canvas rendering keeps this diagnostic view cheap while
 		// still revealing whether forks/shadows merge the opening regions.
-		for (int32 MY = 0; MY < MH; MY += 2) for (int32 MX = 0; MX < MW; MX += 2) if (Mask.IsValidIndex(MY * MW + MX) && Mask[MY * MW + MX]) DrawRect(FLinearColor::White, X + Width * MX / MW, Y + Height * MY / MH, Width * 2.f / MW + 1.f, Height * 2.f / MH + 1.f);
+		if (MW <= 0 || MH <= 0 || Mask.Num() != MW * MH)
+		{
+			DrawText(FString::Printf(TEXT("%s unavailable for vision frame %d"), *Forklift->GetVisionDebugViewName(), Forklift->GetSensorFrameId()), FLinearColor::Yellow, X + 12.f, Y + Height * .5f, nullptr, .65f);
+		}
+		else for (int32 MY = 0; MY < MH; MY += 2) for (int32 MX = 0; MX < MW; MX += 2) if (Mask[MY * MW + MX]) DrawRect(FLinearColor::White, X + Width * MX / MW, Y + Height * MY / MH, Width * 2.f / MW + 1.f, Height * 2.f / MH + 1.f);
 	}
 
 	DrawRect(FLinearColor::White, X, Y, Width, 1.f);
@@ -228,12 +236,18 @@ void AForkliftSensorHUD::DrawHUD()
 	DrawLine(CX - 12.f, CY, CX + 12.f, CY, FLinearColor::Green, 1.5f);
 	DrawLine(CX, CY - 12.f, CX, CY + 12.f, FLinearColor::Green, 1.5f);
 
-	DrawText(bCpuView ? TEXT("RGB CPU FColor readback (O returns to RT/masks)") : (bMaskView ? (DebugView == 1 ? TEXT("RGB colour-region mask") : (DebugView == 2 ? TEXT("RGB body before depth/refinement") : (DebugView == 3 ? TEXT("Depth/refined body") : TEXT("Opening components")))) : TEXT("RGB Render Target source (O: diagnostics / CPU comparison)")), FLinearColor::White, X + 8.f, Y + 8.f, nullptr, .8f);
+	DrawText(FString::Printf(TEXT("O mode %d: %s"), DebugView, *Forklift->GetVisionDebugViewName()), FLinearColor::White, X + 8.f, Y + 8.f, nullptr, .8f);
+	DrawText(Forklift->GetVisionDebugViewStatus(), FLinearColor(.85f, .85f, .85f, 1.f), X + 8.f, Y + 66.f, nullptr, .39f);
+	DrawText(Forklift->GetLastRgbCaptureSettings(), FLinearColor(.70f, .85f, 1.f, 1.f), X + 8.f, Y + 25.f, nullptr, .40f);
+	DrawText(FString::Printf(TEXT("1: light/camera audit | 2: EV sweep | 3: %s profile | 4: manual/bounded auto | 5: current reference"), Forklift->IsUsingLegacyRgbCaptureProfile() ? TEXT("legacy") : TEXT("current")), FLinearColor(.7f, 1.f, .7f, 1.f), X + 8.f, Y + 39.f, nullptr, .45f);
+	DrawText(Forklift->GetRgbExposureDiagnosticStatus(), FLinearColor(.95f, .9f, .45f, 1.f), X + 8.f, Y + 52.f, nullptr, .43f);
 	DrawText(Forklift->GetLastRgbReadStatistics(), FLinearColor(.75f, .9f, 1.f, 1.f), X + 8.f, Y + Height - 20.f, nullptr, .52f);
 	// Mode zero is deliberately a clean source view.  It lets us distinguish a
 	// capture/tonemapping fault from the HUD-only grid, masks, and candidate
 	// overlays below; none of these canvas diagnostics are part of the RT.
-	if (DebugView != 0 && !bCpuView)
+	// Keep coarse-cell labels and quadtree leaves in detailed diagnostics only;
+	// O=0/O=1 remain comparable source/mask views.
+	if (Forklift->IsDetailedSensorDiagnostics() && DebugView != 0 && !bCpuView)
 	{
 	// Coarse grid and body region are player-HUD diagnostics only.
 	const int32 GridX = Forklift->GetVisionCoarseGridColumns(), GridY = Forklift->GetVisionCoarseGridRows();
@@ -279,7 +293,10 @@ void AForkliftSensorHUD::DrawHUD()
 	if (Detection.bValid)
 	{
 
-		const FLinearColor OpeningColor = Detection.bDepthValid ? FLinearColor::Yellow : FLinearColor(1.f,.45f,.05f,1.f);
+		// Yellow is reserved for a control-eligible RGB-D target.  Cyan makes a
+		// measured-but-held candidate visible without presenting it as an automatic
+		// pickup target; orange remains an RGB-only proposal.
+		const FLinearColor OpeningColor = Detection.bControlEligible ? FLinearColor::Yellow : (Detection.bDepthValid ? FLinearColor(0.f,.8f,1.f,1.f) : FLinearColor(1.f,.45f,.05f,1.f));
 		const float SX = Width / FMath::Max(1, SensorImage->SizeX), SY = Height / FMath::Max(1, SensorImage->SizeY);
 		const auto DrawOpening = [this, X, Y, SX, SY, OpeningColor](const FVector2D& Center, const FVector2D& Extent)
 		{
@@ -293,10 +310,52 @@ void AForkliftSensorHUD::DrawHUD()
 			DrawRect(OpeningColor,BX,BY,BW,1.5f);DrawRect(OpeningColor,BX,BY+BH,BW,1.5f);DrawRect(OpeningColor,BX,BY,1.5f,BH);DrawRect(OpeningColor,BX+BW,BY,1.5f,BH);
 		};
 		DrawDepthOpening(Detection.LeftCenter, Detection.LeftExtent); DrawDepthOpening(Detection.RightCenter, Detection.RightExtent);
-		const FString OpeningLabel = Detection.bDepthValid ? FString::Printf(TEXT("VERIFIED RGB-D: %.2f dist %.0fcm lateral %.1fcm"), Detection.Confidence, Detection.EstimatedDistanceCm, Detection.EstimatedLateralCm) : FString::Printf(TEXT("RGB candidate only: %.2f — front depth missing"), Detection.Confidence);
+		const FString OpeningLabel = Detection.bControlEligible ? FString::Printf(TEXT("CONTROL TARGET RGB-D: %.2f dist %.0fcm lateral %.1fcm"), Detection.Confidence, Detection.EstimatedDistanceCm, Detection.EstimatedLateralCm) : (Detection.bDepthValid ? FString::Printf(TEXT("RGB-D candidate (control held): %.2f mono %.0fcm front %.0fcm"), Detection.Confidence, Detection.MonocularDistanceCm, Detection.FrontOpticalDepthCm) : FString::Printf(TEXT("RGB candidate only: %.2f — front depth missing"), Detection.Confidence));
 		DrawText(OpeningLabel, OpeningColor, X + 8.f, Y + 28.f, nullptr, .68f);
 
 	}
+	}
+
+	// The raw RGB (O=0) and region-mask (O=1) previews must show the very same
+	// current-frame result.  This is HUD-only: it neither changes the detector nor
+	// lets a previous target masquerade as a new measurement.
+	if (DebugView == 0 || DebugView == 1)
+	{
+		const float OverlaySX = Width / FMath::Max(1, SensorImage->SizeX);
+		const float OverlaySY = Height / FMath::Max(1, SensorImage->SizeY);
+		const auto DrawSolidOpening = [this, OverlaySX, OverlaySY](float BaseX, float BaseY, const FVector2D& Center, const FVector2D& Extent, const FLinearColor& Color)
+		{
+			const float BX=BaseX+(Center.X-Extent.X)*OverlaySX, BY=BaseY+(Center.Y-Extent.Y)*OverlaySY, BW=Extent.X*2.f*OverlaySX, BH=Extent.Y*2.f*OverlaySY;
+			DrawRect(Color,BX,BY,BW,1.5f); DrawRect(Color,BX,BY+BH,BW,1.5f); DrawRect(Color,BX,BY,1.5f,BH); DrawRect(Color,BX+BW,BY,1.5f,BH);
+		};
+		const auto DrawDashedOpening = [this, OverlaySX, OverlaySY](float BaseX, float BaseY, const FVector2D& Center, const FVector2D& Extent, const FLinearColor& Color)
+		{
+			const float BX=BaseX+(Center.X-Extent.X)*OverlaySX, BY=BaseY+(Center.Y-Extent.Y)*OverlaySY, BW=Extent.X*2.f*OverlaySX, BH=Extent.Y*2.f*OverlaySY;
+			for(float Offset=0.f;Offset<BW;Offset+=8.f){DrawLine(BX+Offset,BY,BX+FMath::Min(Offset+4.f,BW),BY,Color,1.f);DrawLine(BX+Offset,BY+BH,BX+FMath::Min(Offset+4.f,BW),BY+BH,Color,1.f);}
+			for(float Offset=0.f;Offset<BH;Offset+=8.f){DrawLine(BX,BY+Offset,BX,BY+FMath::Min(Offset+4.f,BH),Color,1.f);DrawLine(BX+BW,BY+Offset,BX+BW,BY+FMath::Min(Offset+4.f,BH),Color,1.f);}
+		};
+		const FOpeningDetection& Detection = Forklift->GetOpeningDetection();
+		if (Detection.bValid)
+		{
+			// Yellow means a fresh, control-eligible RGB-D pair.  Cyan/orange are
+			// intentionally not automatic-pickup targets.
+			const FLinearColor Color=Detection.bControlEligible?FLinearColor::Yellow:(Detection.bDepthValid?FLinearColor(0.f,.8f,1.f,1.f):FLinearColor(1.f,.45f,.05f,1.f));
+			DrawSolidOpening(X,Y,Detection.LeftCenter,Detection.LeftExtent,Color); DrawSolidOpening(X,Y,Detection.RightCenter,Detection.RightExtent,Color);
+			DrawSolidOpening(DepthX,DepthY,Detection.LeftCenter,Detection.LeftExtent,Color); DrawSolidOpening(DepthX,DepthY,Detection.RightCenter,Detection.RightExtent,Color);
+			DrawText(Detection.bControlEligible?TEXT("verified RGB-D target"):TEXT("candidate only: automatic control held"),Color,X+8.f,Y+82.f,nullptr,.55f);
+		}
+		else
+		{
+			// Unverified components are orange, never yellow.
+			for (const FVisionCandidateDebug& Candidate : Forklift->GetVisionCandidates()) if (!Candidate.bSelected) DrawSolidOpening(X,Y,Candidate.Center,Candidate.Extent,FLinearColor(1.f,.25f,.05f,1.f));
+			const FOpeningDetection& Previous=Forklift->GetLastTrackedOpeningDetection();
+			if (Previous.bValid)
+			{
+				const FLinearColor PreviousColor(.55f,.65f,.75f,1.f);
+				DrawDashedOpening(X,Y,Previous.LeftCenter,Previous.LeftExtent,PreviousColor); DrawDashedOpening(X,Y,Previous.RightCenter,Previous.RightExtent,PreviousColor);
+				DrawText(TEXT("previous observation (not current target)"),PreviousColor,X+8.f,Y+82.f,nullptr,.55f);
+			}
+		}
 	}
 	DrawNavigationPanel();
 	// Draw last so the optional RGB-D preview cannot cover load telemetry.
