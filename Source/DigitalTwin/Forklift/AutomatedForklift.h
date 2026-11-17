@@ -16,6 +16,7 @@ class UPrimitiveComponent;
 class USceneCaptureComponent2D;
 class UTextureRenderTarget2D;
 class UPhysicsConstraintComponent;
+class UPhysicalMaterial;
 class UForkliftNavigationSensorComponent;
 
 class APallet;
@@ -145,6 +146,43 @@ public:
 	UPROPERTY(EditAnywhere, Category="R16 HD") bool bIsLoaded = false;
 	/** The speed multiplier at RatedLoadKg.  Load is measured from the C++ Chaos pallet actors on the forks. */
 	UPROPERTY(EditAnywhere, Category="Load response", meta=(ClampMin="0.2", ClampMax="1.0")) float RatedLoadSpeedMultiplier = .72f;
+	/** Simulation safety tuning: reduce travel speed as a supported load is raised or reached out. */
+	UPROPERTY(EditAnywhere, Category="Load safety", meta=(ClampMin="0.0")) float LoadedSafeTravelForkHeightCm = 45.f;
+	UPROPERTY(EditAnywhere, Category="Load safety", meta=(ClampMin="0.2", ClampMax="1.0")) float LoadedTravelSpeedAtMaxLiftMultiplier = .4f;
+	UPROPERTY(EditAnywhere, Category="Load safety", meta=(ClampMin="0.2", ClampMax="1.0")) float LoadedTravelSpeedAtFullReachMultiplier = .6f;
+	/** Over-capacity loads can still be lowered/retracted, but cannot be lifted or extended farther. */
+	UPROPERTY(EditAnywhere, Category="Load safety", meta=(ClampMin="0.1", ClampMax="1.0")) float OverCapacityTravelSpeedMultiplier = .25f;
+	UPROPERTY(VisibleAnywhere, Category="Load safety") bool bOverRatedCapacity = false;
+	/** Approximate planar chassis physics. Values are simulation tuning, not vehicle certification data. */
+	UPROPERTY(EditAnywhere, Category="Chassis physics", meta=(ClampMin="1.0")) float UnloadedAccelerationCmPerSec2 = 140.f;
+	UPROPERTY(EditAnywhere, Category="Chassis physics", meta=(ClampMin="1.0")) float LoadedAccelerationCmPerSec2 = 90.f;
+	UPROPERTY(EditAnywhere, Category="Chassis physics", meta=(ClampMin="1.0")) float BrakeDecelerationCmPerSec2 = 220.f;
+	UPROPERTY(EditAnywhere, Category="Chassis physics", meta=(ClampMin="1.0")) float SteeringAccelerationDegPerSec2 = 180.f;
+	UPROPERTY(EditAnywhere, Category="Chassis physics", meta=(ClampMin="0.1", ClampMax="1.5")) float GroundFrictionCoefficient = .7f;
+	UPROPERTY(EditAnywhere, Category="Stability", meta=(ClampMin="1.0")) float StabilitySpeedReductionMarginCm = 20.f;
+	UPROPERTY(VisibleAnywhere, Category="Stability") float CurrentStabilityMarginCm = 0.f;
+	UPROPERTY(VisibleAnywhere, Category="Stability") bool bStabilityLimitActive = false;
+	/** Apply a gravity-driven chassis tip when the combined centre of mass passes outside the three-wheel support polygon. */
+	UPROPERTY(EditAnywhere, Category="Stability|Rollover") bool bEnableChassisRollover = true;
+	UPROPERTY(EditAnywhere, Category="Stability|Rollover", meta=(ClampMin="5.0", ClampMax="89.0")) float MaximumRolloverAngleDeg = 78.f;
+	UPROPERTY(EditAnywhere, Category="Stability|Rollover", meta=(ClampMin="0.0", ClampMax="10.0")) float RolloverAngularDamping = 1.5f;
+	UPROPERTY(VisibleAnywhere, Category="Stability|Rollover") bool bChassisRolloverActive = false;
+	UPROPERTY(VisibleAnywhere, Category="Stability|Rollover") bool bChassisTippedOver = false;
+	UPROPERTY(VisibleAnywhere, Category="Stability|Rollover") float ChassisRolloverAngleDeg = 0.f;
+	/** Fork-to-load friction multiplier; Chaos combines this with the pallet's surface friction. */
+	UPROPERTY(EditAnywhere, Category="Load handling|Physics", meta=(ClampMin="0.0", ClampMax="1.5")) float ForkLoadFrictionCoefficient = .25f;
+	UPROPERTY(VisibleAnywhere, Category="Load handling|Physics") bool bSupportedLoadSlipRisk = false;
+	UPROPERTY(VisibleAnywhere, Category="Load handling|Physics") float SupportedLoadAccelerationCmPerSec2 = 0.f;
+	/** Impact thresholds use estimated impulse in N*s from closing speed and effective truck/load mass. */
+	UPROPERTY(EditAnywhere, Category="Collision safety", meta=(ClampMin="0.0")) float ImpactWarningImpulseNs = 250.f;
+	UPROPERTY(EditAnywhere, Category="Collision safety", meta=(ClampMin="0.0")) float ImpactStopImpulseNs = 1200.f;
+	UPROPERTY(EditAnywhere, Category="Collision safety", meta=(ClampMin="0.0")) float ImpactLoadEjectImpulseNs = 4500.f;
+	UPROPERTY(EditAnywhere, Category="Collision safety", meta=(ClampMin="0.1", ClampMax="10.0")) float ImpactStopDurationSeconds = 1.25f;
+	UPROPERTY(EditAnywhere, Category="Collision safety", meta=(ClampMin="0.0", ClampMax="1.0")) float ImpactLoadTransferFraction = .35f;
+	UPROPERTY(VisibleAnywhere, Category="Collision safety") float LastEstimatedImpactImpulseNs = 0.f;
+	UPROPERTY(VisibleAnywhere, Category="Collision safety") FString LastCollisionSeverity = TEXT("None");
+	UPROPERTY(VisibleAnywhere, Category="Collision safety") bool bImpactSafetyStopActive = false;
+	UPROPERTY(VisibleAnywhere, Category="Collision safety") bool bImpactLoadEjectTriggered = false;
 	UPROPERTY(EditAnywhere, Category="Drive debug") bool bEnableDriveDebug = false;
 	UPROPERTY(EditAnywhere, Category="Drive debug", meta=(ClampMin="0.05")) float DriveDebugIntervalSeconds = 0.25f;
 	UPROPERTY(EditAnywhere, Category="Drive debug") bool bDrawDriveDebug = false;
@@ -341,6 +379,9 @@ public:
 	virtual void BeginPlay() override;
 	UTextureRenderTarget2D* GetPalletSensorRenderTarget() const { return PalletSensorRenderTarget; }
 	float GetSupportedLoadKg() const { return SupportedLoadKg; }
+	bool IsOverRatedCapacity() const { return bOverRatedCapacity; }
+	float GetCurrentStabilityMarginCm() const { return CurrentStabilityMarginCm; }
+	bool IsStabilityLimitActive() const { return bStabilityLimitActive; }
 	float GetCurrentDriveSpeedMultiplier() const { return CurrentDriveSpeedMultiplier; }
 	float GetActiveLoadFriction() const { return ActiveLoadFriction; }
 	float GetTargetForwardSpeedCmPerSec() const { return TargetForwardSpeedCmPerSec; }
@@ -517,6 +558,7 @@ private:
 	float AutoDriveInput = 0.f, AutoSteerInput = 0.f, AutoLiftInput = 0.f, AutoReachInput = 0.f, AutoSideShiftInput = 0.f;
 	float LastAppliedDriveInput = 0.f, LastAppliedSteerInput = 0.f, LastAppliedLiftInput = 0.f, LastAppliedReachInput = 0.f, LastAppliedSideShiftInput = 0.f;
 	float LiftCm = 0.f, ReachCm = 0.f, SideShiftCm = 0.f;
+	float TargetForwardSpeedCmPerSec = 0.f, CurrentForwardSpeedCmPerSec = 0.f, CurrentYawRateDegPerSec = 0.f, DriveDebugElapsed = 0.f;
 	enum class ETransportPhase : uint8 { None, Raise, Lower, Settle, Retract, BackOut };
 	ETransportPhase TransportPhase = ETransportPhase::None;
 	bool bTransportHeightAdjusted = false;
@@ -532,8 +574,21 @@ private:
 	void BeginTransportUnload(int32 StationIndex);
 	bool IsSupportedLoadFullyInserted() const;
 	bool IsGroundPalletReadyForLift() const;
-	float TargetForwardSpeedCmPerSec = 0.f, CurrentForwardSpeedCmPerSec = 0.f, DriveDebugElapsed = 0.f;
 	float SupportedLoadKg = 0.f, CurrentDriveSpeedMultiplier = 1.f, ActiveLoadFriction = 0.f;
+	FVector RolloverPivotWorld = FVector::ZeroVector, RolloverAxisWorld = FVector::RightVector;
+	FVector RolloverCenterOfMassLocal = FVector::ZeroVector;
+	FVector RolloverInitiatingAccelerationWorld = FVector::ZeroVector;
+	FVector RolloverInertialAccelerationWorld = FVector::ZeroVector;
+	FVector RolloverStartLocation = FVector::ZeroVector;
+	FQuat RolloverStartRotation = FQuat::Identity;
+	float RolloverTotalMassKg = 0.f, RolloverAngularVelocityRadPerSec = 0.f;
+	float RolloverVerticalOffsetCm = 0.f;
+	int32 RolloverSupportEdgeIndex = INDEX_NONE;
+	float LastSupportedLoadSlipLogTime = -BIG_NUMBER;
+	float CollisionSafetyStopRemainingSeconds = 0.f;
+	float CollisionMeasureDeltaSeconds = 1.f / 60.f;
+	int32 LastImpactResponseFrameNumber = INDEX_NONE;
+	int32 LastLoadEjectFrameNumber = INDEX_NONE;
 	TArray<TWeakObjectPtr<AActor>> SupportedLoadActors;
 	FString ActiveLoadCollisionStatus = TEXT("No supported load");
 	float CameraPitchDeg = -24.f, CameraYawDeg = -35.f, CameraDistanceCm = 700.f;
@@ -726,6 +781,10 @@ private:
 	void UpdateSupportedLoadState();
 	void GetSupportedPalletShapes(TArray<UBoxComponent*>& OutShapes) const;
 	float GetNavigationHalfWidth() const;
+	float ComputeStabilitySpeedMultiplier(float LongitudinalAccelerationCmPerSec2, float LateralAccelerationCmPerSec2);
+	void ApplySupportedLoadInertialForces(const FVector& ChassisLinearAccelerationWorld, float YawRateRadPerSec, float YawAccelerationRadPerSec2);
+	bool BeginChassisRolloverIfNeeded();
+	void UpdateChassisRollover(float DeltaSeconds);
 	void SetConstraintFramesAtPose(UPhysicsConstraintComponent* Constraint, UPrimitiveComponent* Body1, UPrimitiveComponent* Body2, const FTransform& JointWorld, const FVector& Frame2Offset);
 	FVector GetConstraintFrameDelta(const UPhysicsConstraintComponent* Constraint, const UPrimitiveComponent* Body1, const UPrimitiveComponent* Body2) const;
 	float GetForkTopHeightAboveGroundCm() const;
@@ -750,6 +809,7 @@ private:
 	void LogInitialDriveOverlaps();
 	UStaticMeshComponent* CreateVisual(const TCHAR* Name, USceneComponent* Parent);
 	UPROPERTY() TObjectPtr<APallet> CarriedPallet;
+	UPROPERTY(Transient) TObjectPtr<UPhysicalMaterial> ForkContactPhysicalMaterial;
 	bool bPalletSupportedAutomatically = false;
 	bool bCarriedPalletResting = false;
 	FString PalletSupportDebugStatus;
