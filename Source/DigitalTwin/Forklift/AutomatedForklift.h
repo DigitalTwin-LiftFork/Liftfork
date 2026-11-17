@@ -167,6 +167,16 @@ public:
 	UPROPERTY(EditAnywhere, Category="Load handling|Physics", meta=(ClampMin="0.0", ClampMax="1.5")) float ForkLoadFrictionCoefficient = .25f;
 	UPROPERTY(VisibleAnywhere, Category="Load handling|Physics") bool bSupportedLoadSlipRisk = false;
 	UPROPERTY(VisibleAnywhere, Category="Load handling|Physics") float SupportedLoadAccelerationCmPerSec2 = 0.f;
+	/** Impact thresholds use estimated impulse in N*s from closing speed and effective truck/load mass. */
+	UPROPERTY(EditAnywhere, Category="Collision safety", meta=(ClampMin="0.0")) float ImpactWarningImpulseNs = 250.f;
+	UPROPERTY(EditAnywhere, Category="Collision safety", meta=(ClampMin="0.0")) float ImpactStopImpulseNs = 1200.f;
+	UPROPERTY(EditAnywhere, Category="Collision safety", meta=(ClampMin="0.0")) float ImpactLoadEjectImpulseNs = 4500.f;
+	UPROPERTY(EditAnywhere, Category="Collision safety", meta=(ClampMin="0.1", ClampMax="10.0")) float ImpactStopDurationSeconds = 1.25f;
+	UPROPERTY(EditAnywhere, Category="Collision safety", meta=(ClampMin="0.0", ClampMax="1.0")) float ImpactLoadTransferFraction = .35f;
+	UPROPERTY(VisibleAnywhere, Category="Collision safety") float LastEstimatedImpactImpulseNs = 0.f;
+	UPROPERTY(VisibleAnywhere, Category="Collision safety") FString LastCollisionSeverity = TEXT("None");
+	UPROPERTY(VisibleAnywhere, Category="Collision safety") bool bImpactSafetyStopActive = false;
+	UPROPERTY(VisibleAnywhere, Category="Collision safety") bool bImpactLoadEjectTriggered = false;
 	UPROPERTY(EditAnywhere, Category="Drive debug") bool bEnableDriveDebug = false;
 	UPROPERTY(EditAnywhere, Category="Drive debug", meta=(ClampMin="0.05")) float DriveDebugIntervalSeconds = 0.25f;
 	UPROPERTY(EditAnywhere, Category="Drive debug") bool bDrawDriveDebug = false;
@@ -467,6 +477,10 @@ private:
 	float RolloverVerticalOffsetCm = 0.f;
 	int32 RolloverSupportEdgeIndex = INDEX_NONE;
 	float LastSupportedLoadSlipLogTime = -BIG_NUMBER;
+	float CollisionSafetyStopRemainingSeconds = 0.f;
+	float CollisionMeasureDeltaSeconds = 1.f / 60.f;
+	int32 LastImpactResponseFrameNumber = INDEX_NONE;
+	int32 LastLoadEjectFrameNumber = INDEX_NONE;
 	TArray<TWeakObjectPtr<AActor>> SupportedLoadActors;
 	FString ActiveLoadCollisionStatus = TEXT("No supported load");
 	float CameraPitchDeg = -24.f, CameraYawDeg = -35.f, CameraDistanceCm = 700.f;

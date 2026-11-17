@@ -714,6 +714,65 @@ void AAutomatedForklift::RecordCollision(const TCHAR* Operation, UPrimitiveCompo
 			*GetNameSafe(SourceComponent ? SourceComponent->GetOwner() : nullptr), SourceComponent ? *SourceComponent->GetComponentLocation().ToString() : TEXT("(none)"), *GetNameSafe(Hit.GetActor()), *GetNameSafe(Hit.GetComponent()),
 			*WorldDelta.GetSafeNormal().ToString(), *Hit.ImpactPoint.ToString(), *Hit.ImpactNormal.ToString(), Hit.bBlockingHit, Hit.bStartPenetrating, Hit.Time);
 	}
+	if (bBlocked && !WorldDelta.IsNearlyZero())
+	{
+		const FVector ContactNormal = !Hit.ImpactNormal.IsNearlyZero() ? Hit.ImpactNormal.GetSafeNormal() : Hit.Normal.GetSafeNormal();
+		const FVector SweepVelocity = WorldDelta / FMath::Max(.001f, CollisionMeasureDeltaSeconds);
+		const float ClosingSpeedCmPerSec = ContactNormal.IsNearlyZero()
+			? SweepVelocity.Size()
+			: FMath::Max(0.f, -FVector::DotProduct(SweepVelocity, ContactNormal));
+		const float EffectiveMassKg = FMath::Max(1.f, ChassisMassKg + LiftAssemblyMassKg + ReachAssemblyMassKg + ForkCarrierAssemblyMassKg + SupportedLoadKg);
+		LastEstimatedImpactImpulseNs = EffectiveMassKg * ClosingSpeedCmPerSec / 100.f;
+		if (LastEstimatedImpactImpulseNs >= ImpactWarningImpulseNs)
+		{
+			LastCollisionSeverity = TEXT("Warning");
+			const int32 CurrentFrame = static_cast<int32>(GFrameCounter);
+			if (CurrentFrame != LastImpactResponseFrameNumber)
+			{
+				LastImpactResponseFrameNumber = CurrentFrame;
+				UE_LOG(LogTemp, Warning, TEXT("[R16HD_IMPACT] severity=WARNING estimatedImpulse=%.0fNs closingSpeed=%.1fcm/s source=%s obstacle=%s"),
+					LastEstimatedImpactImpulseNs, ClosingSpeedCmPerSec, *GetNameSafe(SourceComponent), *GetNameSafe(Hit.GetComponent()));
+				if (GEngine) GEngine->AddOnScreenDebugMessage(reinterpret_cast<uint64>(this) + 40, 3.f, FColor::Orange,
+					FString::Printf(TEXT("충돌 경고 — 추정 충격량 %.0f N·s"), LastEstimatedImpactImpulseNs));
+			}
+
+			if (LastEstimatedImpactImpulseNs >= ImpactStopImpulseNs)
+			{
+				LastCollisionSeverity = TEXT("Safety stop");
+				CollisionSafetyStopRemainingSeconds = FMath::Max(CollisionSafetyStopRemainingSeconds, ImpactStopDurationSeconds);
+				bImpactSafetyStopActive = true;
+				DriveInput = SteerInput = AutoDriveInput = AutoSteerInput = 0.f;
+				if (IsAutoPickupMotionActive()) CancelAutoPickup(TEXT("충격량 초과 — 충돌 안전 정지"), true);
+				if (GEngine) GEngine->AddOnScreenDebugMessage(reinterpret_cast<uint64>(this) + 41, 3.f, FColor::Red,
+					FString::Printf(TEXT("충돌 안전 정지 — %.0f N·s"), LastEstimatedImpactImpulseNs));
+				UE_LOG(LogTemp, Error, TEXT("[R16HD_IMPACT] severity=SAFETY_STOP estimatedImpulse=%.0fNs hold=%.2fs"), LastEstimatedImpactImpulseNs, ImpactStopDurationSeconds);
+			}
+
+			if (LastEstimatedImpactImpulseNs >= ImpactLoadEjectImpulseNs && !SupportedLoadActors.IsEmpty() && CurrentFrame != LastLoadEjectFrameNumber)
+			{
+				LastLoadEjectFrameNumber = CurrentFrame;
+				const FVector ImpactDirection = WorldDelta.GetSafeNormal();
+				const FVector EjectDirection = (ImpactDirection + FVector::UpVector * .08f).GetSafeNormal();
+				for (const TWeakObjectPtr<AActor>& WeakLoad : SupportedLoadActors)
+				{
+					AActor* LoadActor = WeakLoad.Get();
+					UPrimitiveComponent* LoadBody = LoadActor ? Cast<UPrimitiveComponent>(LoadActor->GetRootComponent()) : nullptr;
+					if (!LoadBody || !LoadBody->IsSimulatingPhysics()) continue;
+					float LoadMassKg = 1.f;
+					if (const APallet* Pallet = Cast<APallet>(LoadActor)) LoadMassKg = Pallet->GetConfiguredMassKg();
+					else if (const AWoodPallet* WoodPallet = Cast<AWoodPallet>(LoadActor)) LoadMassKg = WoodPallet->GetConfiguredMassKg();
+					const FVector LoadImpulseKgCmPerSec = EjectDirection * LoadMassKg * ClosingSpeedCmPerSec * ImpactLoadTransferFraction;
+					LoadBody->AddImpulse(LoadImpulseKgCmPerSec, NAME_None, false);
+				}
+				bImpactLoadEjectTriggered = true;
+				LastCollisionSeverity = TEXT("Load ejection");
+				UE_LOG(LogTemp, Error, TEXT("[R16HD_IMPACT] severity=LOAD_EJECTION estimatedImpulse=%.0fNs transfer=%.2f supportedLoads=%d"),
+					LastEstimatedImpactImpulseNs, ImpactLoadTransferFraction, SupportedLoadActors.Num());
+				if (GEngine) GEngine->AddOnScreenDebugMessage(reinterpret_cast<uint64>(this) + 42, 4.f, FColor::Red,
+					TEXT("강한 충격 — 적재 팔레트에 충격량 전달"));
+			}
+		}
+	}
 	CollisionDebugStatus = FString::Printf(TEXT("%s: %s vs %s (%s)%s"), Operation, *GetNameSafe(SourceComponent), *GetNameSafe(Hit.GetComponent()),
 		*GetNameSafe(Hit.GetActor()), Hit.bStartPenetrating ? TEXT(" [initial overlap]") : TEXT(""));
 }
@@ -2379,6 +2438,7 @@ void AAutomatedForklift::EmitDriveDiagnostic(const FVector& StartLocation, const
 void AAutomatedForklift::Tick(float Dt)
 {
 	Super::Tick(Dt);
+	CollisionMeasureDeltaSeconds = FMath::Max(.001f, Dt);
 
 	// Capture/process first, then create automatic commands before the movement
 	// integration of this same Tick.  Manual axis callbacks may provide zero
@@ -2507,6 +2567,12 @@ void AAutomatedForklift::Tick(float Dt)
 	UpdateAutoPickup(Dt);
 	if (!IsAutoPickupMotionActive()) UpdateNavigation(Dt);
 	UpdateSupportedLoadState();
+	CollisionSafetyStopRemainingSeconds = FMath::Max(0.f, CollisionSafetyStopRemainingSeconds - Dt);
+	bImpactSafetyStopActive = CollisionSafetyStopRemainingSeconds > 0.f;
+	if (bImpactSafetyStopActive)
+	{
+		DriveInput = SteerInput = AutoDriveInput = AutoSteerInput = 0.f;
+	}
 	if (bChassisRolloverActive)
 	{
 		UpdateChassisRollover(Dt);
