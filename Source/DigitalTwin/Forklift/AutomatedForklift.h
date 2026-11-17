@@ -2,6 +2,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "RenderCommandFence.h"
 #include "GameFramework/Pawn.h"
 #include "AutomatedForklift.generated.h"
 
@@ -38,6 +39,11 @@ struct FOpeningDetection
 
 	/** RGB-D results: SceneDepth is optical-axis Z in cm; ray distance is derived. */
 	bool bDepthValid = false;
+	/** The pair has a usable front-depth measurement and agrees with its RGB
+	 * geometry closely enough to update the automatic-pickup target.  This is
+	 * intentionally separate from bDepthValid: a measurable distant shelf can
+	 * be a valid RGB-D candidate without being a safe control target. */
+	bool bControlEligible = false;
 	float MonocularDistanceCm = 0.f, FrontOpticalDepthCm = 0.f, FrontRayDistanceCm = 0.f;
 	float EstimatedHeightCm = 0.f, FrontYawErrorRad = 0.f, DepthOpeningContrastCm = 0.f;
 	/** Measured front-plane opening centre in the *current* ForkCarriage frame.
@@ -245,6 +251,17 @@ public:
 	 * disabled temporarily to compare with the scene's automatic exposure. */
 	UPROPERTY(EditAnywhere, Category="Pallet sensor|RGB") bool bPalletSensorUseManualExposure = true;
 	UPROPERTY(EditAnywhere, Category="Pallet sensor|RGB", meta=(EditCondition="bPalletSensorUseManualExposure")) float PalletSensorExposureBias = 0.f;
+	/** Bounded histogram adaptation is an opt-in comparison mode (key 4).  The
+	 * project uses extended luminance range, so these values are EV100 bounds. */
+	UPROPERTY(EditAnywhere, Category="Pallet sensor|RGB") float PalletSensorAutoExposureMinEV100 = -2.f;
+	UPROPERTY(EditAnywhere, Category="Pallet sensor|RGB") float PalletSensorAutoExposureMaxEV100 = 12.f;
+	UPROPERTY(EditAnywhere, Category="Pallet sensor|RGB") float PalletSensorAutoExposureSpeedUp = 1.f;
+	UPROPERTY(EditAnywhere, Category="Pallet sensor|RGB") float PalletSensorAutoExposureSpeedDown = .6f;
+	/** Factory-only lighting calibration.  Applied as an absolute
+	 * intensity at runtime so multiple forklift instances cannot dim lights more
+	 * than once.  The map geometry and light placement stay unchanged. */
+	UPROPERTY(EditAnywhere, Category="Factory lighting") bool bApplyFactoryRectLightOneStopCalibration = true;
+	UPROPERTY(EditAnywhere, Category="Factory lighting", meta=(EditCondition="bApplyFactoryRectLightOneStopCalibration")) float FactoryRectLightCalibratedIntensity = 2000.f;
 	UPROPERTY(EditAnywhere, Category="Pallet sensor|RGB-D") float DepthRgbDisagreementCm = 90.f;
 	/** Depth is supporting evidence: it splits RGB body/background regions and
 	 * validates openings, never independently declares an opening. */
@@ -354,9 +371,15 @@ public:
 	int32 GetPalletSensorDisplayMode() const { return PalletSensorDisplayMode; }
 	bool IsDetailedSensorDiagnostics() const { return bDetailedSensorDiagnostics; }
 	const FString& GetLastRgbReadStatistics() const { return LastRgbReadStatistics; }
+	const FString& GetLastRgbCaptureSettings() const { return LastRgbCaptureSettings; }
+	const FString& GetRgbExposureDiagnosticStatus() const { return RgbExposureDiagnosticStatus; }
+	bool IsRgbExposureSweepActive() const { return bRgbExposureSweepActive; }
+	bool IsUsingLegacyRgbCaptureProfile() const { return bUseLegacyRgbCaptureProfile; }
 	const TArray<FColor>& GetLatestRgbCpuPixels() const { return LatestRgbCpuPixels; }
 
 	const FOpeningDetection& GetOpeningDetection() const { return OpeningDetection; }
+	/** Last control-eligible observation.  Never confuse it with the current frame. */
+	const FOpeningDetection& GetLastTrackedOpeningDetection() const { return LastTrackedOpeningDetection; }
 	const TArray<FVisionCandidateDebug>& GetVisionCandidates() const { return VisionCandidates; }
 	const TArray<FString>& GetVisionPairDiagnostics() const { return VisionPairDiagnostics; }
 	const TArray<uint8>& GetVisionMask() const { return VisionMask; }
@@ -369,6 +392,7 @@ public:
 	const TArray<int32>& GetVisionCoarseLabels() const { return VisionCoarseLabels; }
 	const TArray<FIntRect>& GetVisionSubdivisionCells() const { return VisionSubdivisionCells; }
 	const TArray<int32>& GetVisionSubdivisionDepths() const { return VisionSubdivisionDepths; }
+	const TArray<FString>& GetVisionSubdivisionDiagnostics() const { return VisionSubdivisionDiagnostics; }
 	int32 GetVisionMaskWidth() const { return VisionMaskWidth; }
 	int32 GetVisionMaskHeight() const { return VisionMaskHeight; }
 	int32 GetVisionCoarseGridColumns() const { return VisionCoarseColumns; }
@@ -377,6 +401,8 @@ public:
 	const FString& GetVisionFailureReason() const { return LastVisionFailureReason; }
 
 	int32 GetVisionDebugViewMode() const { return VisionDebugViewMode; }
+	FString GetVisionDebugViewName() const;
+	const FString& GetVisionDebugViewStatus() const { return LastVisionDebugViewStatus; }
 	EAutoPickupState GetAutoPickupState() const { return AutoPickupState; }
 	const FString& GetAutoPickupStatus() const { return AutoPickupStatus; }
 	void GetAutoPickupDiagnosticLines(TArray<FString>& OutLines) const;
@@ -442,6 +468,23 @@ private:
 	/** Exact FColor values passed to the detector after CPU readback.  HUD uses
 	 * this only in O mode 5 to compare CPU data against the render target. */
 	TArray<FColor> LatestRgbCpuPixels;
+	FString LastRgbCaptureSettings = TEXT("RGB capture settings: not measured");
+	FString RgbExposureDiagnosticStatus = TEXT("1: lighting/camera audit | 2: exposure capture | 3: capture profile=current");
+	bool bRgbExposureSweepActive = false;
+	/** Diagnostic-only compatibility mode that reproduces the committed
+	 * pre-merge SceneCapture exposure path without reverting LiDAR/navigation. */
+	bool bUseLegacyRgbCaptureProfile = false;
+	bool bRgbExposureSweepPreviousManual = true;
+	float RgbExposureSweepPreviousBias = 0.f;
+	int32 RgbExposureSweepStage = 0;
+	int32 RgbExposureSweepPendingCaptureId = -1;
+	/** One same-cycle evidence frame using the current exposure mode.  Unlike an
+	 * EV sweep it does not replace Histogram auto exposure with Manual. */
+	int32 RgbReferenceCapturePendingId = -1;
+	FString RgbReferenceCaptureLabel;
+	/** The sweep must not read a render target until the capture commands queued
+	 * for its stamped cycle have completed. */
+	FRenderCommandFence RgbExposureSweepCaptureFence;
 	bool bDepthFrameValid = false;
 	int32 DepthValidPixelCount = 0;
 	int32 DepthInvalidPixelCount = 0, DepthBelowRangePixelCount = 0, DepthAboveRangePixelCount = 0;
@@ -468,6 +511,18 @@ private:
 	float AutoApproachAccumulatedYawDeg = 0.f;
 	FVector LastTrackedActorLocation = FVector::ZeroVector;
 	float LastTrackedOpeningSeparationPx = 0.f;
+	/** A target is assigned only after stable, control-eligible RGB-D frames.
+	 * World points are sensor measurements transformed at capture time; actor
+	 * names/bounds are never used for pallet identity. */
+	int32 LockedTargetId = 0;
+	FVector LockedTargetFrontWorld = FVector::ZeroVector;
+	FVector LockedTargetLeftWorld = FVector::ZeroVector;
+	FVector LockedTargetRightWorld = FVector::ZeroVector;
+	bool bLockedTargetWorldValid = false;
+	bool bLastVisionPartialTargetEvidence = false;
+	float TrackingRecoveryStartTime = -BIG_NUMBER;
+	bool bResumeAlignmentAfterTracking = false;
+	UPROPERTY(EditAnywhere, Category="Auto pickup|Vision|Tracking") float TrackingRecoveryTimeoutSeconds = 4.f;
 	bool bAutoApproachStraightDiagnostic = false;
 	bool bApproachSteeringInDeadband = false;
 	bool bSavedLastValidVisionArtifact = false, bSavedFirstVisionFailureArtifact = false;
@@ -482,12 +537,16 @@ private:
 	TArray<int32> VisionCoarseLabels;
 	TArray<FIntRect> VisionSubdivisionCells;
 	TArray<int32> VisionSubdivisionDepths;
+	TArray<FString> VisionSubdivisionDiagnostics;
 	int32 VisionMaskWidth = 0, VisionMaskHeight = 0, LastVisionSearchStartY = -1;
 	int32 VisionCoarseColumns = 0, VisionCoarseRows = 0;
 	FIntRect VisionBodyBounds = FIntRect(0, 0, 0, 0);
 	FString LastVisionFailureReason = TEXT("Not processed");
 	FString LastVisionStageStatus = TEXT("not processed");
 	int32 VisionDebugViewMode = 0;
+	FString LastVisionDebugViewStatus = TEXT("O mode 0 RGB Render Target source; awaiting capture");
+	int32 LastObservedVisionDebugViewMode = -1;
+	bool bVisionDebugViewChangedByOInput = false;
 	bool bSensorOcclusionDiagnosticHideForks = false;
 	int32 LastVisionFrameNumber = 0, LastProcessedSensorFrameId = -1;
 	int32 AutoPickupAttemptId = 0, LastVisionSuccessSensorFrameId = -1, FirstVisionFailureAfterSuccessSensorFrameId = -1;
@@ -548,15 +607,22 @@ private:
 	void ToggleVisionDebugView();
 
 	void ToggleDepthDebugView();
+	void StartRgbExposureSweep();
+	void ToggleRgbCaptureProfile();
+	void TogglePalletSensorExposureMode();
+	void CaptureRgbExposureReference();
 	void ToggleDetailedSensorDiagnostics();
 	void ToggleAutoApproachStraightDiagnostic();
 	void ToggleSensorOcclusionDiagnostic();
 	void ToggleLidarDebug();
+	void LogSceneLightingAudit();
+	void ApplyFactoryRectLightCalibration();
 	void UpdatePalletSensorSettings();
 	void ProcessOpeningVision();
 	bool ReadSynchronizedDepthFrame();
 	void UpdateDepthForOpeningDetection();
 	void SaveVisionTransitionArtifacts(const TArray<FColor>& Pixels, bool bValidFrame);
+	void SaveRgbExposureSweepArtifact(const TArray<FColor>& Pixels, float ExposureBias, int32 CaptureId, const FString& CaptureKind) const;
 
 	void ToggleSlamMapDebug();
 
@@ -566,6 +632,8 @@ private:
 	bool HasPhysicalPalletLift(float& OutPalletRiseCm) const;
 
 	bool ComputeAutoInsertionGeometry(const FOpeningDetection& Detection, float& OutForkTipToFrontCm, float& OutRemainingForkAdvanceCm, float& OutReachRemainingCm, float& OutChassisAdvanceCm, float& OutLateralErrorCm, float& OutLiftCorrectionCm) const;
+	bool ComputeOpeningHeightAlignment(const FOpeningDetection& Detection, float& OutAllowedForkTopMinCm, float& OutAllowedForkTopMaxCm, float& OutCurrentForkTopLocalCm, float& OutTargetLiftStrokeCm) const;
+	void UpdateLockedTargetWorldMeasurement(const FOpeningDetection& Detection);
 	void ClearAutomaticCommands();
 	bool IsAutoPickupMotionActive() const;
 	float GetForkTipAheadOfSensorCm() const;
