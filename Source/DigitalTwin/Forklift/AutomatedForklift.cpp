@@ -11,6 +11,7 @@
 #include "GameFramework/SpringArmComponent.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "PhysicsEngine/PhysicsConstraintComponent.h"
+#include "PhysicalMaterials/PhysicalMaterial.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/EngineTypes.h"
 #include "Engine/Engine.h"
@@ -260,6 +261,13 @@ void AAutomatedForklift::BeginPlay()
 	// Constraints must see the final chassis pose. Configuring them before this
 	// placement correction created an implicit first-frame displacement.
 	ConfigureKinematicForkMechanism();
+	ForkContactPhysicalMaterial = NewObject<UPhysicalMaterial>(this, TEXT("ForkLoadContactMaterial"));
+	ForkContactPhysicalMaterial->Friction = FMath::Max(0.f, ForkLoadFrictionCoefficient);
+	ForkContactPhysicalMaterial->Restitution = .02f;
+	ForkContactPhysicalMaterial->bOverrideFrictionCombineMode = true;
+	ForkContactPhysicalMaterial->FrictionCombineMode = EFrictionCombineMode::Multiply;
+	if (LeftForkCollision) LeftForkCollision->SetPhysMaterialOverride(ForkContactPhysicalMaterial);
+	if (RightForkCollision) RightForkCollision->SetPhysMaterialOverride(ForkContactPhysicalMaterial);
 	UE_LOG(LogTemp, Warning, TEXT("[R16HD_COLLISION_FIX_V2] BeginPlay forklift=%s class=%s path=%s controller=%s locallyControlled=%d version=2026-10-12-v4"),
 		*GetName(), *GetClass()->GetName(), *GetPathName(), *GetNameSafe(GetController()), IsLocallyControlled());
 	UE_LOG(LogTemp, Warning, TEXT("[R16HD_SENSOR] carriage-mounted sensor parent=%s relative=%s rotation=%s fov=%.1f (drawing offsets H=%.1f L=%.1f B=%.1f cm)"),
@@ -988,6 +996,48 @@ void AAutomatedForklift::UpdateSupportedLoadState()
 		const float HeightSpeedMultiplier = FMath::Lerp(1.f, LoadedTravelSpeedAtMaxLiftMultiplier, HeightRatio);
 		const float ReachSpeedMultiplier = FMath::Lerp(1.f, LoadedTravelSpeedAtFullReachMultiplier, ReachRatio);
 		CurrentDriveSpeedMultiplier = FMath::Min(CurrentDriveSpeedMultiplier, FMath::Min(HeightSpeedMultiplier, ReachSpeedMultiplier));
+	}
+}
+
+void AAutomatedForklift::ApplySupportedLoadInertialForces(const FVector& ChassisLinearAccelerationWorld, float YawRateRadPerSec, float YawAccelerationRadPerSec2)
+{
+	SupportedLoadAccelerationCmPerSec2 = 0.f;
+	bSupportedLoadSlipRisk = false;
+	if (SupportedLoadActors.IsEmpty() || !BodyCollision || !GetWorld()) return;
+
+	const FVector YawAxis = GetActorUpVector();
+	const FVector YawVelocity = YawAxis * YawRateRadPerSec;
+	const FVector YawAcceleration = YawAxis * YawAccelerationRadPerSec2;
+	for (const TWeakObjectPtr<AActor>& WeakLoad : SupportedLoadActors)
+	{
+		AActor* LoadActor = WeakLoad.Get();
+		UPrimitiveComponent* LoadBody = LoadActor ? Cast<UPrimitiveComponent>(LoadActor->GetRootComponent()) : nullptr;
+		if (!LoadBody || !LoadBody->IsSimulatingPhysics()) continue;
+
+		const FVector OffsetFromTruckPivot = LoadBody->GetCenterOfMass() - GetActorLocation();
+		const FVector TangentialAcceleration = FVector::CrossProduct(YawAcceleration, OffsetFromTruckPivot);
+		const FVector CentripetalAcceleration = FVector::CrossProduct(YawVelocity, FVector::CrossProduct(YawVelocity, OffsetFromTruckPivot));
+		const FVector TotalTruckAcceleration = ChassisLinearAccelerationWorld + TangentialAcceleration + CentripetalAcceleration;
+		const float RequiredFrictionAcceleration = TotalTruckAcceleration.Size();
+		SupportedLoadAccelerationCmPerSec2 = FMath::Max(SupportedLoadAccelerationCmPerSec2, RequiredFrictionAcceleration);
+
+		float PalletSurfaceFriction = 1.f;
+		if (const APallet* Pallet = Cast<APallet>(LoadActor)) PalletSurfaceFriction = Pallet->GetSurfaceFriction();
+		else if (const AWoodPallet* WoodPallet = Cast<AWoodPallet>(LoadActor)) PalletSurfaceFriction = WoodPallet->GetSurfaceFriction();
+		const float ContactFriction = FMath::Max(0.f, ForkLoadFrictionCoefficient) * FMath::Max(0.f, PalletSurfaceFriction);
+		const float MaximumStaticFrictionAcceleration = ContactFriction * 980.f;
+		if (RequiredFrictionAcceleration > MaximumStaticFrictionAcceleration + 1.f) bSupportedLoadSlipRisk = true;
+
+		// Apply the truck-frame inertial acceleration to the dynamic pallet. Chaos
+		// fork contacts supply the opposing Coulomb friction; once it is exceeded,
+		// the load keeps its own velocity and can slide off or tip on the tines.
+		LoadBody->AddForce(-TotalTruckAcceleration, NAME_None, true);
+	}
+
+	if (bSupportedLoadSlipRisk && GetWorld()->GetTimeSeconds() - LastSupportedLoadSlipLogTime >= .5f)
+	{
+		LastSupportedLoadSlipLogTime = GetWorld()->GetTimeSeconds();
+		UE_LOG(LogTemp, Warning, TEXT("[R16HD_LOAD_SLIP] supported load friction limit exceeded: acceleration=%.1fcm/s2, truck-fork friction=%.2f"), SupportedLoadAccelerationCmPerSec2, ForkLoadFrictionCoefficient);
 	}
 }
 
@@ -2542,6 +2592,7 @@ void AAutomatedForklift::Tick(float Dt)
 	if (bIsDriving) EmitDriveDiagnostic(StartLocation, EndLocation, DriveHit);
 	bWasDriving = bIsDriving;
 	const float ActualSteerAngleRad = LastAppliedSteerInput * MaxSteerAngleRad;
+	const float PreviousYawRateDegPerSec = CurrentYawRateDegPerSec;
 	float TargetYawRateDegPerSec = FMath::RadiansToDegrees(CurrentForwardSpeedCmPerSec / WheelbaseCm * FMath::Tan(ActualSteerAngleRad));
 	TargetYawRateDegPerSec = FMath::Clamp(TargetYawRateDegPerSec, -Motion.SteeringRateDegPerSec, Motion.SteeringRateDegPerSec);
 	CurrentYawRateDegPerSec = FMath::FInterpConstantTo(CurrentYawRateDegPerSec, TargetYawRateDegPerSec, Dt, SteeringAccelerationDegPerSec2);
@@ -2549,6 +2600,14 @@ void AAutomatedForklift::Tick(float Dt)
 	LastAutoYawDeltaDeg = bAutoMotion ? YawDelta : 0.f;
 	if (bAutoMotion) AutoApproachAccumulatedYawDeg += YawDelta;
 	if (!WouldForkRotationHitFixedObstacle(YawDelta)) AddActorWorldRotation(FRotator(0.f, YawDelta, 0.f));
+	const float ActualLongitudinalAcceleration = Dt > SMALL_NUMBER
+		? (CurrentForwardSpeedCmPerSec - PreviousForwardSpeedCmPerSec) / Dt : 0.f;
+	const float ActualYawRateRadPerSec = FMath::DegreesToRadians(CurrentYawRateDegPerSec);
+	const float ActualYawAccelerationRadPerSec2 = Dt > SMALL_NUMBER
+		? FMath::DegreesToRadians(CurrentYawRateDegPerSec - PreviousYawRateDegPerSec) / Dt : 0.f;
+	const FVector TruckLinearAcceleration = GetActorForwardVector() * ActualLongitudinalAcceleration
+		+ GetActorRightVector() * CurrentForwardSpeedCmPerSec * ActualYawRateRadPerSec;
+	ApplySupportedLoadInertialForces(TruckLinearAcceleration, ActualYawRateRadPerSec, ActualYawAccelerationRadPerSec2);
 	ApplyKinematicForkControls(Dt);
 	DrawCollisionDebug();
 	DrawPalletSensorDebug();

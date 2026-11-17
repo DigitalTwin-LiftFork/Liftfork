@@ -15,6 +15,7 @@ class UPrimitiveComponent;
 class USceneCaptureComponent2D;
 class UTextureRenderTarget2D;
 class UPhysicsConstraintComponent;
+class UPhysicalMaterial;
 class UForkliftNavigationSensorComponent;
 
 class APallet;
@@ -162,6 +163,10 @@ public:
 	UPROPERTY(VisibleAnywhere, Category="Stability|Rollover") bool bChassisRolloverActive = false;
 	UPROPERTY(VisibleAnywhere, Category="Stability|Rollover") bool bChassisTippedOver = false;
 	UPROPERTY(VisibleAnywhere, Category="Stability|Rollover") float ChassisRolloverAngleDeg = 0.f;
+	/** Fork-to-load friction multiplier; Chaos combines this with the pallet's surface friction. */
+	UPROPERTY(EditAnywhere, Category="Load handling|Physics", meta=(ClampMin="0.0", ClampMax="1.5")) float ForkLoadFrictionCoefficient = .25f;
+	UPROPERTY(VisibleAnywhere, Category="Load handling|Physics") bool bSupportedLoadSlipRisk = false;
+	UPROPERTY(VisibleAnywhere, Category="Load handling|Physics") float SupportedLoadAccelerationCmPerSec2 = 0.f;
 	UPROPERTY(EditAnywhere, Category="Drive debug") bool bEnableDriveDebug = false;
 	UPROPERTY(EditAnywhere, Category="Drive debug", meta=(ClampMin="0.05")) float DriveDebugIntervalSeconds = 0.25f;
 	UPROPERTY(EditAnywhere, Category="Drive debug") bool bDrawDriveDebug = false;
@@ -461,6 +466,7 @@ private:
 	float RolloverTotalMassKg = 0.f, RolloverAngularVelocityRadPerSec = 0.f;
 	float RolloverVerticalOffsetCm = 0.f;
 	int32 RolloverSupportEdgeIndex = INDEX_NONE;
+	float LastSupportedLoadSlipLogTime = -BIG_NUMBER;
 	TArray<TWeakObjectPtr<AActor>> SupportedLoadActors;
 	FString ActiveLoadCollisionStatus = TEXT("No supported load");
 	float CameraPitchDeg = -24.f, CameraYawDeg = -35.f, CameraDistanceCm = 700.f;
@@ -610,6 +616,7 @@ private:
 	void ApplyKinematicForkControls(float DeltaSeconds);
 	void UpdateSupportedLoadState();
 	float ComputeStabilitySpeedMultiplier(float LongitudinalAccelerationCmPerSec2, float LateralAccelerationCmPerSec2);
+	void ApplySupportedLoadInertialForces(const FVector& ChassisLinearAccelerationWorld, float YawRateRadPerSec, float YawAccelerationRadPerSec2);
 	bool BeginChassisRolloverIfNeeded();
 	void UpdateChassisRollover(float DeltaSeconds);
 	void SetConstraintFramesAtPose(UPhysicsConstraintComponent* Constraint, UPrimitiveComponent* Body1, UPrimitiveComponent* Body2, const FTransform& JointWorld, const FVector& Frame2Offset);
@@ -636,6 +643,7 @@ private:
 	void LogInitialDriveOverlaps();
 	UStaticMeshComponent* CreateVisual(const TCHAR* Name, USceneComponent* Parent);
 	UPROPERTY() TObjectPtr<APallet> CarriedPallet;
+	UPROPERTY(Transient) TObjectPtr<UPhysicalMaterial> ForkContactPhysicalMaterial;
 	bool bPalletSupportedAutomatically = false;
 	bool bCarriedPalletResting = false;
 	FString PalletSupportDebugStatus;
