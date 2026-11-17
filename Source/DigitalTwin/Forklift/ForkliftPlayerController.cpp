@@ -32,13 +32,30 @@ void AForkliftPlayerController::ClickAutoPickupButton()
 	if (bHasMouse)
 	{
 		const FVector2D MousePosition(MouseX, MouseY);
+		if (AAutomatedForklift* Forklift = Cast<AAutomatedForklift>(GetPawn());
+			Forklift && Forklift->RackMenuZone != INDEX_NONE)
+		{
+			for (int32 Slot = 0; Slot <= AAutomatedForklift::RackSlotCount; ++Slot)
+			{
+				if (!AAutomatedForklift::RackMenuButtonRect(ViewX, ViewY, Slot).IsInside(MousePosition)) continue;
+				if (Slot < AAutomatedForklift::RackSlotCount) Forklift->RackMenuSlot = Slot;
+				else if (Forklift->RackMenuSlot != INDEX_NONE)
+				{
+					const int32 Zone = Forklift->RackMenuZone;
+					Forklift->RackMenuZone = INDEX_NONE;
+					Forklift->GoToStation(Zone, Forklift->RackMenuSlot);
+				}
+				return;
+			}
+		}
 		for (int32 Index = 0; Index < AAutomatedForklift::WorkStationCount; ++Index)
 		{
 			if (!AAutomatedForklift::WorkStationButtonRect(ViewY, Index).IsInside(MousePosition)) continue;
 			if (AAutomatedForklift* Forklift = Cast<AAutomatedForklift>(GetPawn()))
 			{
 				if (ActiveWoodPallet) CancelWoodPalletPlacement();
-				Forklift->GoToStation(Index);
+				Forklift->RackMenuZone = Forklift->RackMenuZone == Index ? INDEX_NONE : Index;
+				Forklift->RackMenuSlot = INDEX_NONE;
 			}
 			return;
 		}

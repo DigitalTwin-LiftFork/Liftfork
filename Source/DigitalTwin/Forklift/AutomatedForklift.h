@@ -384,7 +384,7 @@ public:
 
 	void ToggleAutoPickup();
 
-		bool IsNavigationActive() const { return bNavigationActive; }
+		bool IsNavigationActive() const { return bNavigationActive || RackDropPhase != ERackDropPhase::Idle; }
 	static FBox2D NavigationButtonRect(float Height) { return FBox2D(FVector2D(24.f,Height-154.f),FVector2D(264.f,Height-112.f)); }
 	static FBox2D SlamMapRect(float Height) { const float Size=FMath::Min(300.f,Height*.40f); return FBox2D(FVector2D(20.f,100.f),FVector2D(20.f+Size,100.f+Size)); }
 	bool SetNavigationGoalFromMapScreen(FVector2D ScreenPosition, float ViewportHeight);
@@ -396,7 +396,12 @@ public:
 	}
 	static constexpr int32 WorkStationCount = 6;
 	static FString WorkStationLabel(int32 Index) { return FString::Printf(TEXT("%c구역"), TCHAR('A' + Index)); }
-	void GoToStation(int32 Index);
+	static constexpr int32 RackBayCount = 12;
+	static constexpr int32 RackSlotCount = 3 * RackBayCount;
+	int32 RackMenuZone = INDEX_NONE;
+	int32 RackMenuSlot = INDEX_NONE;
+	static FBox2D RackMenuButtonRect(float Width, float Height, int32 Slot);
+	void GoToStation(int32 Index, int32 Slot = INDEX_NONE);
 	bool IsSupportedPallet(const AActor* Actor) const;
 	bool HasPendingWorkStation() const { return PendingWorkStation != INDEX_NONE; }
 	int32 GetSelectedWorkStation() const { return HasPendingWorkStation() ? PendingWorkStation : ActiveWorkStation; }
@@ -425,6 +430,27 @@ private:
 	float NextWorkStationSearch = 0.f;
 	bool bRackRowsScanned = false;
 	FBox RackRows[WorkStationCount];
+	TOptional<FBox> RackBayDecks[WorkStationCount][RackBayCount];
+	int32 PendingRackSlot = INDEX_NONE;
+	int32 ActiveRackSlot = INDEX_NONE;
+	TOptional<FBox> RackUpperDecks[WorkStationCount][RackBayCount][2];
+	TOptional<FBox> RackHeightTarget;
+	float RackHeightStarted = 0.f;
+	float RackHeightCommand = 0.f;
+	float RackMeasuredLift = 0.f;
+	int32 RackHeightFrame = 0;
+	int32 RackHeightStableFrames = 0;
+	void UpdateRackHeight(float Dt);
+	enum class ERackDropPhase : uint8 { Idle, Lift, Insert, Lower, Withdraw, Stow };
+	ERackDropPhase RackDropPhase = ERackDropPhase::Idle;
+	TWeakObjectPtr<AActor> RackDropLoad;
+	FBox RackDropDeck{ForceInit};
+	float RackDropDeadline = 0.f;
+	float RackDropReleaseLift = 0.f;
+	float RackDropSettleSince = -1.f;
+	FVector RackDropStart = FVector::ZeroVector;
+	void BeginRackDrop(const FBox& Deck);
+	void UpdateRackDrop(float Dt);
 	int32 PendingWorkStation = INDEX_NONE;
 	bool SetNavigationGoalInMap(FVector2D Goal, int32 StationIndex = INDEX_NONE);
 	struct FWorkStation
@@ -435,6 +461,7 @@ private:
 		int32 MapGeneration = -1;
 	};
 	FWorkStation WorkStations[WorkStationCount];
+	FWorkStation RackApproach;
 	TWeakObjectPtr<class UTextRenderComponent> WorkStationSigns[WorkStationCount];
 	int32 ActiveWorkStation = INDEX_NONE;
 		bool PlanNavigationRoute(FVector2D Start);

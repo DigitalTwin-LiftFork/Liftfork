@@ -1099,11 +1099,250 @@ bool AAutomatedForklift::IsGroundPalletReadyForLift() const
  }
  return false;
 }
+void AAutomatedForklift::BeginRackDrop(const FBox& Deck)
+{
+	if (SupportedLoadActors.Num() != 1 || !SupportedLoadActors[0].IsValid())
+	{
+		NavigationStatus = TEXT("선반 하역 중지: 포크 위 팔레트 한 장을 확인해야 합니다");
+		return;
+	}
+	RackDropLoad = SupportedLoadActors[0];
+	RackDropDeck = Deck;
+	RackDropStart = GetActorLocation();
+	RackDropDeadline = GetWorld()->GetTimeSeconds() + 45.f;
+	RackDropReleaseLift = -1.f;
+	RackDropSettleSince = -1.f;
+	RackDropPhase = ERackDropPhase::Lift;
+	NavigationStatus = TEXT("선반 하역: 받침면에 맞춰 포크 높이 조절");
+}
+
+void AAutomatedForklift::UpdateRackDrop(float Dt)
+{
+	const auto Finish = [this](const TCHAR* Status)
+	{
+		RackDropPhase = ERackDropPhase::Idle;
+		NavigationStatus = Status;
+	};
+	if (IsAutoPickupMotionActive() || !FMath::IsNearlyZero(DriveInput) || !FMath::IsNearlyZero(SteerInput) ||
+		!FMath::IsNearlyZero(LiftInput) || !FMath::IsNearlyZero(ReachInput) || !FMath::IsNearlyZero(SideShiftInput))
+	{
+		Finish(TEXT("선반 하역 취소: 수동 조작"));
+		return;
+	}
+	const double Now = GetWorld()->GetTimeSeconds();
+	AActor* Load = RackDropLoad.Get();
+	if (!Load || Now >= RackDropDeadline)
+	{
+		Finish(TEXT("선반 하역 중지: 팔레트 감지 또는 시간 한계"));
+		return;
+	}
+	const APallet* Pallet = Cast<APallet>(Load);
+	const AWoodPallet* Wood = Cast<AWoodPallet>(Load);
+	if (!Pallet && !Wood)
+	{
+		Finish(TEXT("선반 하역 중지: 지원하지 않는 팔레트"));
+		return;
+	}
+	const auto& Shapes = Pallet ? Pallet->GetCollisionShapes() : Wood->GetCollisionShapes();
+	FBox Bounds(ForceInit);
+	for (const UBoxComponent* Shape : Shapes)
+		if (Shape && Shape->IsQueryCollisionEnabled()) Bounds += Shape->Bounds.GetBox();
+	if (!Bounds.IsValid) { Finish(TEXT("선반 하역 중지: 팔레트 경계 확인 실패")); return; }
+
+	const FVector Center = Bounds.GetCenter();
+	const FVector Forward = GetActorForwardVector();
+	const double ShelfZ = RackDropDeck.Max.Z;
+	const double SideError = FMath::Abs(Center.Y - RackDropDeck.GetCenter().Y);
+	const double Advance = FVector::DotProduct(FVector(RackDropDeck.GetCenter().X - Center.X, RackDropDeck.GetCenter().Y - Center.Y, 0), Forward);
+	const bool bFits = Bounds.GetSize().X <= RackDropDeck.GetSize().X &&
+		Bounds.Min.Y > RackDropDeck.Min.Y && Bounds.Max.Y < RackDropDeck.Max.Y && SideError < 85.0;
+	if (!bFits && RackDropPhase != ERackDropPhase::Withdraw && RackDropPhase != ERackDropPhase::Stow)
+	{
+		RackDropPhase = ERackDropPhase::Idle;
+		NavigationStatus = FString::Printf(TEXT("선반 하역 중지: 팔레트 깊이 %.1f / 선반 %.1f cm, 좌우 오차 %.1f cm"),
+			Bounds.GetSize().X, RackDropDeck.GetSize().X, SideError);
+		UE_LOG(LogTemp, Warning, TEXT("Rack drop fit: load=%s deck=%s heading=%.2f loadYaw=%.2f"),
+			*Bounds.ToString(), *RackDropDeck.ToString(), GetActorRotation().Yaw, Load->GetActorRotation().Yaw);
+		return;
+	}
+	if (RackDropPhase == ERackDropPhase::Lift || RackDropPhase == ERackDropPhase::Insert)
+	{
+		if (!IsSupportedPallet(Load)) { Finish(TEXT("선반 하역 중지: 적재 지지 해제")); return; }
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(RackDropOccupancy), false, this);
+		Params.AddIgnoredActor(Load);
+		FCollisionObjectQueryParams Objects;
+		Objects.AddObjectTypesToQuery(ECC_PhysicsBody);
+		Objects.AddObjectTypesToQuery(ECC_WorldDynamic);
+		const FVector DropCenter(RackDropDeck.GetCenter().X, Center.Y, ShelfZ + Bounds.GetExtent().Z + 4.0);
+		if (GetWorld()->OverlapAnyTestByObjectType(DropCenter, FQuat::Identity, Objects,
+			FCollisionShape::MakeBox(Bounds.GetExtent()), Params))
+		{
+			Finish(TEXT("선반 하역 중지: 선택한 자리에 물체가 있습니다"));
+			return;
+		}
+	}
+	if (RackDropPhase == ERackDropPhase::Lift)
+	{
+		const float Error = ShelfZ + 4.0 - Bounds.Min.Z;
+		if (LiftCm + Error > RequiredLiftStrokeCm || LiftCm + Error < 0.f)
+		{
+			Finish(TEXT("선반 하역 중지: 포크 높이 범위 초과"));
+			return;
+		}
+		if (FMath::Abs(Error) > 1.5f)
+		{
+			const float Rate = Error > 0.f ? Motion.LoadedLiftSpeedCmPerSec : Motion.LoadedLowerSpeedCmPerSec;
+			LiftInput = FMath::Clamp(Error / FMath::Max(1.f, Rate * Dt), -.2f, .2f);
+			FHitResult Hit;
+			if (Error > 0.f && SweepCarriedPallet(GetActorUpVector() * LiftInput * Rate * Dt, TEXT("rack drop lift"), Hit))
+			{
+				LiftInput = 0.f;
+				Finish(TEXT("선반 하역 중지: 팔레트 상승 경로 충돌"));
+			}
+			return;
+		}
+		RackDropPhase = ERackDropPhase::Insert;
+	}
+	if (RackDropPhase == ERackDropPhase::Insert)
+	{
+		if (Advance > 2.0)
+		{
+			const float Step = FMath::Min(static_cast<float>(Advance), 8.f * Dt);
+			FHitResult Hit;
+			if (SweepCarriedPallet(Forward * Step, TEXT("rack drop insert"), Hit))
+			{
+				Finish(TEXT("선반 하역 중지: 팔레트 삽입 경로 충돌"));
+				return;
+			}
+			if (Advance <= Dimensions.ReachTravelCm - ReachCm && Motion.ReachSpeedCmPerSec > 0.f)
+				ReachInput = Step / FMath::Max(.01f, Motion.ReachSpeedCmPerSec * Dt);
+			else
+				DriveInput = Step / FMath::Max(.01f, Motion.ForwardSpeedCmPerSec * Dt);
+			NavigationStatus = TEXT("선반 하역: 팔레트 삽입 중");
+			return;
+		}
+		if (Bounds.Min.X < RackDropDeck.Min.X || Bounds.Max.X > RackDropDeck.Max.X)
+		{
+			Finish(TEXT("선반 하역 중지: 팔레트가 받침면 안에 들어오지 않았습니다"));
+			return;
+		}
+		RackDropPhase = ERackDropPhase::Lower;
+	}
+	if (RackDropPhase == ERackDropPhase::Lower)
+	{
+		NavigationStatus = TEXT("선반 하역: 팔레트 안착 확인 중");
+		if (Bounds.Min.Z < ShelfZ - 3.0 || Bounds.Min.Z > ShelfZ + 10.0)
+		{
+			Finish(TEXT("선반 하역 중지: 팔레트 높이가 받침면에서 벗어났습니다"));
+			return;
+		}
+		if (Bounds.Min.Z <= ShelfZ + 2.0)
+		{
+			if (RackDropReleaseLift < 0.f) RackDropReleaseLift = LiftCm - 2.5f;
+			if (LiftCm <= RackDropReleaseLift + .3f && !IsSupportedPallet(Load))
+			{
+				if (RackDropSettleSince < 0.f) RackDropSettleSince = Now;
+				if (Now - RackDropSettleSince < .5) return;
+				RackDropPhase = ERackDropPhase::Withdraw;
+			}
+			else RackDropSettleSince = -1.f;
+		}
+		if (RackDropPhase == ERackDropPhase::Lower)
+		{
+			LiftInput = -.12f;
+			return;
+		}
+	}
+	if (RackDropPhase == ERackDropPhase::Withdraw)
+	{
+		NavigationStatus = TEXT("선반 하역: 리치 복귀 및 후진");
+		if (IsSupportedPallet(Load) || Bounds.Min.Z < ShelfZ - 3.0)
+		{
+			Finish(TEXT("선반 하역 중지: 팔레트 안착 상태를 확인하세요"));
+			return;
+		}
+		if (ReachCm > 1.f) { ReachInput = -.4f; return; }
+		if (FVector::DotProduct(GetActorLocation() - RackDropStart, Forward) > -60.f)
+		{
+			DriveInput = -20.f / FMath::Max(20.f, Motion.ReverseSpeedCmPerSec);
+			return;
+		}
+		RackDropPhase = ERackDropPhase::Stow;
+	}
+	if (LiftCm > 25.f) { LiftInput = -.4f; return; }
+	Finish(TEXT("선반 하역 완료: 팔레트 안착 및 포크 이탈"));
+}
+
+void AAutomatedForklift::UpdateRackHeight(float Dt)
+{
+	RackHeightCommand = 0.f;
+	if (!RackHeightTarget.IsSet()) return;
+	const auto Finish = [this](const TCHAR* Status)
+	{
+		RackHeightTarget.Reset();
+		NavigationStatus = Status;
+	};
+	if (bNavigationActive || IsAutoPickupMotionActive() || TransportPhase != ETransportPhase::None ||
+		!FMath::IsNearlyZero(DriveInput) || !FMath::IsNearlyZero(SteerInput) ||
+		!FMath::IsNearlyZero(LiftInput) || !FMath::IsNearlyZero(ReachInput) || !FMath::IsNearlyZero(SideShiftInput))
+	{
+		Finish(TEXT("포크 높이 맞춤 취소: 조작 입력"));
+		return;
+	}
+	if (bIsLoaded || CarriedPallet)
+	{
+		Finish(TEXT("포크 높이 맞춤 중지: 포크에 팔레트가 있습니다"));
+		return;
+	}
+	if (GetWorld()->GetTimeSeconds() - RackHeightStarted > (RackHeightStableFrames >= 3 ? 30.f : 8.f))
+	{
+		Finish(RackHeightStableFrames >= 3 ? TEXT("포크 높이 맞춤 시간 초과") : TEXT("선택한 자리의 삽입구를 확인하지 못했습니다"));
+		return;
+	}
+	if (RackHeightStableFrames < 3)
+	{
+		if (LastProcessedSensorFrameId <= RackHeightFrame) return;
+		RackHeightFrame = LastProcessedSensorFrameId;
+		const auto& Detection = OpeningDetection;
+		const FVector Opening = ForkCarriage->GetComponentTransform().TransformPosition(Detection.OpeningCenterInForkCm);
+		const FBox& Deck = RackHeightTarget.GetValue();
+		float Tip, Advance, Reach, Chassis, Lateral, Correction;
+		if (!Detection.bValid || !Detection.bDepthValid ||
+			FMath::Abs(Opening.Y - Deck.GetCenter().Y) > 75.f ||
+			Opening.X < Deck.Min.X - 50.f || Opening.X > Deck.Max.X + 50.f ||
+			Opening.Z < Deck.Max.Z || Opening.Z > Deck.Max.Z + 30.f ||
+			!ComputeAutoInsertionGeometry(Detection, Tip, Advance, Reach, Chassis, Lateral, Correction))
+		{
+			RackHeightStableFrames = 0;
+			return;
+		}
+		const float Target = LiftCm + Correction;
+		if (!FMath::IsFinite(Target) || Target < 0.f || Target > RequiredLiftStrokeCm)
+		{
+			Finish(TEXT("선택한 자리의 높이가 포크 이동 범위를 벗어났습니다"));
+			return;
+		}
+		RackHeightStableFrames = RackHeightStableFrames > 0 && FMath::Abs(Target - RackMeasuredLift) <= 2.f
+			? RackHeightStableFrames + 1 : 1;
+		RackMeasuredLift = Target;
+		if (RackHeightStableFrames < 3) return;
+	}
+	const float Error = RackMeasuredLift - LiftCm;
+	if (FMath::Abs(Error) <= 1.f)
+	{
+		Finish(TEXT("카메라로 확인한 삽입구 높이에 포크 정렬 완료"));
+		return;
+	}
+	const float Rate = Error > 0.f ? Motion.UnloadedLiftSpeedCmPerSec : Motion.UnloadedLowerSpeedCmPerSec;
+	RackHeightCommand = FMath::Clamp(Error / FMath::Max(1.f, Rate * Dt), -.4f, .4f);
+	NavigationStatus = FString::Printf(TEXT("포크 높이 맞춤 중 %.0f / %.0f cm"), LiftCm, RackMeasuredLift);
+}
+
 void AAutomatedForklift::ApplyKinematicForkControls(float Dt)
 {
 
 	const bool bAuto = IsAutoPickupMotionActive();
-	LastAppliedLiftInput = bAuto ? AutoLiftInput : LiftInput;
+	LastAppliedLiftInput = bAuto ? AutoLiftInput : (RackHeightTarget.IsSet() ? RackHeightCommand : LiftInput);
 	LastAppliedReachInput = bAuto ? AutoReachInput : ReachInput;
 	LastAppliedSideShiftInput = bAuto ? AutoSideShiftInput : SideShiftInput;
 	const float LiftRate = LastAppliedLiftInput >= 0.f ? (bIsLoaded ? Motion.LoadedLiftSpeedCmPerSec : Motion.UnloadedLiftSpeedCmPerSec) : (bIsLoaded ? Motion.LoadedLowerSpeedCmPerSec : Motion.UnloadedLowerSpeedCmPerSec);
@@ -1595,7 +1834,7 @@ void AAutomatedForklift::ProcessOpeningVision()
 	if (!PalletSensorRenderTarget || !GetWorld()) return;
 	const bool bAutoNeedsAnalysis = AutoPickupState == EAutoPickupState::Detecting || AutoPickupState == EAutoPickupState::Approaching || AutoPickupState == EAutoPickupState::Aligning || AutoPickupState == EAutoPickupState::Inserting;
 	const bool bPreviewNeedsAnalysis = PalletSensorDisplayMode != 0;
-	if (!bAutoNeedsAnalysis && !bPreviewNeedsAnalysis) return;
+	if (!bAutoNeedsAnalysis && !bPreviewNeedsAnalysis && !RackHeightTarget.IsSet()) return;
 	VisionProcessElapsed += GetWorld()->GetDeltaSeconds(); if (VisionProcessElapsed < VisionProcessIntervalSeconds) return; VisionProcessElapsed = 0.f;
 	if (SensorFrameId <= 0 || SensorFrameId == LastProcessedSensorFrameId) { LastPixelReadStatus = SensorFrameId <= 0 ? TEXT("capture frame not available") : TEXT("waiting for next capture frame"); return; }
 	LastProcessedSensorFrameId = SensorFrameId;
@@ -2351,7 +2590,7 @@ void AAutomatedForklift::Tick(float Dt)
 
 	// RGB-D capture is kept separate from the rear-body LiDAR.  Both pallet
 	// captures are requested together before their one vision consumer runs.
-	if (bPalletSensorCaptureActive && PalletSensorCapture && PalletSensorDepthCapture)
+	if ((bPalletSensorCaptureActive || RackHeightTarget.IsSet()) && PalletSensorCapture && PalletSensorDepthCapture)
 	{
 		PalletSensorCaptureElapsed += Dt;
 		if (PalletSensorCaptureElapsed >= PalletSensorCaptureIntervalSeconds)
@@ -2359,6 +2598,15 @@ void AAutomatedForklift::Tick(float Dt)
 			PalletSensorCaptureElapsed = 0.f;
 			++SensorFrameId;
 			RgbCaptureId = SensorFrameId;
+			const FRotator OriginalCameraRotation = PalletSensorCapture->GetRelativeRotation();
+			if (RackHeightTarget.IsSet())
+			{
+				const FBox& Deck = RackHeightTarget.GetValue();
+				const FVector Camera = PalletSensorCapture->GetComponentLocation();
+				const FVector Target(Camera.X < Deck.GetCenter().X ? Deck.Min.X : Deck.Max.X,
+					Deck.GetCenter().Y, Deck.Max.Z + 8.f);
+				PalletSensorCapture->SetWorldRotation((Target - Camera).Rotation());
+			}
 			RgbFrameCameraTransform = PalletSensorCapture->GetComponentTransform();
 			PalletSensorDepthCapture->SetWorldTransform(RgbFrameCameraTransform, false, nullptr, ETeleportType::None);
 			DepthCaptureId = SensorFrameId;
@@ -2368,13 +2616,21 @@ void AAutomatedForklift::Tick(float Dt)
 			DepthFrameTimestampSeconds = GetWorld()->GetTimeSeconds();
 			PalletSensorCapture->CaptureScene();
 			PalletSensorDepthCapture->CaptureScene();
+			PalletSensorCapture->SetRelativeRotation(OriginalCameraRotation);
 		}
 	}
 	ProcessOpeningVision();
 	UpdateAutoPickup(Dt);
 	UpdateSupportedLoadState();
-	UpdateTransportAutomation(Dt);
-	if (!IsAutoPickupMotionActive() && TransportPhase == ETransportPhase::None) UpdateNavigation(Dt);
+	const bool bRackDropTick = RackDropPhase != ERackDropPhase::Idle;
+	if (bRackDropTick)
+		UpdateRackDrop(Dt);
+	else
+	{
+		UpdateRackHeight(Dt);
+		UpdateTransportAutomation(Dt);
+		if (!IsAutoPickupMotionActive() && TransportPhase == ETransportPhase::None) UpdateNavigation(Dt);
+	}
 
 	const bool bAutoMotion = IsAutoPickupMotionActive();
 	// The restored controller still writes the original command fields.  Prefer
@@ -2420,6 +2676,7 @@ void AAutomatedForklift::Tick(float Dt)
 	if (bAutoMotion) AutoApproachAccumulatedYawDeg += YawDelta;
 	if (!WouldForkRotationHitFixedObstacle(YawDelta)) AddActorWorldRotation(FRotator(0.f, YawDelta, 0.f));
 	ApplyKinematicForkControls(Dt);
+	if (bRackDropTick) DriveInput = SteerInput = LiftInput = ReachInput = SideShiftInput = 0.f;
 	DrawCollisionDebug();
 	DrawPalletSensorDebug();
 }

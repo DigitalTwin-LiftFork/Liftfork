@@ -29,6 +29,19 @@ void AForkliftSensorHUD::DrawHUD()
 
 	const auto DrawNavigationPanel = [this, Forklift]()
 	{
+		if (Forklift->RackMenuZone != INDEX_NONE)
+		{
+			for (int32 Slot = 0; Slot <= AAutomatedForklift::RackSlotCount; ++Slot)
+			{
+				const bool bMove = Slot == AAutomatedForklift::RackSlotCount;
+				const FBox2D Rect = AAutomatedForklift::RackMenuButtonRect(Canvas->SizeX, Canvas->SizeY, Slot);
+				const bool bHighlighted = bMove ? Forklift->RackMenuSlot != INDEX_NONE : Forklift->RackMenuSlot == Slot;
+				DrawRect(bHighlighted ? FLinearColor(.1f,.48f,.29f,1.f) : FLinearColor(.06f,.19f,.27f,.98f),
+					Rect.Min.X, Rect.Min.Y, Rect.GetSize().X, Rect.GetSize().Y);
+				const FString Label = bMove ? TEXT("이동") : FString::Printf(TEXT("%c-%02d"), TCHAR('A' + Forklift->RackMenuZone), Slot + 1);
+				DrawText(Label, FLinearColor::White, Rect.Min.X + 4.f, Rect.Min.Y + 7.f, nullptr, .65f);
+			}
+		}
 		TArray<FString> Lines;
 		Forklift->GetNavigationDiagnosticLines(Lines);
 		const float Width = FMath::Min(510.f, Canvas->SizeX * .43f);
@@ -41,13 +54,13 @@ void AForkliftSensorHUD::DrawHUD()
 	const bool bRunning = Forklift->GetAutoPickupState() == EAutoPickupState::Detecting || Forklift->GetAutoPickupState() == EAutoPickupState::Approaching || Forklift->GetAutoPickupState() == EAutoPickupState::Aligning || Forklift->GetAutoPickupState() == EAutoPickupState::Inserting || Forklift->GetAutoPickupState() == EAutoPickupState::Lifting;
 
 	const float ButtonY = Canvas->SizeY - 72.f;
-	DrawText(TEXT("선반 구역 이동 · A~F"),
+	DrawText(TEXT("선반 선택 · 구역 → 번호 → 이동"),
 		FLinearColor::White, 24.f, ButtonY - 31.f, nullptr, .72f);
 
 	const FBox2D NavButton=AAutomatedForklift::NavigationButtonRect(Canvas->SizeY);
 	for (int32 Index = 0; Index < AAutomatedForklift::WorkStationCount; ++Index)
 	{
-		const bool bSelected = Forklift->GetSelectedWorkStation() == Index;
+		const bool bSelected = Forklift->RackMenuZone == Index || Forklift->GetSelectedWorkStation() == Index;
 		const FBox2D Rect = AAutomatedForklift::WorkStationButtonRect(Canvas->SizeY, Index);
 		DrawRect(bSelected ? FLinearColor(.1f, .48f, .29f, .95f) : FLinearColor(.09f, .28f, .38f, .95f), Rect.Min.X, Rect.Min.Y, Rect.GetSize().X, Rect.GetSize().Y);
 		DrawText(AAutomatedForklift::WorkStationLabel(Index),

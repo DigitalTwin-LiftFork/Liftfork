@@ -221,6 +221,9 @@ void AAutomatedForklift::BeginNavigationRecovery(const FString& Reason)
 
 void AAutomatedForklift::StopNavigation()
 {
+	RackDropPhase = ERackDropPhase::Idle;
+	RackHeightTarget.Reset();
+	RackHeightCommand = 0.f;
 	if (TransportPhase != ETransportPhase::None)
 	{
 		TransportPhase = ETransportPhase::None;
@@ -230,6 +233,7 @@ void AAutomatedForklift::StopNavigation()
 	bNavigationActive = false;
 	bUsingFactoryOdometry = false;
 	PendingWorkStation = INDEX_NONE;
+	PendingRackSlot = INDEX_NONE;
 	NavigationRecoveryStart = -1.f;
 	NavigationRoute.Reset();
 	bNavigationGoalSet=false;
@@ -277,10 +281,21 @@ void AAutomatedForklift::UpdateWorkStationSign(int32 Index, const FVector& Posit
 	Sign->SetText(FText::FromString(FString::Printf(TEXT("ZONE %c"), TCHAR('A' + Index))));
 }
 
-void AAutomatedForklift::GoToStation(int32 Index)
+FBox2D AAutomatedForklift::RackMenuButtonRect(float Width, float Height, int32 Slot)
 {
+	const float Step = FMath::Min(46.f, (Width - 48.f) / 12.f);
+	const float X = 24.f + (Slot == RackSlotCount ? 9 : Slot % RackBayCount) * Step;
+	const float Y = Height - 342.f + (Slot == RackSlotCount ? 3 : 2 - Slot / RackBayCount) * 32.f;
+	return FBox2D(FVector2D(X, Y), FVector2D(X + Step * (Slot == RackSlotCount ? 3.f : 1.f) - 4.f, Y + 28.f));
+}
+
+void AAutomatedForklift::GoToStation(int32 Index, int32 Slot)
+{
+	RackDropPhase = ERackDropPhase::Idle;
+	RackHeightTarget.Reset();
+	RackHeightCommand = 0.f;
 	const auto* Slam = FindComponentByClass<UForkliftSlamComponent>();
-	if (Index < 0 || Index >= WorkStationCount) return;
+	if (Index < 0 || Index >= WorkStationCount || Slot < INDEX_NONE || Slot >= RackSlotCount) return;
 	const FWorkStation& Station = WorkStations[Index];
 	if (!Slam || Station.MapGeneration != Slam->GetMapGeneration())
 	{
@@ -288,12 +303,45 @@ void AAutomatedForklift::GoToStation(int32 Index)
 		CancelAutoPickup(TEXT("구역 이동 선택"), false);
 		ClearAutomaticCommands();
 		PendingWorkStation = Index;
+		PendingRackSlot = Slot;
 		NextWorkStationSearch = 0.f;
 		NavigationStatus = FString::Printf(TEXT("%s 이동 대기: 선반 옆 경로 확인 중 · 정지 버튼으로 취소"), *WorkStationLabel(Index));
 		UE_LOG(LogTemp, Log, TEXT("Work station %d requested while mapping"), Index);
 		return;
 	}
-	SetNavigationGoalInMap(Station.Position, Index);
+	if (Slot != INDEX_NONE)
+	{
+		const TOptional<FBox>& Bay = RackBayDecks[Index][Slot % RackBayCount];
+		if (!Bay.IsSet() || !NavigationSensor)
+		{
+			StopNavigation();
+			NavigationStatus = TEXT("선반 위치를 찾지 못했습니다");
+			return;
+		}
+		const FVector Origin = GetActorLocation();
+		const float MapToWorldYaw = FMath::DegreesToRadians(GetActorRotation().Yaw) - Slam->GetPredictedYaw();
+		const float Radius = FMath::Max(GetNavigationHalfWidth() + 25.f, 100.f);
+		double BestDistance = TNumericLimits<double>::Max();
+		for (const float Side : {-1.f, 1.f})
+		{
+			const FVector Candidate((Side < 0.f ? Bay->Min.X : Bay->Max.X) + Side * (Radius + 160.f),
+				Bay->GetCenter().Y, Origin.Z);
+			const double Distance = FVector::DistSquared2D(Candidate, Origin);
+			if (Distance >= BestDistance || !IsFactoryAisleClear(Candidate, Radius)) continue;
+			const FVector Delta = Candidate - Origin;
+			RackApproach = {BodyPose(Slam, NavigationSensor) + NavRotate(FVector2D(Delta.X, Delta.Y), -MapToWorldYaw),
+				Candidate, Side > 0.f ? UE_PI : 0.f, Slam->GetMapGeneration()};
+			BestDistance = Distance;
+		}
+		if (BestDistance == TNumericLimits<double>::Max())
+		{
+			StopNavigation();
+			NavigationStatus = TEXT("선반 앞 이동 불가: 통로가 막혀 있습니다");
+			return;
+		}
+	}
+	ActiveRackSlot = Slot;
+	SetNavigationGoalInMap(Slot == INDEX_NONE ? Station.Position : RackApproach.Position, Index);
 	UE_LOG(LogTemp, Log, TEXT("Work station %d: %s"), Index, *NavigationStatus);
 }
 
@@ -307,6 +355,7 @@ bool AAutomatedForklift::SetNavigationGoalInMap(FVector2D Goal, int32 StationInd
 	const FIntPoint GoalCell = NavCell(Goal);
 	NavigationGoal = StationIndex == INDEX_NONE ? NavCentre(GoalCell) : Goal;
 	ActiveWorkStation = StationIndex;
+	if (StationIndex == INDEX_NONE) ActiveRackSlot = INDEX_NONE;
 	PendingWorkStation = INDEX_NONE;
 	bNavigationGoalIsManual = true;
 	bNavigationGoalSet = true;
@@ -345,7 +394,7 @@ bool AAutomatedForklift::SetNavigationGoalInMap(FVector2D Goal, int32 StationInd
 
 void AAutomatedForklift::ToggleNavigation()
 {
-	if (bNavigationActive || PendingWorkStation != INDEX_NONE) { StopNavigation(); return; }
+	if (IsNavigationActive() || PendingWorkStation != INDEX_NONE) { StopNavigation(); return; }
 	CancelAutoPickup(TEXT("자동 탐색 선택"), false);
 	ClearAutomaticCommands();
 	const auto* S=FindComponentByClass<UForkliftSlamComponent>();
@@ -399,6 +448,9 @@ void AAutomatedForklift::ResolveWorkStations(const UForkliftSlamComponent& Slam,
 	{
 		bRackRowsScanned = true;
 		for (FBox& Row : RackRows) Row.Init();
+		constexpr int32 BayCount = 12;
+		constexpr int32 TierCount = 3;
+		TArray<FBox> Decks[WorkStationCount][BayCount];
 		for (TActorIterator<AStaticMeshActor> It(GetWorld()); It; ++It)
 		{
 			const FString Label = It->GetActorNameOrLabel();
@@ -407,7 +459,52 @@ void AAutomatedForklift::ResolveWorkStations(const UForkliftSlamComponent& Slam,
 				Label[PrefixLength + 1] != TCHAR('_')) continue;
 			const int32 Row = Label[PrefixLength] - TCHAR('0');
 			if (Row < 0 || Row >= WorkStationCount) continue;
-			RackRows[Row] += It->GetComponentsBoundingBox();
+			const FBox Bounds = It->GetComponentsBoundingBox();
+			RackRows[Row] += Bounds;
+			constexpr int32 BayStart = PrefixLength + 2;
+			if (Bounds.IsValid && Label.Len() > BayStart + 2 &&
+				FChar::IsDigit(Label[BayStart]) && FChar::IsDigit(Label[BayStart + 1]) &&
+				Label.Mid(BayStart + 2).StartsWith(TEXT("_Deck")))
+			{
+				const int32 Bay = FCString::Atoi(*Label.Mid(BayStart, 2));
+				if (Bay < BayCount) Decks[Row][Bay].Add(Bounds);
+			}
+		}
+
+		for (int32 Row = 0; Row < WorkStationCount; ++Row)
+		{
+			int32 LabelCount = 0;
+			for (int32 Bay = 0; Bay < BayCount; ++Bay)
+			{
+				TArray<FBox>& Tiers = Decks[Row][Bay];
+				if (Tiers.Num() != TierCount) continue;
+				Tiers.Sort([](const FBox& A, const FBox& B) { return A.Max.Z < B.Max.Z; });
+				for (int32 Tier = 0; Tier < TierCount; ++Tier)
+				{
+					const FBox& Deck = Tiers[Tier];
+					if (Tier == 0) RackBayDecks[Row][Bay] = Deck;
+					else RackUpperDecks[Row][Bay][Tier - 1] = Deck;
+					const FString SlotId = FString::Printf(TEXT("%c-%02d"), TCHAR('A' + Row), Tier * BayCount + Bay + 1);
+					for (const float Side : {-1.f, 1.f})
+					{
+						UTextRenderComponent* Sign = NewObject<UTextRenderComponent>(this);
+						AddInstanceComponent(Sign);
+						Sign->SetAbsolute(true, true, true);
+						Sign->SetHorizontalAlignment(EHTA_Center);
+						Sign->SetText(FText::FromString(SlotId));
+						Sign->SetTextRenderColor(FColor::White);
+						Sign->SetWorldSize(28.f);
+						Sign->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+						const FVector Position(Side < 0.f ? Deck.Min.X - 8.f : Deck.Max.X + 8.f,
+							Deck.GetCenter().Y, Deck.Max.Z - 3.f);
+						Sign->SetWorldLocationAndRotation(Position, FRotator(0.f, Side < 0.f ? 180.f : 0.f, 0.f));
+						Sign->RegisterComponent();
+					}
+					++LabelCount;
+				}
+			}
+			if (RackRows[Row].IsValid)
+				UE_LOG(LogTemp, Log, TEXT("Rack zone %c numbered slots: %d/%d"), TCHAR('A' + Row), LabelCount, BayCount * TierCount);
 		}
 	}
 	const float MapToWorldYaw = FMath::DegreesToRadians(GetActorRotation().Yaw) - Slam.GetPredictedYaw();
@@ -474,7 +571,7 @@ bool AAutomatedForklift::PlanNavigationRoute(FVector2D Start)
 	const float Radius = FMath::Max(HalfWidth + 25.f, 100.f);
 	if (ActiveWorkStation != INDEX_NONE)
 	{
-		const FVector WorldOffset = WorkStations[ActiveWorkStation].WorldPosition - WorldStart;
+		const FVector WorldOffset = (ActiveRackSlot == INDEX_NONE ? WorkStations[ActiveWorkStation] : RackApproach).WorldPosition - WorldStart;
 		NavigationGoal = Start + NavRotate(FVector2D(WorldOffset.X, WorldOffset.Y), -MapToWorldYaw);
 	}
 
@@ -583,7 +680,7 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 				const FVector2D Start = BodyPose(Slam, NavigationSensor);
 				ResolveWorkStations(*Slam, Start);
 				if (PendingWorkStation != INDEX_NONE && IsWorkStationRegistered(PendingWorkStation))
-					GoToStation(PendingWorkStation);
+					GoToStation(PendingWorkStation, PendingRackSlot);
 			}
 		}
 		return;
@@ -594,8 +691,10 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 	if (S && NavigationMapGeneration != S->GetMapGeneration() && ActiveWorkStation != INDEX_NONE)
 	{
 		const int32 ResumeStation = ActiveWorkStation;
+		const int32 ResumeSlot = ActiveRackSlot;
 		StopNavigation();
 		PendingWorkStation = ResumeStation;
+		PendingRackSlot = ResumeSlot;
 		NextWorkStationSearch = 0.f;
 		NavigationStatus = FString::Printf(TEXT("%s 이동 대기: 지도 자동 복구 후 경로 재계산"), *WorkStationLabel(ResumeStation));
 		return;
@@ -647,8 +746,9 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 	if (bCarryingLoad && !SupportedLoadActors.IsEmpty() && !bTransportHeightAdjusted && !IsSupportedLoadFullyInserted())
 	{
 		const int32 WaitingStation = ActiveWorkStation;
+		const int32 WaitingSlot = ActiveRackSlot;
 		StopNavigation();
-		if (WaitingStation != INDEX_NONE) PendingWorkStation = WaitingStation;
+		if (WaitingStation != INDEX_NONE) { PendingWorkStation = WaitingStation; PendingRackSlot = WaitingSlot; }
 		NavigationStatus = TEXT("주행 대기: 포크를 팔레트 끝까지 넣은 뒤 운반 높이로 올리세요");
 		return;
 	}
@@ -700,8 +800,9 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 			const int32 ArrivedStation = ActiveWorkStation;
 			if (ArrivedStation != INDEX_NONE)
 			{
-				const float HeadingError = FMath::UnwindRadians(WorkStations[ArrivedStation].Heading - GetNavigationHeading(*S));
-				if (FMath::Abs(HeadingError) > FMath::DegreesToRadians(5.f))
+				const float HeadingError = FMath::UnwindRadians(ActiveRackSlot == INDEX_NONE ? WorkStations[ArrivedStation].Heading - GetNavigationHeading(*S) : RackApproach.Heading - FMath::DegreesToRadians(GetActorRotation().Yaw));
+				const float HeadingTolerance = ActiveRackSlot == INDEX_NONE ? 5.f : 1.f;
+				if (FMath::Abs(HeadingError) > FMath::DegreesToRadians(HeadingTolerance))
 				{
 					if (!bBridgingScan)
 					{
@@ -723,7 +824,23 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 				}
 			}
 			StopNavigation();
-			if (bCarryingLoad && !SupportedLoadActors.IsEmpty()) BeginTransportUnload(ArrivedStation);
+			if (ActiveRackSlot != INDEX_NONE && ArrivedStation != INDEX_NONE)
+			{
+				NavigationStatus = FString::Printf(TEXT("%c-%02d 선반 앞 도착"), TCHAR('A' + ArrivedStation), ActiveRackSlot + 1);
+				const int32 Tier = ActiveRackSlot / RackBayCount;
+				const int32 Bay = ActiveRackSlot % RackBayCount;
+				const TOptional<FBox>& Deck = Tier == 0 ? RackBayDecks[ArrivedStation][Bay] : RackUpperDecks[ArrivedStation][Bay][Tier - 1];
+				if (bCarryingLoad && Deck.IsSet()) BeginRackDrop(Deck.GetValue());
+				else if (Tier > 0)
+				{
+					RackHeightTarget = RackUpperDecks[ArrivedStation][ActiveRackSlot % RackBayCount][Tier - 1];
+					RackHeightStarted = GetWorld()->GetTimeSeconds();
+					RackHeightFrame = SensorFrameId;
+					RackHeightStableFrames = 0;
+					NavigationStatus = RackHeightTarget.IsSet() ? TEXT("선택한 층의 팔레트 삽입구 확인 중") : TEXT("선택한 층의 선반 위치를 찾지 못했습니다");
+				}
+			}
+			else if (bCarryingLoad && !SupportedLoadActors.IsEmpty()) BeginTransportUnload(ArrivedStation);
 			else NavigationStatus = ArrivedStation != INDEX_NONE ? FString::Printf(TEXT("%s 선반 앞 도착"), *WorkStationLabel(ArrivedStation)) : TEXT("지정한 목표 위치에 도착했습니다");
 			return;
 		}
