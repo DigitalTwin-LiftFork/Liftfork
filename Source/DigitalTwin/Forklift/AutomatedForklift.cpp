@@ -999,7 +999,7 @@ float AAutomatedForklift::ComputeStabilitySpeedMultiplier(float LongitudinalAcce
 	const float LateralGripMultiplier = FMath::Abs(LateralAccelerationCmPerSec2) > LateralGripLimitCmPerSec2
 		? FMath::Clamp(LateralGripLimitCmPerSec2 / FMath::Abs(LateralAccelerationCmPerSec2), .15f, 1.f)
 		: 1.f;
-	if (!bIsLoaded || !BodyCollision || !GetWorld()) return LateralGripMultiplier;
+	if (!BodyCollision || !GetWorld()) return LateralGripMultiplier;
 
 	FVector WeightedCenter = FVector::ZeroVector;
 	float TotalMassKg = 0.f;
@@ -1023,6 +1023,9 @@ float AAutomatedForklift::ComputeStabilitySpeedMultiplier(float LongitudinalAcce
 	if (TotalMassKg <= KINDA_SMALL_NUMBER) return 1.f;
 
 	const FVector Center = WeightedCenter / TotalMassKg;
+	RolloverCenterOfMassLocal = Center;
+	RolloverInitiatingAccelerationWorld = GetActorForwardVector() * LongitudinalAccelerationCmPerSec2
+		+ GetActorRightVector() * LateralAccelerationCmPerSec2;
 	const float CenterHeightAboveGroundCm = FMath::Max(1.f, Center.Z + Dimensions.BodyHeightCm * .5f + 2.f);
 	const FVector2D EffectiveCenter(
 		Center.X - LongitudinalAccelerationCmPerSec2 * CenterHeightAboveGroundCm / 980.f,
@@ -1046,13 +1049,132 @@ float AAutomatedForklift::ComputeStabilitySpeedMultiplier(float LongitudinalAcce
 	bStabilityLimitActive = CurrentStabilityMarginCm < StabilitySpeedReductionMarginCm || LateralGripMultiplier < .999f;
 	if (!bStabilityLimitActive) return LateralGripMultiplier;
 
-	if (!bOverRatedCapacity)
+	if (bIsLoaded && !bOverRatedCapacity)
 	{
 		ActiveLoadCollisionStatus = CurrentStabilityMarginCm <= 0.f
 			? FString::Printf(TEXT("UNSTABLE LOAD: %.1f cm outside support polygon"), -CurrentStabilityMarginCm)
 			: FString::Printf(TEXT("STABILITY LIMIT: %.1f cm margin"), CurrentStabilityMarginCm);
 	}
 	return FMath::Min(MarginMultiplier, LateralGripMultiplier);
+}
+
+bool AAutomatedForklift::BeginChassisRolloverIfNeeded()
+{
+	if (!bEnableChassisRollover || bChassisRolloverActive || bChassisTippedOver
+		|| !BodyCollision || CurrentStabilityMarginCm > 0.f)
+	{
+		return false;
+	}
+
+	const FVector2D SupportPoints[] = {
+		FVector2D(Dimensions.DriveWheelXcm, 0.f),
+		FVector2D(Dimensions.DriveWheelXcm + Dimensions.WheelbaseCm, -Dimensions.LoadWheelLateralOffsetCm),
+		FVector2D(Dimensions.DriveWheelXcm + Dimensions.WheelbaseCm, Dimensions.LoadWheelLateralOffsetCm)
+	};
+	float MinimumSignedDistance = TNumericLimits<float>::Max();
+	int32 NearestEdge = INDEX_NONE;
+	FVector2D NearestPoint = FVector2D::ZeroVector;
+	for (int32 EdgeIndex = 0; EdgeIndex < UE_ARRAY_COUNT(SupportPoints); ++EdgeIndex)
+	{
+		const FVector2D Start = SupportPoints[EdgeIndex];
+		const FVector2D End = SupportPoints[(EdgeIndex + 1) % UE_ARRAY_COUNT(SupportPoints)];
+		const FVector2D Edge = End - Start;
+		const float EdgeLength = FMath::Max(1.f, Edge.Size());
+		const FVector2D ToCom(RolloverCenterOfMassLocal.X - Start.X, RolloverCenterOfMassLocal.Y - Start.Y);
+		const float SignedDistance = (Edge.X * ToCom.Y - Edge.Y * ToCom.X) / EdgeLength;
+		if (SignedDistance < MinimumSignedDistance)
+		{
+			MinimumSignedDistance = SignedDistance;
+			NearestEdge = EdgeIndex;
+			const float AlongEdge = FMath::Clamp(FVector2D::DotProduct(ToCom, Edge) / FVector2D::DotProduct(Edge, Edge), 0.f, 1.f);
+			NearestPoint = Start + Edge * AlongEdge;
+		}
+	}
+	if (NearestEdge == INDEX_NONE) return false;
+
+	const FVector2D EdgeStart = SupportPoints[NearestEdge];
+	const FVector2D EdgeEnd = SupportPoints[(NearestEdge + 1) % UE_ARRAY_COUNT(SupportPoints)];
+	const FVector LocalAxis(EdgeEnd.X - EdgeStart.X, EdgeEnd.Y - EdgeStart.Y, 0.f);
+	RolloverAxisWorld = GetActorTransform().TransformVectorNoScale(LocalAxis.GetSafeNormal()).GetSafeNormal();
+	RolloverPivotWorld = GetActorTransform().TransformPosition(FVector(NearestPoint.X, NearestPoint.Y, GroundReferenceLocalZcm));
+	RolloverStartLocation = GetActorLocation();
+	RolloverStartRotation = GetActorQuat();
+	RolloverAngularVelocityRadPerSec = 0.f;
+	RolloverInertialAccelerationWorld = RolloverInitiatingAccelerationWorld;
+	RolloverVerticalOffsetCm = 0.f;
+	RolloverSupportEdgeIndex = NearestEdge;
+	RolloverTotalMassKg = ChassisMassKg + LiftAssemblyMassKg + ReachAssemblyMassKg + ForkCarrierAssemblyMassKg + SupportedLoadKg;
+	bChassisRolloverActive = true;
+	ChassisRolloverAngleDeg = 0.f;
+	CurrentForwardSpeedCmPerSec = 0.f;
+	CurrentYawRateDegPerSec = 0.f;
+	TargetForwardSpeedCmPerSec = 0.f;
+	UE_LOG(LogTemp, Error, TEXT("[R16HD_ROLLOVER] chassis tip started: margin=%.1fcm edge=%d axis=%s pivot=%s mass=%.0fkg"),
+		CurrentStabilityMarginCm, NearestEdge, *RolloverAxisWorld.ToString(), *RolloverPivotWorld.ToString(), RolloverTotalMassKg);
+	return true;
+}
+
+void AAutomatedForklift::UpdateChassisRollover(float DeltaSeconds)
+{
+	if (!bChassisRolloverActive || !BodyCollision || !GetWorld() || DeltaSeconds <= SMALL_NUMBER) return;
+	const float MassKg = FMath::Max(1.f, RolloverTotalMassKg);
+	const FTransform CurrentTransform(GetActorQuat(), GetActorLocation());
+	const FVector CenterWorld = CurrentTransform.TransformPosition(RolloverCenterOfMassLocal);
+	const FVector EffectiveAcceleration = FVector(0.f, 0.f, -980.f) - RolloverInertialAccelerationWorld;
+	const FVector EffectiveForceKgCmPerSec2 = EffectiveAcceleration * MassKg;
+	const float TorqueAroundSupportEdge = FVector::DotProduct(FVector::CrossProduct(CenterWorld - RolloverPivotWorld, EffectiveForceKgCmPerSec2), RolloverAxisWorld);
+	const float ApproximateInertiaKgCm2 = MassKg * FMath::Max(100.f,
+		FVector::DistSquared(CenterWorld, RolloverPivotWorld)
+		+ (FMath::Square(Dimensions.OverallLengthCm) + FMath::Square(Dimensions.MaximumWidthCm) + FMath::Square(Dimensions.BodyHeightCm)) / 12.f);
+	const float AngularAcceleration = FMath::Clamp(TorqueAroundSupportEdge / ApproximateInertiaKgCm2
+		- RolloverAngularDamping * RolloverAngularVelocityRadPerSec, -40.f, 40.f);
+	RolloverInertialAccelerationWorld = FMath::VInterpTo(RolloverInertialAccelerationWorld, FVector::ZeroVector, DeltaSeconds, 1.5f);
+	RolloverAngularVelocityRadPerSec = FMath::Clamp(RolloverAngularVelocityRadPerSec + AngularAcceleration * DeltaSeconds, -4.f, 4.f);
+	const float PreviousAngleRad = FMath::DegreesToRadians(ChassisRolloverAngleDeg);
+	const float MaximumAngleRad = FMath::DegreesToRadians(FMath::Clamp(MaximumRolloverAngleDeg, 5.f, 89.f));
+	const float NextAngleRad = FMath::Clamp(PreviousAngleRad + RolloverAngularVelocityRadPerSec * DeltaSeconds, -MaximumAngleRad, MaximumAngleRad);
+	if (FMath::IsNearlyEqual(NextAngleRad, PreviousAngleRad, KINDA_SMALL_NUMBER))
+	{
+		RolloverAngularVelocityRadPerSec = 0.f;
+		bChassisRolloverActive = false;
+		bChassisTippedOver = true;
+		return;
+	}
+	ChassisRolloverAngleDeg = FMath::RadiansToDegrees(NextAngleRad);
+	const FQuat RotationAroundEdge(RolloverAxisWorld, NextAngleRad);
+	const FQuat CandidateRotation = RotationAroundEdge * RolloverStartRotation;
+	FVector CandidateLocation = RolloverPivotWorld + RotationAroundEdge.RotateVector(RolloverStartLocation - RolloverPivotWorld);
+	CandidateLocation.Z += RolloverVerticalOffsetCm;
+
+	// Keep the rotating chassis envelope above the local floor while it falls.
+	// The static sweep queries are only active during rollover, not during normal driving.
+	const FVector Extent = BodyCollision->GetScaledBoxExtent();
+	float RequiredFloorShiftCm = 0.f;
+	for (int32 Corner = 0; Corner < 8; ++Corner)
+	{
+		const FVector LocalCorner((Corner & 1) ? Extent.X : -Extent.X, (Corner & 2) ? Extent.Y : -Extent.Y, (Corner & 4) ? Extent.Z : -Extent.Z);
+		const FVector WorldCorner = CandidateLocation + CandidateRotation.RotateVector(LocalCorner);
+		FHitResult FloorHit;
+		FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(ForkliftRolloverGround), false, this);
+		if (GetWorld()->LineTraceSingleByChannel(FloorHit, WorldCorner + FVector(0.f, 0.f, 100.f), WorldCorner - FVector(0.f, 0.f, 500.f), ECC_WorldStatic, QueryParams))
+		{
+			RequiredFloorShiftCm = FMath::Max(RequiredFloorShiftCm, FloorHit.ImpactPoint.Z + 1.f - WorldCorner.Z);
+		}
+	}
+	if (RequiredFloorShiftCm > 0.f)
+	{
+		RolloverVerticalOffsetCm += RequiredFloorShiftCm;
+		CandidateLocation.Z += RequiredFloorShiftCm;
+	}
+	SetActorLocationAndRotation(CandidateLocation, CandidateRotation, false, nullptr, ETeleportType::None);
+
+	if (FMath::Abs(ChassisRolloverAngleDeg) >= MaximumRolloverAngleDeg - .05f)
+	{
+		RolloverAngularVelocityRadPerSec = 0.f;
+		bChassisRolloverActive = false;
+		bChassisTippedOver = true;
+		UE_LOG(LogTemp, Error, TEXT("[R16HD_ROLLOVER] chassis reached fallen state at %.1f degrees; drive and fork controls locked"), ChassisRolloverAngleDeg);
+	}
 }
 
 void AAutomatedForklift::ApplyKinematicForkControls(float Dt)
@@ -2335,6 +2457,19 @@ void AAutomatedForklift::Tick(float Dt)
 	UpdateAutoPickup(Dt);
 	if (!IsAutoPickupMotionActive()) UpdateNavigation(Dt);
 	UpdateSupportedLoadState();
+	if (bChassisRolloverActive)
+	{
+		UpdateChassisRollover(Dt);
+		DrawCollisionDebug();
+		DrawPalletSensorDebug();
+		return;
+	}
+	if (bChassisTippedOver)
+	{
+		DrawCollisionDebug();
+		DrawPalletSensorDebug();
+		return;
+	}
 
 	const bool bAutoMotion = IsAutoPickupMotionActive();
 	// The restored controller still writes the original command fields.  Prefer
@@ -2365,6 +2500,14 @@ void AAutomatedForklift::Tick(float Dt)
 	CandidateYawRateRadPerSec = FMath::Clamp(CandidateYawRateRadPerSec, -MaxYawRateRadPerSec, MaxYawRateRadPerSec);
 	const float StabilityMultiplier = ComputeStabilitySpeedMultiplier(LongitudinalAccelerationCmPerSec2, CandidateSpeedCmPerSec * CandidateYawRateRadPerSec);
 	CurrentDriveSpeedMultiplier = FMath::Min(CurrentDriveSpeedMultiplier, StabilityMultiplier);
+	if (BeginChassisRolloverIfNeeded())
+	{
+		LastAppliedDriveInput = LastAppliedSteerInput = LastAppliedLiftInput = LastAppliedReachInput = LastAppliedSideShiftInput = 0.f;
+		UpdateChassisRollover(Dt);
+		DrawCollisionDebug();
+		DrawPalletSensorDebug();
+		return;
+	}
 	const bool bOutsideSupportPolygon = bStabilityLimitActive && CurrentStabilityMarginCm <= 0.f;
 	if (bOutsideSupportPolygon) LastAppliedSteerInput = 0.f;
 	TargetForwardSpeedCmPerSec = (bDirectionChange || bOutsideSupportPolygon) ? 0.f : RequestedSpeedCmPerSec * StabilityMultiplier;

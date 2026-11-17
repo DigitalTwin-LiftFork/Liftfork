@@ -155,6 +155,13 @@ public:
 	UPROPERTY(EditAnywhere, Category="Stability", meta=(ClampMin="1.0")) float StabilitySpeedReductionMarginCm = 20.f;
 	UPROPERTY(VisibleAnywhere, Category="Stability") float CurrentStabilityMarginCm = 0.f;
 	UPROPERTY(VisibleAnywhere, Category="Stability") bool bStabilityLimitActive = false;
+	/** Apply a gravity-driven chassis tip when the combined centre of mass passes outside the three-wheel support polygon. */
+	UPROPERTY(EditAnywhere, Category="Stability|Rollover") bool bEnableChassisRollover = true;
+	UPROPERTY(EditAnywhere, Category="Stability|Rollover", meta=(ClampMin="5.0", ClampMax="89.0")) float MaximumRolloverAngleDeg = 78.f;
+	UPROPERTY(EditAnywhere, Category="Stability|Rollover", meta=(ClampMin="0.0", ClampMax="10.0")) float RolloverAngularDamping = 1.5f;
+	UPROPERTY(VisibleAnywhere, Category="Stability|Rollover") bool bChassisRolloverActive = false;
+	UPROPERTY(VisibleAnywhere, Category="Stability|Rollover") bool bChassisTippedOver = false;
+	UPROPERTY(VisibleAnywhere, Category="Stability|Rollover") float ChassisRolloverAngleDeg = 0.f;
 	UPROPERTY(EditAnywhere, Category="Drive debug") bool bEnableDriveDebug = false;
 	UPROPERTY(EditAnywhere, Category="Drive debug", meta=(ClampMin="0.05")) float DriveDebugIntervalSeconds = 0.25f;
 	UPROPERTY(EditAnywhere, Category="Drive debug") bool bDrawDriveDebug = false;
@@ -445,6 +452,15 @@ private:
 	float LiftCm = 0.f, ReachCm = 0.f, SideShiftCm = 0.f;
 	float TargetForwardSpeedCmPerSec = 0.f, CurrentForwardSpeedCmPerSec = 0.f, CurrentYawRateDegPerSec = 0.f, DriveDebugElapsed = 0.f;
 	float SupportedLoadKg = 0.f, CurrentDriveSpeedMultiplier = 1.f, ActiveLoadFriction = 0.f;
+	FVector RolloverPivotWorld = FVector::ZeroVector, RolloverAxisWorld = FVector::RightVector;
+	FVector RolloverCenterOfMassLocal = FVector::ZeroVector;
+	FVector RolloverInitiatingAccelerationWorld = FVector::ZeroVector;
+	FVector RolloverInertialAccelerationWorld = FVector::ZeroVector;
+	FVector RolloverStartLocation = FVector::ZeroVector;
+	FQuat RolloverStartRotation = FQuat::Identity;
+	float RolloverTotalMassKg = 0.f, RolloverAngularVelocityRadPerSec = 0.f;
+	float RolloverVerticalOffsetCm = 0.f;
+	int32 RolloverSupportEdgeIndex = INDEX_NONE;
 	TArray<TWeakObjectPtr<AActor>> SupportedLoadActors;
 	FString ActiveLoadCollisionStatus = TEXT("No supported load");
 	float CameraPitchDeg = -24.f, CameraYawDeg = -35.f, CameraDistanceCm = 700.f;
@@ -594,6 +610,8 @@ private:
 	void ApplyKinematicForkControls(float DeltaSeconds);
 	void UpdateSupportedLoadState();
 	float ComputeStabilitySpeedMultiplier(float LongitudinalAccelerationCmPerSec2, float LateralAccelerationCmPerSec2);
+	bool BeginChassisRolloverIfNeeded();
+	void UpdateChassisRollover(float DeltaSeconds);
 	void SetConstraintFramesAtPose(UPhysicsConstraintComponent* Constraint, UPrimitiveComponent* Body1, UPrimitiveComponent* Body2, const FTransform& JointWorld, const FVector& Frame2Offset);
 	FVector GetConstraintFrameDelta(const UPhysicsConstraintComponent* Constraint, const UPrimitiveComponent* Body1, const UPrimitiveComponent* Body2) const;
 	float GetForkTopHeightAboveGroundCm() const;
