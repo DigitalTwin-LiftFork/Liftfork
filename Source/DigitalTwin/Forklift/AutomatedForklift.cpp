@@ -1807,7 +1807,7 @@ void AAutomatedForklift::UpdateRackHeight(float Dt)
 	}
 	if (GetWorld()->GetTimeSeconds() - RackHeightStarted > (RackHeightStableFrames >= 3 ? 30.f : 8.f))
 	{
-		Finish(RackHeightStableFrames >= 3 ? TEXT("포크 높이 맞춤 시간 초과") : TEXT("선택한 자리의 삽입구를 확인하지 못했습니다"));
+		Finish(RackHeightStableFrames >= 3 ? TEXT("포크 높이 맞춤 시간 초과") : TEXT("RGB-D 인식 실패: 카메라 시야·삽입구를 확인하세요"));
 		return;
 	}
 	if (RackHeightStableFrames < 3)
@@ -3316,6 +3316,25 @@ void AAutomatedForklift::Tick(float Dt)
 		bVisionDebugViewChangedByOInput = false;
 	}
 
+	if (PalletSensorCapture && bCameraPanTiltMount)
+	{
+		FRotator Desired = PalletSensorRelativeRotation;
+		if (RackHeightTarget.IsSet())
+		{
+			const FBox& Deck = RackHeightTarget.GetValue();
+			const FVector Camera = PalletSensorCapture->GetComponentLocation();
+			const FVector Target(Camera.X < Deck.GetCenter().X ? Deck.Min.X : Deck.Max.X,
+				Deck.GetCenter().Y, Deck.Max.Z + 8.f);
+			const FVector LocalDirection = ForkCarriage->GetComponentTransform().InverseTransformVectorNoScale(Target - Camera);
+			Desired = LocalDirection.Rotation();
+			Desired.Pitch = FMath::Clamp(FRotator::NormalizeAxis(Desired.Pitch), -30.f, 75.f);
+			Desired.Yaw = FMath::Clamp(FRotator::NormalizeAxis(Desired.Yaw), -60.f, 60.f);
+			Desired.Roll = 0.f;
+		}
+		PalletSensorCapture->SetRelativeRotation(FMath::RInterpConstantTo(
+			PalletSensorCapture->GetRelativeRotation(), Desired, Dt, CameraMountTurnSpeedDegPerSec));
+	}
+
 	// RGB-D capture is kept separate from the rear-body LiDAR.  Both pallet
 	// captures are requested together before their one vision consumer runs.
 	if ((bPalletSensorCaptureActive || RackHeightTarget.IsSet()) && PalletSensorCapture && PalletSensorDepthCapture)
@@ -3339,15 +3358,6 @@ void AAutomatedForklift::Tick(float Dt)
 			}
 			++SensorFrameId;
 			RgbCaptureId = SensorFrameId;
-			const FRotator OriginalCameraRotation = PalletSensorCapture->GetRelativeRotation();
-			if (RackHeightTarget.IsSet())
-			{
-				const FBox& Deck = RackHeightTarget.GetValue();
-				const FVector Camera = PalletSensorCapture->GetComponentLocation();
-				const FVector Target(Camera.X < Deck.GetCenter().X ? Deck.Min.X : Deck.Max.X,
-					Deck.GetCenter().Y, Deck.Max.Z + 8.f);
-				PalletSensorCapture->SetWorldRotation((Target - Camera).Rotation());
-			}
 			RgbFrameCameraTransform = PalletSensorCapture->GetComponentTransform();
 			PalletSensorDepthCapture->SetWorldTransform(RgbFrameCameraTransform, false, nullptr, ETeleportType::None);
 			DepthCaptureId = SensorFrameId;
@@ -3372,7 +3382,7 @@ void AAutomatedForklift::Tick(float Dt)
 			if (RgbReferenceCapturePendingId == 0) RgbReferenceCapturePendingId = SensorFrameId;
 			PalletSensorCapture->CaptureScene();
 			PalletSensorDepthCapture->CaptureScene();
-			PalletSensorCapture->SetRelativeRotation(OriginalCameraRotation);
+
 			if (bRgbExposureSweepActive || RgbReferenceCapturePendingId > 0)
 			{
 				RgbExposureSweepCaptureFence.BeginFence();
@@ -3417,7 +3427,7 @@ void AAutomatedForklift::Tick(float Dt)
 	}
 
 	const bool bAutoMotion = IsAutoPickupMotionActive();
-	const bool bNavigationTurn = bNavigationActive;
+
 	// The restored controller still writes the original command fields.  Prefer
 	// the dedicated automatic channels when present, otherwise consume those
 	// legacy automatic values only while the state machine owns motion.
@@ -3441,7 +3451,7 @@ void AAutomatedForklift::Tick(float Dt)
 	const float WheelbaseCm = FMath::Max(1.f, Dimensions.WheelbaseCm);
 	const float MaxSteerAngleRad = FMath::Atan(WheelbaseCm / FMath::Max(1.f, Motion.AutoFrontTurningRadiusCm));
 	const float CandidateSteerAngleRad = LastAppliedSteerInput * MaxSteerAngleRad;
-	float CandidateYawRateRadPerSec = bNavigationTurn ? FMath::DegreesToRadians(LastAppliedSteerInput * Motion.SteeringRateDegPerSec) : CandidateSpeedCmPerSec / WheelbaseCm * FMath::Tan(CandidateSteerAngleRad);
+	float CandidateYawRateRadPerSec = CandidateSpeedCmPerSec / WheelbaseCm * FMath::Tan(CandidateSteerAngleRad);
 	const float MaxYawRateRadPerSec = FMath::DegreesToRadians(Motion.SteeringRateDegPerSec);
 	CandidateYawRateRadPerSec = FMath::Clamp(CandidateYawRateRadPerSec, -MaxYawRateRadPerSec, MaxYawRateRadPerSec);
 	const float StabilityMultiplier = ComputeStabilitySpeedMultiplier(LongitudinalAccelerationCmPerSec2, CandidateSpeedCmPerSec * CandidateYawRateRadPerSec);
@@ -3489,9 +3499,10 @@ void AAutomatedForklift::Tick(float Dt)
 	bWasDriving = bIsDriving;
 	const float ActualSteerAngleRad = LastAppliedSteerInput * MaxSteerAngleRad;
 	const float PreviousYawRateDegPerSec = CurrentYawRateDegPerSec;
-	float TargetYawRateDegPerSec = bNavigationTurn ? LastAppliedSteerInput * Motion.SteeringRateDegPerSec : FMath::RadiansToDegrees(CurrentForwardSpeedCmPerSec / WheelbaseCm * FMath::Tan(ActualSteerAngleRad));
+	float TargetYawRateDegPerSec = FMath::RadiansToDegrees(CurrentForwardSpeedCmPerSec / WheelbaseCm * FMath::Tan(ActualSteerAngleRad));
 	TargetYawRateDegPerSec = FMath::Clamp(TargetYawRateDegPerSec, -Motion.SteeringRateDegPerSec, Motion.SteeringRateDegPerSec);
-	CurrentYawRateDegPerSec = bNavigationTurn ? TargetYawRateDegPerSec : FMath::FInterpConstantTo(CurrentYawRateDegPerSec, TargetYawRateDegPerSec, Dt, SteeringAccelerationDegPerSec2);
+	CurrentYawRateDegPerSec = FMath::FInterpConstantTo(CurrentYawRateDegPerSec, TargetYawRateDegPerSec, Dt, SteeringAccelerationDegPerSec2);
+	if (FMath::Abs(CurrentForwardSpeedCmPerSec) < .5f) CurrentYawRateDegPerSec = 0.f;
 	const float YawDelta = CurrentYawRateDegPerSec * Dt;
 	LastAutoYawDeltaDeg = bAutoMotion ? YawDelta : 0.f;
 	if (bAutoMotion) AutoApproachAccumulatedYawDeg += YawDelta;

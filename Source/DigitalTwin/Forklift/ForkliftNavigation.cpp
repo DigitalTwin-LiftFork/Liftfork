@@ -167,6 +167,9 @@ void AAutomatedForklift::GetNavigationDiagnosticLines(TArray<FString>& OutLines)
 	OutLines.Add(FString::Printf(TEXT("주행 상태: %s"), bNavigationActive ? TEXT("자동 주행 활성") : TEXT("정지 / 수동")));
 	OutLines.Add(FString::Printf(TEXT("실제 속도 %.2f m/s | 명령 %.2f m/s"), CurrentForwardSpeedCmPerSec / 100.f, TargetForwardSpeedCmPerSec / 100.f));
 	OutLines.Add(bNavigationGoalSet && S && NavigationSensor ? FString::Printf(TEXT("목표까지 %.2f m | 경로점 %d"), FVector2D::Distance(GetNavigationMapPose(), NavigationGoal) / 100.f, NavigationRoute.Num()) : TEXT("목표: 미지정"));
+	OutLines.Add(bUsingFactoryOdometry ? TEXT("위치 기준: 시뮬레이터 보조 (SLAM 추적 손실)") : TEXT("위치 기준: SLAM 추정"));
+	OutLines.Add(ActiveWorkStation != INDEX_NONE ? TEXT("경로 기준: Factory 실제 지형·선반 좌표") : TEXT("경로 기준: 지도 목표 / 공장 순찰은 실제 지형 보조"));
+	OutLines.Add(RackDropPhase != ERackDropPhase::Idle ? TEXT("높이 기준: 등록된 선반 받침면 좌표") : (RackHeightTarget.IsSet() ? TEXT("높이 기준: RGB-D 삽입구 측정") : TEXT("높이 제어: 대기")));
 	OutLines.Add(S ? FString::Printf(TEXT("위치 신뢰도 %.0f%% | 추적 %s"), S->GetConfidence() * 100.f, S->IsTrackingFresh(Now) ? TEXT("정상") : TEXT("대기")) : TEXT("SLAM 센서 없음"));
 	const double Stamp = NavigationSensor ? NavigationSensor->GetLatestScan().TimestampSeconds : -1.;
 	OutLines.Add(Stamp >= 0. ? FString::Printf(TEXT("최근 스캔 %.2f초 전 | 복구 시도 %d/3"), Now - Stamp, NavigationRecoveryAttempts) : TEXT("첫 스캔 대기"));
@@ -705,7 +708,7 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 	}
 	const bool bTrackingFresh = S->IsTrackingFresh(Now);
 	const bool bFactoryNavigation = HasFactoryRackRows() && (ActiveWorkStation != INDEX_NONE || !bNavigationGoalIsManual);
-	const bool bUseFactoryOdometry = !bTrackingFresh && bFactoryNavigation && FactoryPoseGeneration == S->GetMapGeneration();
+	const bool bUseFactoryOdometry = bAllowSimulatorPoseFallback && !bTrackingFresh && bFactoryNavigation && FactoryPoseGeneration == S->GetMapGeneration();
 	if (bUsingFactoryOdometry != bUseFactoryOdometry)
 	{
 		bUsingFactoryOdometry = bUseFactoryOdometry;
@@ -802,26 +805,7 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 			{
 				const float HeadingError = FMath::UnwindRadians(ActiveRackSlot == INDEX_NONE ? WorkStations[ArrivedStation].Heading - GetNavigationHeading(*S) : RackApproach.Heading - FMath::DegreesToRadians(GetActorRotation().Yaw));
 				const float HeadingTolerance = ActiveRackSlot == INDEX_NONE ? 5.f : 2.f;
-				if (FMath::Abs(HeadingError) > FMath::DegreesToRadians(HeadingTolerance))
-				{
-					if (!bBridgingScan)
-					{
-						const float MaxTurnRate = bCarryingLoad || bUsingFactoryOdometry ? 15.f : 20.f;
-						const float TurnRate = FMath::Clamp(FMath::RadiansToDegrees(HeadingError) * 2.f, -MaxTurnRate, MaxTurnRate);
-						if (WouldForkRotationHitFixedObstacle(TurnRate * Dt))
-						{
-							if (!TryNavigationBackOut(TEXT("구역 도착 방향 정렬 공간 부족")))
-							{
-								StopNavigation();
-								NavigationStatus = TEXT("구역 도착 방향 정렬 중지: 전후 공간 부족");
-							}
-							return;
-						}
-						SteerInput = TurnRate / FMath::Max(1.f, Motion.SteeringRateDegPerSec);
-						NavigationStatus = TEXT("구역 도착 방향 정렬 중");
-					}
-					return;
-				}
+				if (FMath::Abs(HeadingError) > FMath::DegreesToRadians(HeadingTolerance)) goto FollowNavigationRoute;
 			}
 			StopNavigation();
 			if (ActiveRackSlot != INDEX_NONE && ArrivedStation != INDEX_NONE)
@@ -881,7 +865,9 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 			NavigationStatus=TEXT("경로 변경: 다른 탐색 지점 선택 중");
 			return;
 		}
-	}	while (NavigationRoute.Num()>1 && FVector2D::Distance(Pose,NavigationRoute[0])<70.f) NavigationRoute.RemoveAt(0);
+	}
+FollowNavigationRoute:
+	while (NavigationRoute.Num()>1 && FVector2D::Distance(Pose,NavigationRoute[0])<70.f) NavigationRoute.RemoveAt(0);
 	if (NavigationRoute.IsEmpty()) return;
 	// SLAM map yaw is relative to the scan/map origin. Actor yaw is an absolute
 	// world angle and can have a different zero, so use the SLAM heading to
@@ -950,10 +936,13 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 	float Best=-BIG_NUMBER, BestSpeed=0.f, BestRate=0.f;
 	for (const int32 HorizonSteps : {25, 8})
 	{
-		for (float Speed:{0.f, 8.f, (bBridgingScan || S->GetConfidence()<.45f) ? 15.f : 30.f, (bBridgingScan || S->GetConfidence()<.45f) ? 30.f : 60.f})
-		for (float Rate:{-30.f,-15.f,0.f,15.f,30.f})
+		for (float Speed:{-20.f, 0.f, 8.f, (bBridgingScan || S->GetConfidence()<.45f) ? 15.f : 30.f, (bBridgingScan || S->GetConfidence()<.45f) ? 30.f : 60.f})
+		for (float Steering : {-1.f, -.5f, 0.f, .5f, 1.f})
 		{
-			if (Speed==0.f && Rate==0.f) continue;
+			if (Speed == 0.f) continue;
+			const float Wheelbase = FMath::Max(1.f, Dimensions.WheelbaseCm);
+			const float MaxAngle = FMath::Atan(Wheelbase / FMath::Max(1.f, Motion.AutoFrontTurningRadiusCm));
+			const float Rate = FMath::RadiansToDegrees(Speed / Wheelbase * FMath::Tan(Steering * MaxAngle));
 			if (HorizonSteps == 8 && Speed > 8.f) continue;
 
 			if (bBridgingScan && (Speed > 15.f || FMath::Abs(Rate) > 15.f)) continue;
@@ -975,7 +964,15 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 			// planner choose a stationary spin repeatedly, even when forward
 			// motion was clear. Keep pivot turns for targets well off the nose.
 			const float PivotPenalty=Speed==0.f ? 35.f : 0.f;
-			const float Score=(Target.Size()-Remaining.Size())-Heading*30.f-FMath::Abs(Rate)*.1f-PivotPenalty;
+			float FinalHeadingPenalty = 0.f;
+			if (ActiveWorkStation != INDEX_NONE && FVector2D::Distance(Pose, NavigationGoal) < 200.f)
+			{
+				const float DesiredHeading = ActiveRackSlot == INDEX_NONE ? WorkStations[ActiveWorkStation].Heading :
+					RackApproach.Heading - FMath::DegreesToRadians(GetActorRotation().Yaw) + HeadingNow;
+				const float Error = FMath::Abs(FMath::UnwindRadians(DesiredHeading - HeadingNow - A));
+				FinalHeadingPenalty = Error * 100.f;
+			}
+			const float Score=(Target.Size()-Remaining.Size())-Heading*30.f-FMath::Abs(Rate)*.1f-PivotPenalty-FinalHeadingPenalty;
 			if (Score>Best) { Best=Score; BestSpeed=Speed; BestRate=Rate; }
 		}
 			if (Best != -BIG_NUMBER) break;
@@ -1015,8 +1012,9 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 			}
 		}
 	}
-	DriveInput=BestSpeed/FMath::Max(Motion.ForwardSpeedCmPerSec,1.f);
-	SteerInput=BestRate/FMath::Max(Motion.SteeringRateDegPerSec,1.f);
+	DriveInput = BestSpeed / FMath::Max(BestSpeed >= 0.f ? Motion.ForwardSpeedCmPerSec : Motion.ReverseSpeedCmPerSec, 1.f);
+	const float MaxSteerAngle = FMath::Atan(FMath::Max(1.f, Dimensions.WheelbaseCm) / FMath::Max(1.f, Motion.AutoFrontTurningRadiusCm));
+	SteerInput = FMath::Clamp(FMath::Atan(FMath::DegreesToRadians(BestRate) * Dimensions.WheelbaseCm / BestSpeed) / MaxSteerAngle, -1.f, 1.f);
 	NavigationStatus=FString::Printf(TEXT("%s: 전진 %.0fcm/s / 조향 %.0f°/s"),bUsingFactoryOdometry ? TEXT("Factory 위치로 주행") : (bNavigationGoalIsManual ? TEXT("목표 주행") : TEXT("랜덤 순찰")),BestSpeed,BestRate);
 }
 

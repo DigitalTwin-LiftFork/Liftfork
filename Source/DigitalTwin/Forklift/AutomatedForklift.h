@@ -502,6 +502,9 @@ private:
 	int32 PendingRackSlot = INDEX_NONE;
 	int32 ActiveRackSlot = INDEX_NONE;
 	TOptional<FBox> RackUpperDecks[WorkStationCount][RackBayCount][2];
+	UPROPERTY(EditAnywhere, Category="Navigation|Simulation") bool bAllowSimulatorPoseFallback = true;
+	UPROPERTY(EditAnywhere, Category="Camera|Mount") bool bCameraPanTiltMount = true;
+	UPROPERTY(EditAnywhere, Category="Camera|Mount", meta=(ClampMin="1.0", ClampMax="90.0")) float CameraMountTurnSpeedDegPerSec = 30.f;
 	TOptional<FBox> RackHeightTarget;
 	float RackHeightStarted = 0.f;
 	float RackHeightCommand = 0.f;
