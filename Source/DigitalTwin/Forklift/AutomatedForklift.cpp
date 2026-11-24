@@ -205,6 +205,13 @@ NavigationSensor->SetRelativeLocation(
 	PalletSensorDepthRenderTarget->InitCustomFormat(960, 540, PF_FloatRGBA, false);
 	PalletSensorDepthCapture->TextureTarget = PalletSensorDepthRenderTarget;
 
+	ForkBackrestCollision = CreateDefaultSubobject<UBoxComponent>(TEXT("ForkBackrestCollision"));
+	ForkBackrestCollision->SetupAttachment(ForkCarriage);
+	ForkBackrestCollision->SetBoxExtent(FVector(5.f, 40.f, 35.f));
+	ForkBackrestCollision->SetRelativeLocation(FVector(15.f, 0.f, 35.f));
+	ForkBackrestCollision->SetCollisionProfileName(TEXT("BlockAllDynamic"));
+	ForkBackrestCollision->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	ForkBackrestCollision->SetSimulatePhysics(false);
 	ForkCarriageVisual = CreateVisual(TEXT("ForkCarriageVisual_ReplaceMesh"), ForkCarriage);
 	LeftForkVisual = CreateVisual(TEXT("LeftForkVisual_ReplaceMesh"), ForkCarriage);
 	RightForkVisual = CreateVisual(TEXT("RightForkVisual_ReplaceMesh"), ForkCarriage);
@@ -897,7 +904,8 @@ void AAutomatedForklift::RecordCollision(const TCHAR* Operation, UPrimitiveCompo
 			*GetNameSafe(SourceComponent ? SourceComponent->GetOwner() : nullptr), SourceComponent ? *SourceComponent->GetComponentLocation().ToString() : TEXT("(none)"), *GetNameSafe(Hit.GetActor()), *GetNameSafe(Hit.GetComponent()),
 			*WorldDelta.GetSafeNormal().ToString(), *Hit.ImpactPoint.ToString(), *Hit.ImpactNormal.ToString(), Hit.bBlockingHit, Hit.bStartPenetrating, Hit.Time);
 	}
-	if (bBlocked && !WorldDelta.IsNearlyZero())
+	const bool bSupportedLoadContact = IsSupportedPallet(Hit.GetActor()) || SourceComponent == ForkBackrestCollision;
+	if (bBlocked && !WorldDelta.IsNearlyZero() && !bSupportedLoadContact)
 	{
 		const FVector ContactNormal = !Hit.ImpactNormal.IsNearlyZero() ? Hit.ImpactNormal.GetSafeNormal() : Hit.Normal.GetSafeNormal();
 		const FVector SweepVelocity = WorldDelta / FMath::Max(.001f, CollisionMeasureDeltaSeconds);
@@ -964,8 +972,11 @@ bool AAutomatedForklift::SweepForkliftPart(UBoxComponent* Component, const FVect
 {
 	if (!Component || WorldDelta.IsNearlyZero()) return false;
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(ForkliftPartSweep), false, this);
-	if (CarriedPallet) Params.AddIgnoredActor(CarriedPallet);
-	for (const TWeakObjectPtr<AActor>& Load : SupportedLoadActors) if (Load.IsValid()) Params.AddIgnoredActor(Load.Get());
+	// A supported load travels through Chaos contacts with the physical backrest.
+	// Do not treat that same load as a stationary world obstacle on every frame.
+	if (Component == ForkBackrestCollision)
+		for (const TWeakObjectPtr<AActor>& Load : SupportedLoadActors)
+			if (Load.IsValid()) Params.AddIgnoredActor(Load.Get());
 	if (ExtraIgnoredActor) Params.AddIgnoredActor(ExtraIgnoredActor);
 	if (!GetWorld()->SweepSingleByChannel(OutHit, Component->GetComponentLocation(), Component->GetComponentLocation() + WorldDelta,
 		Component->GetComponentQuat(), ECC_WorldDynamic, FCollisionShape::MakeBox(Component->GetScaledBoxExtent()), Params) || !OutHit.bBlockingHit) return false;
@@ -978,8 +989,6 @@ bool AAutomatedForklift::SweepForkliftBody(const FVector& WorldDelta, const TCHA
 {
 	if (!BodyCollision || WorldDelta.IsNearlyZero() || !GetWorld()) return false;
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(ForkliftBodySweep), false, this);
-	if (CarriedPallet) Params.AddIgnoredActor(CarriedPallet);
-	for (const TWeakObjectPtr<AActor>& Load : SupportedLoadActors) if (Load.IsValid()) Params.AddIgnoredActor(Load.Get());
 	if (!GetWorld()->SweepSingleByChannel(OutHit, BodyCollision->GetComponentLocation(), BodyCollision->GetComponentLocation() + WorldDelta,
 		BodyCollision->GetComponentQuat(), ECC_Pawn, FCollisionShape::MakeBox(BodyCollision->GetScaledBoxExtent()), Params) || !OutHit.bBlockingHit) return false;
 	const bool bBlocked = !OutHit.bStartPenetrating || IsMovementDeeperIntoInitialOverlap(OutHit, WorldDelta);
@@ -1132,7 +1141,7 @@ void AAutomatedForklift::DrawCollisionDebug()
 		const bool bHighlighted = Component == LastBlockingComponent.Get() && GetWorld()->GetTimeSeconds() <= LastCollisionHitExpireTime;
 		DrawDebugBox(GetWorld(), Component->GetComponentLocation(), Component->GetScaledBoxExtent(), Component->GetComponentQuat(), bHighlighted ? FColor::Yellow : FColor::Red, false, 0.f, 0, 1.5f);
 	};
-	DrawBox(BodyCollision); DrawBox(LiftPhysicsBody); DrawBox(ReachPhysicsBody); DrawBox(ForkPhysicsBody); DrawBox(LeftForkCollision); DrawBox(RightForkCollision); DrawBox(LeftSupportLegCollision); DrawBox(RightSupportLegCollision); DrawBox(LeftMastRailCollision); DrawBox(RightMastRailCollision); DrawBox(MastTopCrossbarCollision);
+	DrawBox(ForkBackrestCollision); DrawBox(BodyCollision); DrawBox(LiftPhysicsBody); DrawBox(ReachPhysicsBody); DrawBox(ForkPhysicsBody); DrawBox(LeftForkCollision); DrawBox(RightForkCollision); DrawBox(LeftSupportLegCollision); DrawBox(RightSupportLegCollision); DrawBox(LeftMastRailCollision); DrawBox(RightMastRailCollision); DrawBox(MastTopCrossbarCollision);
 	for (TActorIterator<APallet> It(GetWorld()); It; ++It)
 	{
 		for (UBoxComponent* Shape : It->GetCollisionShapes()) DrawBox(Shape);
@@ -1231,12 +1240,12 @@ void AAutomatedForklift::UpdateSupportedLoadState()
 		Pallet->GetComponents(Shapes);
 		double PalletBottom = TNumericLimits<double>::Max();
 		bool bLeft = false, bRight = false;
-		const auto SupportsFork = [](const FBox& Surface, const FBox& Fork)
+		const auto SupportsFork = [this](const FBox& Surface, const FBox& Fork)
 		{
 			const double Depth = FMath::Min(Surface.Max.X, Fork.Max.X) - FMath::Max(Surface.Min.X, Fork.Min.X);
 			const double Width = FMath::Min(Surface.Max.Y, Fork.Max.Y) - FMath::Max(Surface.Min.Y, Fork.Min.Y);
 			const double Gap = Surface.Min.Z - Fork.Max.Z;
-			return Depth >= 8.0 && Width >= 2.0 && Gap >= -2.0 && Gap <= 3.0;
+			return Depth >= 8.0 && Width >= 2.0 && Gap >= -2.0 && Gap <= PalletSupportContactToleranceCm;
 		};
 		for (const UBoxComponent* Shape : Shapes)
 		{
@@ -1338,10 +1347,8 @@ void AAutomatedForklift::ApplySupportedLoadInertialForces(const FVector& Chassis
 		const float MaximumStaticFrictionAcceleration = ContactFriction * 980.f;
 		if (RequiredFrictionAcceleration > MaximumStaticFrictionAcceleration + 1.f) bSupportedLoadSlipRisk = true;
 
-		// Apply the truck-frame inertial acceleration to the dynamic pallet. Chaos
-		// fork contacts supply the opposing Coulomb friction; once it is exceeded,
-		// the load keeps its own velocity and can slide off or tip on the tines.
-		LoadBody->AddForce(-TotalTruckAcceleration, NAME_None, true);
+		// Pallets are simulated in world space. Chaos contact friction supplies acceleration;
+		// applying a truck-frame inertial force here would double the relative slip.
 	}
 
 	if (bSupportedLoadSlipRisk && GetWorld()->GetTimeSeconds() - LastSupportedLoadSlipLogTime >= .5f)
@@ -1609,10 +1616,11 @@ void AAutomatedForklift::BeginRackDrop(const FBox& Deck)
 	RackDropLoad = SupportedLoadActors[0];
 	RackDropDeck = Deck;
 	RackDropStart = GetActorLocation();
-	RackDropDeadline = GetWorld()->GetTimeSeconds() + 45.f;
+	RackDropDeadline = GetWorld()->GetTimeSeconds() + 150.f;
 	RackDropReleaseLift = -1.f;
 	RackDropSettleSince = -1.f;
 	RackDropPhase = ERackDropPhase::Lift;
+	UE_LOG(LogTemp, Log, TEXT("Rack drop started: shelfZ=%.1f load=%s"), Deck.Max.Z, *GetNameSafe(RackDropLoad.Get()));
 	NavigationStatus = TEXT("선반 하역: 받침면에 맞춰 포크 높이 조절");
 }
 
@@ -1622,6 +1630,7 @@ void AAutomatedForklift::UpdateRackDrop(float Dt)
 	{
 		RackDropPhase = ERackDropPhase::Idle;
 		NavigationStatus = Status;
+		UE_LOG(LogTemp, Warning, TEXT("Rack drop finished: %s"), Status);
 	};
 	if (IsAutoPickupMotionActive() || !FMath::IsNearlyZero(DriveInput) || !FMath::IsNearlyZero(SteerInput) ||
 		!FMath::IsNearlyZero(LiftInput) || !FMath::IsNearlyZero(ReachInput) || !FMath::IsNearlyZero(SideShiftInput))
@@ -1705,7 +1714,7 @@ void AAutomatedForklift::UpdateRackDrop(float Dt)
 	}
 	if (RackDropPhase == ERackDropPhase::Insert)
 	{
-		if (Advance > 2.0)
+		if (Advance > .5)
 		{
 			const float Step = FMath::Min(static_cast<float>(Advance), 8.f * Dt);
 			FHitResult Hit;
@@ -1727,6 +1736,7 @@ void AAutomatedForklift::UpdateRackDrop(float Dt)
 			return;
 		}
 		RackDropPhase = ERackDropPhase::Lower;
+		UE_LOG(LogTemp, Log, TEXT("Rack drop lowering: lift=%.1f bottom=%.1f shelf=%.1f"), LiftCm, Bounds.Min.Z, ShelfZ);
 	}
 	if (RackDropPhase == ERackDropPhase::Lower)
 	{
@@ -1738,12 +1748,13 @@ void AAutomatedForklift::UpdateRackDrop(float Dt)
 		}
 		if (Bounds.Min.Z <= ShelfZ + 2.0)
 		{
-			if (RackDropReleaseLift < 0.f) RackDropReleaseLift = LiftCm - 2.5f;
+			if (RackDropReleaseLift < 0.f) RackDropReleaseLift = LiftCm - 3.5f;
 			if (LiftCm <= RackDropReleaseLift + .3f && !IsSupportedPallet(Load))
 			{
 				if (RackDropSettleSince < 0.f) RackDropSettleSince = Now;
 				if (Now - RackDropSettleSince < .5) return;
 				RackDropPhase = ERackDropPhase::Withdraw;
+				UE_LOG(LogTemp, Log, TEXT("Rack drop withdrawing: lift=%.1f reach=%.1f"), LiftCm, ReachCm);
 			}
 			else RackDropSettleSince = -1.f;
 		}
@@ -3228,7 +3239,7 @@ void AAutomatedForklift::Tick(float Dt)
 	const FVector StartLocation = GetActorLocation(); FHitResult DriveHit;
 	FVector DriveDelta = GetActorForwardVector() * TargetForwardSpeedCmPerSec * Dt;
 	float EarliestPartHit = 1.f;
-	for (UBoxComponent* Part : {LeftSupportLegCollision.Get(), RightSupportLegCollision.Get(), LeftMastRailCollision.Get(), RightMastRailCollision.Get(), MastTopCrossbarCollision.Get()})
+	for (UBoxComponent* Part : {LeftSupportLegCollision.Get(), RightSupportLegCollision.Get(), LeftMastRailCollision.Get(), RightMastRailCollision.Get(), MastTopCrossbarCollision.Get(), ForkBackrestCollision.Get()})
 	{
 		FHitResult PartHit;
 		if (SweepForkliftPart(Part, DriveDelta, TEXT("drive part sweep"), PartHit)) EarliestPartHit = FMath::Min(EarliestPartHit, PartHit.Time);
@@ -3406,7 +3417,7 @@ void AAutomatedForklift::Tick(float Dt)
 	}
 
 	const bool bAutoMotion = IsAutoPickupMotionActive();
-	const bool bAutomatedSteering = bAutoMotion || bNavigationActive;
+	const bool bNavigationTurn = bNavigationActive;
 	// The restored controller still writes the original command fields.  Prefer
 	// the dedicated automatic channels when present, otherwise consume those
 	// legacy automatic values only while the state machine owns motion.
@@ -3430,7 +3441,7 @@ void AAutomatedForklift::Tick(float Dt)
 	const float WheelbaseCm = FMath::Max(1.f, Dimensions.WheelbaseCm);
 	const float MaxSteerAngleRad = FMath::Atan(WheelbaseCm / FMath::Max(1.f, Motion.AutoFrontTurningRadiusCm));
 	const float CandidateSteerAngleRad = LastAppliedSteerInput * MaxSteerAngleRad;
-	float CandidateYawRateRadPerSec = bAutomatedSteering ? FMath::DegreesToRadians(LastAppliedSteerInput * Motion.SteeringRateDegPerSec) : CandidateSpeedCmPerSec / WheelbaseCm * FMath::Tan(CandidateSteerAngleRad);
+	float CandidateYawRateRadPerSec = bNavigationTurn ? FMath::DegreesToRadians(LastAppliedSteerInput * Motion.SteeringRateDegPerSec) : CandidateSpeedCmPerSec / WheelbaseCm * FMath::Tan(CandidateSteerAngleRad);
 	const float MaxYawRateRadPerSec = FMath::DegreesToRadians(Motion.SteeringRateDegPerSec);
 	CandidateYawRateRadPerSec = FMath::Clamp(CandidateYawRateRadPerSec, -MaxYawRateRadPerSec, MaxYawRateRadPerSec);
 	const float StabilityMultiplier = ComputeStabilitySpeedMultiplier(LongitudinalAccelerationCmPerSec2, CandidateSpeedCmPerSec * CandidateYawRateRadPerSec);
@@ -3447,14 +3458,13 @@ void AAutomatedForklift::Tick(float Dt)
 	if (bOutsideSupportPolygon) LastAppliedSteerInput = 0.f;
 	TargetForwardSpeedCmPerSec = (bDirectionChange || bOutsideSupportPolygon) ? 0.f : RequestedSpeedCmPerSec * StabilityMultiplier;
 	const float FinalAccelerationLimit = bOutsideSupportPolygon ? FMath::Min(BrakeDecelerationCmPerSec2, GripAccelerationLimitCmPerSec2) : AccelerationLimitCmPerSec2;
-	const bool bPrecisionMotion = bAutomatedSteering || bRackDropTick || TransportPhase != ETransportPhase::None;
-	CurrentForwardSpeedCmPerSec = bPrecisionMotion && FMath::Abs(TargetForwardSpeedCmPerSec) <= FMath::Abs(PreviousForwardSpeedCmPerSec) ? TargetForwardSpeedCmPerSec : FMath::FInterpConstantTo(PreviousForwardSpeedCmPerSec, TargetForwardSpeedCmPerSec, Dt, FinalAccelerationLimit);
+	CurrentForwardSpeedCmPerSec = FMath::FInterpConstantTo(PreviousForwardSpeedCmPerSec, TargetForwardSpeedCmPerSec, Dt, FinalAccelerationLimit);
 
 	const FVector StartLocation = GetActorLocation();
 	FHitResult DriveHit;
 	FVector DriveDelta = GetActorForwardVector() * CurrentForwardSpeedCmPerSec * Dt;
 	float EarliestPartHit = 1.f;
-	for (UBoxComponent* Part : {LeftSupportLegCollision.Get(), RightSupportLegCollision.Get(), LeftMastRailCollision.Get(), RightMastRailCollision.Get(), MastTopCrossbarCollision.Get()})
+	for (UBoxComponent* Part : {LeftSupportLegCollision.Get(), RightSupportLegCollision.Get(), LeftMastRailCollision.Get(), RightMastRailCollision.Get(), MastTopCrossbarCollision.Get(), ForkBackrestCollision.Get()})
 	{
 		FHitResult PartHit;
 		if (SweepForkliftPart(Part, DriveDelta, TEXT("drive part sweep"), PartHit)) EarliestPartHit = FMath::Min(EarliestPartHit, PartHit.Time);
@@ -3479,9 +3489,9 @@ void AAutomatedForklift::Tick(float Dt)
 	bWasDriving = bIsDriving;
 	const float ActualSteerAngleRad = LastAppliedSteerInput * MaxSteerAngleRad;
 	const float PreviousYawRateDegPerSec = CurrentYawRateDegPerSec;
-	float TargetYawRateDegPerSec = bAutomatedSteering ? LastAppliedSteerInput * Motion.SteeringRateDegPerSec : FMath::RadiansToDegrees(CurrentForwardSpeedCmPerSec / WheelbaseCm * FMath::Tan(ActualSteerAngleRad));
+	float TargetYawRateDegPerSec = bNavigationTurn ? LastAppliedSteerInput * Motion.SteeringRateDegPerSec : FMath::RadiansToDegrees(CurrentForwardSpeedCmPerSec / WheelbaseCm * FMath::Tan(ActualSteerAngleRad));
 	TargetYawRateDegPerSec = FMath::Clamp(TargetYawRateDegPerSec, -Motion.SteeringRateDegPerSec, Motion.SteeringRateDegPerSec);
-	CurrentYawRateDegPerSec = bAutomatedSteering || bRackDropTick ? TargetYawRateDegPerSec : FMath::FInterpConstantTo(CurrentYawRateDegPerSec, TargetYawRateDegPerSec, Dt, SteeringAccelerationDegPerSec2);
+	CurrentYawRateDegPerSec = bNavigationTurn ? TargetYawRateDegPerSec : FMath::FInterpConstantTo(CurrentYawRateDegPerSec, TargetYawRateDegPerSec, Dt, SteeringAccelerationDegPerSec2);
 	const float YawDelta = CurrentYawRateDegPerSec * Dt;
 	LastAutoYawDeltaDeg = bAutoMotion ? YawDelta : 0.f;
 	if (bAutoMotion) AutoApproachAccumulatedYawDeg += YawDelta;

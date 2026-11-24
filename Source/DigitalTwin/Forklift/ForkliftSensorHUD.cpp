@@ -27,6 +27,10 @@ void AForkliftSensorHUD::DrawHUD()
 	DrawText(TEXT("질량/마찰/감쇠: C++ Chaos 적용"), FLinearColor(.65f, .9f, .7f), PhysicsPanelX + 10.f, PhysicsPanelY + 78.f, nullptr, .60f);
 	DrawText(TEXT("포크가 실제 지지할 때만 하중 반영"), FLinearColor(.75f, .8f, .9f), PhysicsPanelX + 10.f, PhysicsPanelY + 98.f, nullptr, .56f);
 
+	DrawText(FString::Printf(TEXT("안정 여유 %.1fcm | 전복 %s"), Forklift->GetCurrentStabilityMarginCm(),
+		Forklift->IsStabilityLimitActive() ? TEXT("주의") : TEXT("정상")), FLinearColor::Yellow,
+		PhysicsPanelX + 10.f, PhysicsPanelY + 112.f, nullptr, .56f);
+
 	const auto DrawNavigationPanel = [this, Forklift]()
 	{
 		if (Forklift->RackMenuZone != INDEX_NONE)

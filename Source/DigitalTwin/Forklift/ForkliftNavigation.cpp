@@ -801,7 +801,7 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 			if (ArrivedStation != INDEX_NONE)
 			{
 				const float HeadingError = FMath::UnwindRadians(ActiveRackSlot == INDEX_NONE ? WorkStations[ArrivedStation].Heading - GetNavigationHeading(*S) : RackApproach.Heading - FMath::DegreesToRadians(GetActorRotation().Yaw));
-				const float HeadingTolerance = ActiveRackSlot == INDEX_NONE ? 5.f : 1.f;
+				const float HeadingTolerance = ActiveRackSlot == INDEX_NONE ? 5.f : 2.f;
 				if (FMath::Abs(HeadingError) > FMath::DegreesToRadians(HeadingTolerance))
 				{
 					if (!bBridgingScan)

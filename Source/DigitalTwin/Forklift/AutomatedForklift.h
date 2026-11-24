@@ -234,6 +234,7 @@ public:
 	 * collision, so these rails prevent dynamic pallets/cargo from passing
 	 * through the two upright steel members. */
 	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> LeftMastRailCollision;
+	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> ForkBackrestCollision;
 	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> RightMastRailCollision;
 	UPROPERTY(VisibleAnywhere, Category="Collision") TObjectPtr<UBoxComponent> MastTopCrossbarCollision;
 	/** Query-only self-occluders used by the LiDAR; they never participate in vehicle physics. */
