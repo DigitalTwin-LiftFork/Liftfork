@@ -187,7 +187,10 @@ public:
 	UPROPERTY(VisibleAnywhere, Category="Collision safety") bool bImpactLoadEjectTriggered = false;
 	/** Simulation traffic interlock tuning; values are not industrial safety certification data. */
 	UPROPERTY(EditAnywhere, Category="Factory safety", meta=(ClampMin="0.0", ClampMax="500.0")) float SafetyStoppingMarginCm = 120.f;
+	UPROPERTY(EditAnywhere, Category="Factory safety", meta=(ClampMin="0.0", ClampMax="200.0")) float SafetyStaticClearanceCm = 40.f;
 	UPROPERTY(EditAnywhere, Category="Factory safety", meta=(ClampMin="0.0", ClampMax="100.0")) float SafetyFootprintMarginCm = 20.f;
+	UPROPERTY(EditAnywhere, Category="Factory safety", meta=(ClampMin="0.0", ClampMax="1.0")) float SafetyReactionTimeSeconds = .3f;
+	UPROPERTY(EditAnywhere, Category="Factory safety", meta=(ClampMin="0.0", ClampMax="3.0")) float SafetyClearPathHoldSeconds = .75f;
 	UPROPERTY(VisibleAnywhere, Category="Factory safety") bool bManualEmergencyStopActive = false;
 	UPROPERTY(VisibleAnywhere, Category="Factory safety") FString SafetyInterlockStatus = TEXT("안전 감시 대기");
 	UPROPERTY(EditAnywhere, Category="Drive debug") bool bEnableDriveDebug = false;
@@ -597,6 +600,7 @@ private:
 	int32 RolloverSupportEdgeIndex = INDEX_NONE;
 	float LastSupportedLoadSlipLogTime = -BIG_NUMBER;
 	float CollisionSafetyStopRemainingSeconds = 0.f;
+	float SafetyClearPathHoldRemainingSeconds = 0.f;
 	FString LastLoggedSafetyInterlockStatus;
 	UPROPERTY(Transient) TObjectPtr<AFactoryTrafficTestCart> TrafficTestCart;
 	float CollisionMeasureDeltaSeconds = 1.f / 60.f;

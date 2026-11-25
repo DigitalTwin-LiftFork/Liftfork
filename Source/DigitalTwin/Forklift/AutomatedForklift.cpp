@@ -680,6 +680,7 @@ float AAutomatedForklift::ApplyFactorySafetyInterlocks(float RequestedSpeedCmPer
 	else
 	{
 		SafetyInterlockStatus = TEXT("안전 감시 정상");
+		SafetyClearPathHoldRemainingSeconds = FMath::Max(0.f, SafetyClearPathHoldRemainingSeconds - DeltaSeconds);
 		const float DirectionSign = !FMath::IsNearlyZero(RequestedSpeedCmPerSec)
 			? FMath::Sign(RequestedSpeedCmPerSec) : FMath::Sign(CurrentForwardSpeedCmPerSec);
 		if (FMath::IsNearlyZero(DirectionSign))
@@ -692,31 +693,79 @@ float AAutomatedForklift::ApplyFactorySafetyInterlocks(float RequestedSpeedCmPer
 			const FVector BodyExtent = BodyCollision->GetScaledBoxExtent();
 			const float Speed = FMath::Abs(CurrentForwardSpeedCmPerSec);
 			const float Brake = FMath::Max(1.f, FMath::Min(BrakeDecelerationCmPerSec2, GroundFrictionCoefficient * 980.f));
-			const float LookAheadCm = FMath::Max(180.f, FMath::Square(Speed) / (2.f * Brake) + SafetyStoppingMarginCm);
-			const FVector QueryCenter = BodyCollision->GetComponentLocation() + TravelDirection * (LookAheadCm * .5f);
-			const FVector QueryExtent(BodyExtent.X + LookAheadCm * .5f, BodyExtent.Y + SafetyFootprintMarginCm, BodyExtent.Z);
-			FQuat QueryRotation = BodyCollision->GetComponentQuat();
-			if (DirectionSign < 0.f) QueryRotation = FQuat(FVector::UpVector, PI) * QueryRotation;
+			const float LookAheadCm = FMath::Max(180.f,
+				FMath::Square(Speed) / (2.f * Brake) + Speed * SafetyReactionTimeSeconds + SafetyStoppingMarginCm);
 			FCollisionObjectQueryParams ObjectTypes;
 			ObjectTypes.AddObjectTypesToQuery(ECC_WorldDynamic);
 			ObjectTypes.AddObjectTypesToQuery(ECC_PhysicsBody);
 			ObjectTypes.AddObjectTypesToQuery(ECC_Pawn);
+			FCollisionObjectQueryParams StaticObjectTypes;
+			StaticObjectTypes.AddObjectTypesToQuery(ECC_WorldStatic);
 			FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(FactoryTrafficSafetyEnvelope), false, this);
+			TArray<UBoxComponent*> SafetyParts = { BodyCollision.Get(), LeftSupportLegCollision.Get(), RightSupportLegCollision.Get(),
+				LeftMastRailCollision.Get(), RightMastRailCollision.Get(), MastTopCrossbarCollision.Get(), ForkBackrestCollision.Get(),
+				LeftForkCollision.Get(), RightForkCollision.Get() };
+			GetSupportedPalletShapes(SafetyParts);
 			TArray<FOverlapResult> NearbyOverlaps;
-			GetWorld()->OverlapMultiByObjectType(NearbyOverlaps, QueryCenter, QueryRotation, ObjectTypes,
-				FCollisionShape::MakeBox(QueryExtent), QueryParams);
 			AActor* BlockingTraffic = nullptr;
-			for (const FOverlapResult& Overlap : NearbyOverlaps)
+			for (const UBoxComponent* Part : SafetyParts)
 			{
-				AActor* Other = Overlap.GetActor();
-				if (!Other || Other == this || Cast<APallet>(Other) || Cast<AWoodPallet>(Other)) continue;
-				BlockingTraffic = Other;
-				break;
+				if (!Part) continue;
+				FVector PartExtent = Part->GetScaledBoxExtent();
+				PartExtent.X += LookAheadCm * .5f;
+				PartExtent.Y += SafetyFootprintMarginCm;
+				FQuat PartRotation = Part->GetComponentQuat();
+				if (DirectionSign < 0.f) PartRotation = FQuat(FVector::UpVector, PI) * PartRotation;
+				const FVector PartQueryCenter = Part->GetComponentLocation() + TravelDirection * (LookAheadCm * .5f);
+				NearbyOverlaps.Reset();
+				GetWorld()->OverlapMultiByObjectType(NearbyOverlaps, PartQueryCenter, PartRotation, ObjectTypes,
+					FCollisionShape::MakeBox(PartExtent), QueryParams);
+				for (const FOverlapResult& Overlap : NearbyOverlaps)
+				{
+					AActor* Other = Overlap.GetActor();
+					if (!Other || Other == this || Cast<APallet>(Other) || Cast<AWoodPallet>(Other)) continue;
+					BlockingTraffic = Other;
+					break;
+				}
+				if (BlockingTraffic) break;
+			}
+			AActor* BlockingStaticObstacle = nullptr;
+			if (!BlockingTraffic)
+			{
+				const float StaticLookAheadCm = FMath::Max(SafetyStaticClearanceCm,
+					FMath::Square(Speed) / (2.f * Brake) + Speed * SafetyReactionTimeSeconds + SafetyStaticClearanceCm);
+				for (const UBoxComponent* Part : SafetyParts)
+				{
+					if (!Part) continue;
+					FHitResult StaticHit;
+					const FVector SweepDelta = TravelDirection * StaticLookAheadCm;
+					FQuat PartRotation = Part->GetComponentQuat();
+					if (DirectionSign < 0.f) PartRotation = FQuat(FVector::UpVector, PI) * PartRotation;
+					if (!GetWorld()->SweepSingleByObjectType(StaticHit, Part->GetComponentLocation(),
+						Part->GetComponentLocation() + SweepDelta, PartRotation, StaticObjectTypes,
+						FCollisionShape::MakeBox(Part->GetScaledBoxExtent()), QueryParams) || !StaticHit.bBlockingHit)
+						continue;
+					if (StaticHit.bStartPenetrating && !IsMovementDeeperIntoInitialOverlap(StaticHit, SweepDelta)) continue;
+					BlockingStaticObstacle = StaticHit.GetActor();
+					break;
+				}
 			}
 
 			if (BlockingTraffic)
 			{
 				SafetyInterlockStatus = FString::Printf(TEXT("통행 양보 정지: %s"), *GetNameSafe(BlockingTraffic));
+				SafetyClearPathHoldRemainingSeconds = SafetyClearPathHoldSeconds;
+				RequestedSpeedCmPerSec = 0.f;
+			}
+			else if (BlockingStaticObstacle)
+			{
+				SafetyInterlockStatus = FString::Printf(TEXT("정적 장애물 안전 정지: %s"), *GetNameSafe(BlockingStaticObstacle));
+				SafetyClearPathHoldRemainingSeconds = SafetyClearPathHoldSeconds;
+				RequestedSpeedCmPerSec = 0.f;
+			}
+			else if (SafetyClearPathHoldRemainingSeconds > 0.f)
+			{
+				SafetyInterlockStatus = TEXT("재출발 대기: 경로 비움 확인 중");
 				RequestedSpeedCmPerSec = 0.f;
 			}
 			else
