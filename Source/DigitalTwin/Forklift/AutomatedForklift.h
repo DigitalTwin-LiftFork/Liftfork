@@ -18,6 +18,7 @@ class UTextureRenderTarget2D;
 class UPhysicsConstraintComponent;
 class UPhysicalMaterial;
 class UForkliftNavigationSensorComponent;
+class UForkliftTransportComponent;
 
 class APallet;
 
@@ -136,6 +137,7 @@ class DIGITALTWIN_API AAutomatedForklift : public APawn
 
 public:
 	AAutomatedForklift();
+	UPROPERTY(VisibleAnywhere, Category="Transport") TObjectPtr<UForkliftTransportComponent> TransportCoordinator;
 	virtual void Tick(float DeltaSeconds) override;
 	virtual void SetupPlayerInputComponent(UInputComponent* PlayerInputComponent) override;
 
@@ -488,6 +490,7 @@ public:
 	static FString AutoPickupStateToString(EAutoPickupState State);
 
 private:
+	friend class UForkliftTransportComponent;
 	void BeginNavigationRecovery(const FString& Reason);
 	float NavigationRecoveryStart = -1.f;
 	int32 NavigationRecoveryScan = 0, NavigationRecoveryAttempts = 0, NavigationEscapeAttempts = 0;
@@ -543,6 +546,7 @@ private:
 	int32 FactoryPoseGeneration = INDEX_NONE;
 	float FactoryMapToWorldYaw = 0.f;
 	FVector2D FactoryMapOriginInWorld = FVector2D::ZeroVector;
+	void ScanRackRows();
 	void ResolveWorkStations(const class UForkliftSlamComponent& Slam, const FVector2D& Start);
 	bool IsFactoryAisleClear(const FVector& Position, float Radius) const;
 	TArray<FVector2D> ExplorationVisited;

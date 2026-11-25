@@ -1,4 +1,5 @@
 #include "Forklift/AutomatedForklift.h"
+#include "Forklift/ForkliftTransportComponent.h"
 #include "Forklift/Pallet.h"
 #include "Forklift/WoodPallet.h"
 #include "Forklift/ForkliftNavigationSensorComponent.h"
@@ -57,6 +58,7 @@ UStaticMeshComponent* AAutomatedForklift::CreateVisual(const TCHAR* Name, UScene
 AAutomatedForklift::AAutomatedForklift()
 {
 	PrimaryActorTick.bCanEverTick = true;
+	TransportCoordinator = CreateDefaultSubobject<UForkliftTransportComponent>(TEXT("TransportCoordinator"));
 	BodyCollision = CreateDefaultSubobject<UBoxComponent>(TEXT("BodyCollision"));
 	SetRootComponent(BodyCollision);
 	BodyCollision->SetCollisionProfileName(TEXT("Pawn"));
@@ -1626,10 +1628,11 @@ void AAutomatedForklift::BeginRackDrop(const FBox& Deck)
 
 void AAutomatedForklift::UpdateRackDrop(float Dt)
 {
-	const auto Finish = [this](const TCHAR* Status)
+	const auto Finish = [this](const TCHAR* Status, bool bSuccess = false)
 	{
 		RackDropPhase = ERackDropPhase::Idle;
 		NavigationStatus = Status;
+		if (TransportCoordinator) TransportCoordinator->FinishJob(bSuccess, Status);
 		UE_LOG(LogTemp, Warning, TEXT("Rack drop finished: %s"), Status);
 	};
 	if (IsAutoPickupMotionActive() || !FMath::IsNearlyZero(DriveInput) || !FMath::IsNearlyZero(SteerInput) ||
@@ -1781,7 +1784,7 @@ void AAutomatedForklift::UpdateRackDrop(float Dt)
 		RackDropPhase = ERackDropPhase::Stow;
 	}
 	if (LiftCm > 25.f) { LiftInput = -.4f; return; }
-	Finish(TEXT("선반 하역 완료: 팔레트 안착 및 포크 이탈"));
+	Finish(TEXT("선반 하역 완료: 팔레트 안착 및 포크 이탈"), true);
 }
 
 void AAutomatedForklift::UpdateRackHeight(float Dt)

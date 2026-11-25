@@ -26,7 +26,7 @@ public class DigitalTwin : ModuleRules
 
 		// FRenderCommandFence used by the RGB exposure sweep is implemented in
 		// RenderCore; keeping this private avoids widening the gameplay API.
-		PrivateDependencyModuleNames.AddRange(new string[] { "RenderCore" });
+		PrivateDependencyModuleNames.AddRange(new string[] { "RenderCore", "HTTP", "Json" });
 
 		PublicIncludePaths.AddRange(new string[] {
 			"DigitalTwin",

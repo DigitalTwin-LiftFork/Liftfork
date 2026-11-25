@@ -1,4 +1,5 @@
 #include "Forklift/AutomatedForklift.h"
+#include "Forklift/ForkliftTransportComponent.h"
 #include "Components/TextRenderComponent.h"
 #include "Forklift/ForkliftNavigationSensorComponent.h"
 #include "Forklift/ForkliftSlamComponent.h"
@@ -164,6 +165,7 @@ void AAutomatedForklift::GetNavigationDiagnosticLines(TArray<FString>& OutLines)
 {
 	const auto* S = FindComponentByClass<UForkliftSlamComponent>();
 	const float Now = GetWorld()->GetTimeSeconds();
+	if (TransportCoordinator) OutLines.Add(TransportCoordinator->GetConnectionStatus());
 	OutLines.Add(FString::Printf(TEXT("주행 상태: %s"), bNavigationActive ? TEXT("자동 주행 활성") : TEXT("정지 / 수동")));
 	OutLines.Add(FString::Printf(TEXT("실제 속도 %.2f m/s | 명령 %.2f m/s"), CurrentForwardSpeedCmPerSec / 100.f, TargetForwardSpeedCmPerSec / 100.f));
 	OutLines.Add(bNavigationGoalSet && S && NavigationSensor ? FString::Printf(TEXT("목표까지 %.2f m | 경로점 %d"), FVector2D::Distance(GetNavigationMapPose(), NavigationGoal) / 100.f, NavigationRoute.Num()) : TEXT("목표: 미지정"));
@@ -445,7 +447,7 @@ bool AAutomatedForklift::IsFactoryAisleClear(const FVector& Position, float Radi
 		Objects, FCollisionShape::MakeBox(FVector(Radius, Radius, 125.f)), Params);
 }
 
-void AAutomatedForklift::ResolveWorkStations(const UForkliftSlamComponent& Slam, const FVector2D& Start)
+void AAutomatedForklift::ScanRackRows()
 {
 	if (!bRackRowsScanned)
 	{
@@ -510,6 +512,11 @@ void AAutomatedForklift::ResolveWorkStations(const UForkliftSlamComponent& Slam,
 				UE_LOG(LogTemp, Log, TEXT("Rack zone %c numbered slots: %d/%d"), TCHAR('A' + Row), LabelCount, BayCount * TierCount);
 		}
 	}
+}
+
+void AAutomatedForklift::ResolveWorkStations(const UForkliftSlamComponent& Slam, const FVector2D& Start)
+{
+	ScanRackRows();
 	const float MapToWorldYaw = FMath::DegreesToRadians(GetActorRotation().Yaw) - Slam.GetPredictedYaw();
 	const FVector WorldStart = GetActorLocation();
 	for (int32 Index = 0; Index < WorkStationCount; ++Index)
