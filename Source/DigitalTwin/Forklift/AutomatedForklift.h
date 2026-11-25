@@ -20,6 +20,7 @@ class UPhysicalMaterial;
 class UForkliftNavigationSensorComponent;
 class AForkliftSafetyZone;
 class AFactoryTrafficTestCart;
+class AForkliftFleetManager;
 
 class APallet;
 
@@ -487,6 +488,11 @@ public:
 	FVector2D GetWorkStationPosition(int32 Index) const { return WorkStations[Index].Position; }
 	void ToggleNavigation();
 	void StopNavigation();
+	/** Fleet controls: set by the manager when this vehicle joins the fleet. */
+	void SetFleetIdentity(int32 InFleetId, AForkliftFleetManager* InManager);
+	int32 GetFleetId() const { return FleetId; }
+	bool TryFleetDeadlockYield(const FString& Reason);
+	void ToggleFleetOperation();
 	const FString& GetNavigationStatus() const { return NavigationStatus; }
 	void GetNavigationDiagnosticLines(TArray<FString>& OutLines) const;
 	const TArray<FVector2D>& GetNavigationRoute() const { return NavigationRoute; }
@@ -565,6 +571,8 @@ private:
 	TArray<FVector2D> NavigationRoute;
 	float NavigationReplanTime = 0.f, NavigationProgressTime = 0.f;
 	FString NavigationStatus = TEXT("하단 랜덤 순찰 시작 버튼을 누르세요");
+	UPROPERTY(VisibleAnywhere, Category="Fleet") int32 FleetId = INDEX_NONE;
+	TWeakObjectPtr<AForkliftFleetManager> FleetManager;
 	float DriveInput = 0.f, SteerInput = 0.f, LiftInput = 0.f, ReachInput = 0.f, SideShiftInput = 0.f;
 	/** Automatic commands deliberately use a separate channel. Axis bindings invoke
 	 * their callbacks with zero every frame, so sharing DriveInput would erase a

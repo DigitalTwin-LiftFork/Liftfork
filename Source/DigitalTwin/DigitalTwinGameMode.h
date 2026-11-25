@@ -25,6 +25,7 @@ public:
 
 private:
 	TObjectPtr<class AAutomatedForklift> ActiveForklift;
+	TObjectPtr<class AForkliftFleetManager> FleetManager;
 	AAutomatedForklift* FindOrSpawnForklift();
 	void PossessForklift(APlayerController* PlayerController);
 };

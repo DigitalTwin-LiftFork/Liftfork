@@ -1,6 +1,7 @@
 #include "Forklift/AutomatedForklift.h"
 #include "Components/TextRenderComponent.h"
 #include "Forklift/ForkliftNavigationSensorComponent.h"
+#include "Forklift/ForkliftFleetManager.h"
 #include "Forklift/ForkliftSlamComponent.h"
 #include "Components/BoxComponent.h"
 #include "Engine/World.h"
@@ -177,6 +178,31 @@ void AAutomatedForklift::GetNavigationDiagnosticLines(TArray<FString>& OutLines)
 		(CarriedPallet || bIsLoaded) ? TEXT("감지") : TEXT("미감지"), LiftCm, ReachCm));
 	OutLines.Add(FString::Printf(TEXT("상태 / 정지 이유: %s"), *NavigationStatus));
 	OutLines.Add(FString::Printf(TEXT("공장 안전: %s"), *SafetyInterlockStatus));
+	OutLines.Add(FleetId != INDEX_NONE ? FString::Printf(TEXT("차량 ID F-%02d | 편대 %s"), FleetId + 1, FleetManager.IsValid() ? TEXT("관제 연결") : TEXT("단독")) : TEXT("차량 ID: 미등록"));
+}
+
+void AAutomatedForklift::SetFleetIdentity(int32 InFleetId, AForkliftFleetManager* InManager)
+{
+	FleetId = InFleetId;
+	FleetManager = InManager;
+}
+
+bool AAutomatedForklift::TryFleetDeadlockYield(const FString& Reason)
+{
+	return IsNavigationActive() && TryNavigationBackOut(Reason);
+}
+
+void AAutomatedForklift::ToggleFleetOperation()
+{
+	if (AForkliftFleetManager* Manager = FleetManager.Get())
+	{
+		Manager->ToggleFleetOperation(this);
+	}
+	else
+	{
+		NavigationStatus = TEXT("편대 관제기를 찾을 수 없습니다");
+		UE_LOG(LogTemp, Warning, TEXT("[FORKLIFT_FLEET] No fleet manager registered for %s."), *GetName());
+	}
 }
 
 bool AAutomatedForklift::TryNavigationBackOut(const FString& Reason)

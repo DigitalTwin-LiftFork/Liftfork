@@ -591,6 +591,7 @@ void AAutomatedForklift::SetupPlayerInputComponent(UInputComponent* Input)
 	Input->BindAction(TEXT("ForkliftSpawnPallet"), IE_Pressed, this, &AAutomatedForklift::SpawnPallet);
 	Input->BindAction(TEXT("ForkliftPalletInteract"), IE_Pressed, this, &AAutomatedForklift::InteractWithPallet);
 	Input->BindKey(EKeys::K, IE_Pressed, this, &AAutomatedForklift::ToggleCollisionDebug);
+	Input->BindKey(EKeys::Y, IE_Pressed, this, &AAutomatedForklift::ToggleFleetOperation);
 	Input->BindKey(EKeys::T, IE_Pressed, this, &AAutomatedForklift::ToggleTrafficTestCart);
 	Input->BindKey(EKeys::X, IE_Pressed, this, &AAutomatedForklift::ToggleManualEmergencyStop);
 	Input->BindKey(EKeys::V, IE_Pressed, this, &AAutomatedForklift::TogglePalletSensorDisplay);

@@ -2,6 +2,7 @@
 
 #include "DigitalTwinGameMode.h"
 #include "Forklift/AutomatedForklift.h"
+#include "Forklift/ForkliftFleetManager.h"
 #include "Forklift/ForkliftPlayerController.h"
 #include "Forklift/ForkliftSensorHUD.h"
 #include "EngineUtils.h"
@@ -20,6 +21,13 @@ void ADigitalTwinGameMode::BeginPlay()
 {
 	Super::BeginPlay();
 	FindOrSpawnForklift();
+	if (AAutomatedForklift* Lead = FindOrSpawnForklift())
+	{
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		FleetManager = GetWorld()->SpawnActor<AForkliftFleetManager>(AForkliftFleetManager::StaticClass(), FVector::ZeroVector, FRotator::ZeroRotator, SpawnParams);
+		if (IsValid(FleetManager)) FleetManager->RegisterForklift(Lead);
+	}
 	PossessForklift(GetWorld()->GetFirstPlayerController());
 }
 
