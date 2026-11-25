@@ -30,6 +30,7 @@ class Coordinator:
         self.snapshot = {}
         self.seen = 0.0
         self.session = None
+        self.charging_command = None
         self.lock = RLock()
 
     def rows(self):
@@ -81,6 +82,16 @@ class Coordinator:
             self.db.commit()
             return {"ok": True}
 
+    def charging(self, data):
+        with self.lock:
+            if not self.online():
+                raise ValueError("Factory 연결을 먼저 확인하세요")
+            action = data.get("action")
+            if action not in {"request", "cancel"}:
+                raise ValueError("충전 명령을 확인하세요")
+            self.charging_command = {"id": uuid.uuid4().hex, "action": action}
+            return {"ok": True, "id": self.charging_command["id"]}
+
     def sync(self, data):
         with self.lock:
             session = str(data.get("session", ""))
@@ -92,7 +103,11 @@ class Coordinator:
                 self.db.execute("UPDATE jobs SET status='interrupted', message='시뮬레이션 재시작 후 현장 확인 필요', updated=? "
                                 "WHERE status IN ('assigned','moving','unloading','withdrawing') AND session<>?",
                                 (time.time(), session))
+            if self.session and session != self.session:
+                self.charging_command = None
             self.session = session
+            if self.charging_command and data.get("charge_ack") == self.charging_command["id"]:
+                self.charging_command = None
             self.snapshot = data
             self.seen = time.time()
             report = data.get("report")
@@ -110,7 +125,9 @@ class Coordinator:
                                     (status, str(report.get("message", ""))[:500], self.seen, row["id"]))
             current = self.db.execute("SELECT * FROM jobs WHERE session=? AND status IN "
                                       "('assigned','moving','unloading','withdrawing') LIMIT 1", (session,)).fetchone()
-            if current is None and data.get("ready") and not report:
+            battery = data.get("battery", {})
+            battery_available = battery.get("percent", 100) > battery.get("low_threshold", 20) and battery.get("state") not in {"waiting", "returning", "connecting", "charging", "disconnecting"}
+            if current is None and data.get("ready") and battery_available and not report and not self.charging_command:
                 for row in self.db.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY created"):
                     if row["pallet"] != data.get("loaded"):
                         continue
@@ -121,7 +138,7 @@ class Coordinator:
                         current = self.db.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone()
                         break
             self.db.commit()
-            return {"job": dict(current) if current else None, "ack": report.get("id") if report else None}
+            return {"job": dict(current) if current else None, "ack": report.get("id") if report else None, "charging_command": self.charging_command}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -152,6 +169,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("invalid body")
             if self.path == "/api/sync":
                 result = self.server.coordinator.sync(data)
+            elif self.path == "/api/charging":
+                result = self.server.coordinator.charging(data)
             elif self.path == "/api/jobs":
                 result = self.server.coordinator.create(data)
             elif self.path.startswith("/api/jobs/") and self.path.endswith("/cancel"):

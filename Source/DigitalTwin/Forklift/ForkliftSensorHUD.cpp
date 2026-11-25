@@ -1,6 +1,8 @@
 #include "Forklift/ForkliftSensorHUD.h"
 
 #include "Forklift/AutomatedForklift.h"
+#include "Forklift/ForkliftTransportComponent.h"
+#include "Engine/Engine.h"
 #include "Forklift/ForkliftSlamComponent.h"
 #include "Forklift/ForkliftNavigationSensorComponent.h"
 #include "Forklift/ForkliftPlayerController.h"
@@ -15,7 +17,47 @@ void AForkliftSensorHUD::DrawHUD()
 	AAutomatedForklift* Forklift = Cast<AAutomatedForklift>(PlayerOwner->GetPawn());
 	if (!Forklift) return;
 
-	// C++-only Chaos/load telemetry.  This panel deliberately does not depend
+		const auto DrawBatteryPanel = [this, Forklift]()
+	{
+		const UForkliftTransportComponent* Battery = Forklift->TransportCoordinator;
+		if (!Battery) return;
+		const float Percent = FMath::Clamp(Battery->GetBatteryPercent(), 0.f, 100.f);
+		const FString& State = Battery->GetChargingState();
+		const bool bCharging = State == TEXT("charging");
+		const FString Label = bCharging ? TEXT("충전 중") : State == TEXT("returning") ? TEXT("충전소 복귀 중") :
+			State == TEXT("connecting") ? TEXT("접점·승인 확인") : State == TEXT("disconnecting") ? TEXT("전류 차단·접점 해제") : State == TEXT("waiting") ? TEXT("충전 대기") : State == TEXT("failed") ? TEXT("충전 이동 중단") :
+			Percent <= Battery->LowBatteryPercent ? TEXT("잔량 부족") : TEXT("사용 중");
+		const FLinearColor Color = bCharging ? FLinearColor(.15f, 1.f, .4f) : Percent <= Battery->LowBatteryPercent ?
+			FLinearColor(1.f, .25f, .15f) : State == TEXT("waiting") ? FLinearColor(1.f, .75f, .15f) : FLinearColor(.2f, .8f, 1.f);
+		const float Width = FMath::Min(320.f, Canvas->SizeX * .35f);
+		const float RightLimit = FMath::Max(12.f, Canvas->SizeX - 328.f - Width - 12.f);
+		const float X = FMath::Clamp((Canvas->SizeX - Width) * .5f, 12.f, RightLimit), Y = 12.f;
+		DrawRect(FLinearColor(.015f, .025f, .04f, .96f), X, Y, Width, 76.f);
+		DrawText(FString::Printf(TEXT("배터리 %.1f%%  |  %s"), Percent, *Label), Color, X + 10.f, Y + 7.f, nullptr, .82f);
+		DrawRect(FLinearColor(.16f, .2f, .25f), X + 10.f, Y + 33.f, Width - 20.f, 10.f);
+		DrawRect(Color, X + 10.f, Y + 33.f, (Width - 20.f) * Percent / 100.f, 10.f);
+		const float ThresholdX = X + 10.f + (Width - 20.f) * Battery->LowBatteryPercent / 100.f;
+		DrawRect(FLinearColor::White, ThresholdX, Y + 31.f, 1.f, 14.f);
+		UFont* Font = GEngine ? GEngine->GetSmallFont() : nullptr;
+		FString Message = Battery->GetChargingMessage();
+		float TextWidth = 0.f, TextHeight = 0.f;
+		if (Font)
+		{
+			Canvas->StrLen(Font, Message, TextWidth, TextHeight);
+			if (TextWidth * .62f > Width - 20.f)
+			{
+				while (Message.Len() > 1)
+				{
+					Message.LeftChopInline(1);
+					Canvas->StrLen(Font, Message + TEXT("..."), TextWidth, TextHeight);
+					if (TextWidth * .62f <= Width - 20.f) break;
+				}
+				Message += TEXT("...");
+			}
+		}
+		DrawText(Message, FLinearColor::White, X + 10.f, Y + 51.f, Font, .62f);
+	};
+    // C++-only Chaos/load telemetry.  This panel deliberately does not depend
 	// on a Widget Blueprint, so it remains available after map or UI merges.
 	const float PhysicsPanelWidth = 310.f;
 	const float PhysicsPanelX = Canvas->SizeX - PhysicsPanelWidth - 18.f;
@@ -171,7 +213,7 @@ void AForkliftSensorHUD::DrawHUD()
 
 	UTextureRenderTarget2D* SensorImage = Forklift->GetPalletSensorRenderTarget();
 	const int32 Mode = Forklift->GetPalletSensorDisplayMode();
-	if (!SensorImage || Mode == 0) { DrawNavigationPanel(); return; }
+	if (!SensorImage || Mode == 0) { DrawNavigationPanel(); DrawBatteryPanel(); return; }
 
 	const float Aspect = static_cast<float>(SensorImage->SizeX) / FMath::Max(1, SensorImage->SizeY);
 
@@ -370,4 +412,5 @@ void AForkliftSensorHUD::DrawHUD()
 	DrawText(FString::Printf(TEXT("표면 마찰: %.2f  |  충돌: %s"), Forklift->GetActiveLoadFriction(), *Forklift->GetActiveLoadCollisionStatus()), FLinearColor::White, PhysicsPanelX + 10.f, PhysicsPanelY + 54.f, nullptr, .60f);
 	DrawText(TEXT("질량/마찰/감쇠: C++ Chaos 적용"), FLinearColor(.65f, .9f, .7f), PhysicsPanelX + 10.f, PhysicsPanelY + 78.f, nullptr, .60f);
 	DrawText(TEXT("포크가 실제 지지할 때만 하중 반영"), FLinearColor(.75f, .8f, .9f), PhysicsPanelX + 10.f, PhysicsPanelY + 98.f, nullptr, .56f);
+	DrawBatteryPanel();
 }

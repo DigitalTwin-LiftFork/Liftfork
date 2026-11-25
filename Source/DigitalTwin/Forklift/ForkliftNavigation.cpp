@@ -165,7 +165,7 @@ void AAutomatedForklift::GetNavigationDiagnosticLines(TArray<FString>& OutLines)
 {
 	const auto* S = FindComponentByClass<UForkliftSlamComponent>();
 	const float Now = GetWorld()->GetTimeSeconds();
-	if (TransportCoordinator) OutLines.Add(TransportCoordinator->GetConnectionStatus());
+	if (TransportCoordinator) { OutLines.Add(TransportCoordinator->GetConnectionStatus()); OutLines.Add(TransportCoordinator->GetBatteryDiagnostic()); }
 	OutLines.Add(FString::Printf(TEXT("주행 상태: %s"), bNavigationActive ? TEXT("자동 주행 활성") : TEXT("정지 / 수동")));
 	OutLines.Add(FString::Printf(TEXT("실제 속도 %.2f m/s | 명령 %.2f m/s"), CurrentForwardSpeedCmPerSec / 100.f, TargetForwardSpeedCmPerSec / 100.f));
 	OutLines.Add(bNavigationGoalSet && S && NavigationSensor ? FString::Printf(TEXT("목표까지 %.2f m | 경로점 %d"), FVector2D::Distance(GetNavigationMapPose(), NavigationGoal) / 100.f, NavigationRoute.Num()) : TEXT("목표: 미지정"));
@@ -226,6 +226,7 @@ void AAutomatedForklift::BeginNavigationRecovery(const FString& Reason)
 
 void AAutomatedForklift::StopNavigation()
 {
+	FactoryServiceGoal.Reset(); FactoryServiceHeading.Reset();
 	RackDropPhase = ERackDropPhase::Idle;
 	RackHeightTarget.Reset();
 	RackHeightCommand = 0.f;
@@ -249,6 +250,7 @@ void AAutomatedForklift::StopNavigation()
 
 bool AAutomatedForklift::SetNavigationGoalFromMapScreen(FVector2D ScreenPosition, float ViewportHeight)
 {
+	FactoryServiceGoal.Reset(); FactoryServiceHeading.Reset();
 	const FBox2D MapRect = SlamMapRect(ViewportHeight);
 	if (!MapRect.IsInside(ScreenPosition)) return false;
 	const auto* S = FindComponentByClass<UForkliftSlamComponent>();
@@ -296,6 +298,7 @@ FBox2D AAutomatedForklift::RackMenuButtonRect(float Width, float Height, int32 S
 
 void AAutomatedForklift::GoToStation(int32 Index, int32 Slot)
 {
+	FactoryServiceGoal.Reset(); FactoryServiceHeading.Reset();
 	RackDropPhase = ERackDropPhase::Idle;
 	RackHeightTarget.Reset();
 	RackHeightCommand = 0.f;
@@ -348,6 +351,18 @@ void AAutomatedForklift::GoToStation(int32 Index, int32 Slot)
 	ActiveRackSlot = Slot;
 	SetNavigationGoalInMap(Slot == INDEX_NONE ? Station.Position : RackApproach.Position, Index);
 	UE_LOG(LogTemp, Log, TEXT("Work station %d: %s"), Index, *NavigationStatus);
+}
+
+void AAutomatedForklift::GoToServicePoint(const FVector& WorldGoal)
+{
+	const auto* Slam = FindComponentByClass<UForkliftSlamComponent>();
+	if (!Slam || !NavigationSensor) return;
+	FactoryServiceGoal = WorldGoal;
+	FactoryServiceHeading = -90.f;
+	const FVector Delta = WorldGoal - GetActorLocation();
+	const float Yaw = FMath::DegreesToRadians(GetActorRotation().Yaw) - GetNavigationHeading(*Slam);
+	SetNavigationGoalInMap(GetNavigationMapPose() + NavRotate(FVector2D(Delta.X, Delta.Y), -Yaw));
+	if (!bNavigationActive) { FactoryServiceGoal.Reset(); FactoryServiceHeading.Reset(); }
 }
 
 bool AAutomatedForklift::SetNavigationGoalInMap(FVector2D Goal, int32 StationIndex)
@@ -574,7 +589,7 @@ bool AAutomatedForklift::PlanNavigationRoute(FVector2D Start)
 	const auto* S = FindComponentByClass<UForkliftSlamComponent>();
 	NavigationRoute.Reset();
 	if (!S) return false;
-	const bool bFactoryRoute = ActiveWorkStation != INDEX_NONE || (!bNavigationGoalIsManual && HasFactoryRackRows());
+	const bool bFactoryRoute = FactoryServiceGoal.IsSet() || ActiveWorkStation != INDEX_NONE || (!bNavigationGoalIsManual && HasFactoryRackRows());
 	const FVector WorldStart = GetActorLocation();
 	const float MapToWorldYaw = FMath::DegreesToRadians(GetActorRotation().Yaw) - GetNavigationHeading(*S);
 	const float HalfWidth = GetNavigationHalfWidth();
@@ -585,6 +600,11 @@ bool AAutomatedForklift::PlanNavigationRoute(FVector2D Start)
 		NavigationGoal = Start + NavRotate(FVector2D(WorldOffset.X, WorldOffset.Y), -MapToWorldYaw);
 	}
 
+	if (FactoryServiceGoal.IsSet())
+	{
+		const FVector Offset = FactoryServiceGoal.GetValue() - WorldStart;
+		NavigationGoal = Start + NavRotate(FVector2D(Offset.X, Offset.Y), -MapToWorldYaw);
+	}
 	TSet<FIntPoint> Blocked, Known;
 	const int32 Padding = FMath::CeilToInt((HalfWidth + 25.f) / 40.f);
 	if (!bFactoryRoute) for (const auto& Entry : S->GetCells())
@@ -698,6 +718,10 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 	DriveInput=SteerInput=0.f;
 	const auto* S=FindComponentByClass<UForkliftSlamComponent>();
 	const float Now=GetWorld()->GetTimeSeconds();
+	if (S && NavigationMapGeneration != S->GetMapGeneration() && FactoryServiceGoal.IsSet())
+	{
+		const FVector Goal = FactoryServiceGoal.GetValue(); StopNavigation(); GoToServicePoint(Goal); return;
+	}
 	if (S && NavigationMapGeneration != S->GetMapGeneration() && ActiveWorkStation != INDEX_NONE)
 	{
 		const int32 ResumeStation = ActiveWorkStation;
@@ -714,7 +738,7 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 		StopNavigation(); NavigationStatus=TEXT("중지: 센서 꺼짐 또는 지도 초기화"); return;
 	}
 	const bool bTrackingFresh = S->IsTrackingFresh(Now);
-	const bool bFactoryNavigation = HasFactoryRackRows() && (ActiveWorkStation != INDEX_NONE || !bNavigationGoalIsManual);
+	const bool bFactoryNavigation = HasFactoryRackRows() && (FactoryServiceGoal.IsSet() || ActiveWorkStation != INDEX_NONE || !bNavigationGoalIsManual);
 	const bool bUseFactoryOdometry = bAllowSimulatorPoseFallback && !bTrackingFresh && bFactoryNavigation && FactoryPoseGeneration == S->GetMapGeneration();
 	if (bUsingFactoryOdometry != bUseFactoryOdometry)
 	{
@@ -803,11 +827,12 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 		NavigationProgressTime=Now;
 		NavigationStatus=TEXT("재스캔 완료: 새 경로 주행 재개");
 	}
-	if (bNavigationGoalSet && FVector2D::Distance(Pose,NavigationGoal)<70.f)
+	if (bNavigationGoalSet && (FactoryServiceGoal.IsSet() ? FVector::Dist2D(GetActorLocation(), FactoryServiceGoal.GetValue()) < 1.5f : FVector2D::Distance(Pose,NavigationGoal) < 70.f))
 	{
 		if (bNavigationGoalIsManual)
 		{
 			const int32 ArrivedStation = ActiveWorkStation;
+			if (FactoryServiceHeading.IsSet() && FMath::Abs(FMath::FindDeltaAngleDegrees(GetActorRotation().Yaw, FactoryServiceHeading.GetValue())) > (TransportCoordinator ? TransportCoordinator->ContactYawToleranceDeg : 3.f)) goto FollowNavigationRoute;
 			if (ArrivedStation != INDEX_NONE)
 			{
 				const float HeadingError = FMath::UnwindRadians(ActiveRackSlot == INDEX_NONE ? WorkStations[ArrivedStation].Heading - GetNavigationHeading(*S) : RackApproach.Heading - FMath::DegreesToRadians(GetActorRotation().Yaw));
@@ -845,7 +870,7 @@ void AAutomatedForklift::UpdateNavigation(float Dt)
 		NavigationProgressPosition=Pose; NavigationProgressTime=Now;
 		NavigationRecoveryAttempts=0;
 	}
-	if (bNavigationGoalSet && Now-NavigationProgressTime>12.f)
+	if (bNavigationGoalSet && Now-NavigationProgressTime>(FactoryServiceGoal.IsSet() && FVector::Dist2D(GetActorLocation(), FactoryServiceGoal.GetValue()) < 100.f ? 45.f : 12.f))
 	{
 		if (!TryNavigationBackOut(TEXT("12초간 이동 진행 없음"))) BeginNavigationRecovery(TEXT("12초간 이동 진행 없음"));
 		return;
@@ -889,7 +914,15 @@ FollowNavigationRoute:
         if (FVector2D::Distance(Pose,LookAhead)>=150.f) break;
     }
     const float HeadingNow = GetNavigationHeading(*S);
-    const FVector2D Target=NavRotate(LookAhead-Pose,-HeadingNow);
+    if (FactoryServiceGoal.IsSet() && FVector2D::Distance(Pose, NavigationGoal) < 200.f) LookAhead = NavigationGoal;
+    FVector2D Target=NavRotate(LookAhead-Pose,-HeadingNow);
+    if (FactoryServiceGoal.IsSet() && FVector::Dist2D(GetActorLocation(), FactoryServiceGoal.GetValue()) < 800.f)
+    {
+        // Final docking uses station-relative simulator feedback, not drifting SLAM.
+        // A physical vehicle would obtain this feedback from its docking sensors.
+        const FVector DockDelta = FactoryServiceGoal.GetValue() - GetActorLocation();
+        Target = NavRotate(FVector2D(DockDelta.X, DockDelta.Y), -FMath::DegreesToRadians(GetActorRotation().Yaw));
+    }
 	TArray<UBoxComponent*> Parts = {BodyCollision, LeftSupportLegCollision, RightSupportLegCollision,
 		LeftForkCollision, RightForkCollision, LidarMastOccluder};
 	GetSupportedPalletShapes(Parts);
@@ -943,10 +976,12 @@ FollowNavigationRoute:
 	float Best=-BIG_NUMBER, BestSpeed=0.f, BestRate=0.f;
 	for (const int32 HorizonSteps : {25, 8})
 	{
-		for (float Speed:{-20.f, 0.f, 8.f, (bBridgingScan || S->GetConfidence()<.45f) ? 15.f : 30.f, (bBridgingScan || S->GetConfidence()<.45f) ? 30.f : 60.f})
+		for (float Speed:{-20.f, -4.f, -2.f, -.5f, -.25f, 0.f, .25f, .5f, 1.f, 2.f, 4.f, 8.f, (bBridgingScan || S->GetConfidence()<.45f) ? 15.f : 30.f, (bBridgingScan || S->GetConfidence()<.45f) ? 30.f : 60.f})
 		for (float Steering : {-1.f, -.5f, 0.f, .5f, 1.f})
 		{
 			if (Speed == 0.f) continue;
+			if (FactoryServiceGoal.IsSet() && Target.Size() < 200.f && FMath::Abs(Speed) > 15.f) continue;
+			if (FactoryServiceGoal.IsSet() && Target.Size() < 30.f && FMath::Abs(Speed) > 4.f) continue;
 			const float Wheelbase = FMath::Max(1.f, Dimensions.WheelbaseCm);
 			const float MaxAngle = FMath::Atan(Wheelbase / FMath::Max(1.f, Motion.AutoFrontTurningRadiusCm));
 			const float Rate = FMath::RadiansToDegrees(Speed / Wheelbase * FMath::Tan(Steering * MaxAngle));
@@ -979,6 +1014,8 @@ FollowNavigationRoute:
 				const float Error = FMath::Abs(FMath::UnwindRadians(DesiredHeading - HeadingNow - A));
 				FinalHeadingPenalty = Error * 100.f;
 			}
+			if (FactoryServiceHeading.IsSet() && FVector2D::Distance(Pose, NavigationGoal) < 200.f)
+				FinalHeadingPenalty = FMath::Abs(FMath::UnwindRadians(FMath::DegreesToRadians(FactoryServiceHeading.GetValue() - GetActorRotation().Yaw) - A)) * (Target.Size() < 60.f ? 30.f : 10.f);
 			const float Score=(Target.Size()-Remaining.Size())-Heading*30.f-FMath::Abs(Rate)*.1f-PivotPenalty-FinalHeadingPenalty;
 			if (Score>Best) { Best=Score; BestSpeed=Speed; BestRate=Rate; }
 		}

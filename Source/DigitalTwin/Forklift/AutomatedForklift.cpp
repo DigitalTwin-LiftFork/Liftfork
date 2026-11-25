@@ -206,6 +206,10 @@ NavigationSensor->SetRelativeLocation(
 	PalletSensorDepthRenderTarget->ClearColor = FLinearColor::Black;
 	PalletSensorDepthRenderTarget->InitCustomFormat(960, 540, PF_FloatRGBA, false);
 	PalletSensorDepthCapture->TextureTarget = PalletSensorDepthRenderTarget;
+#if WITH_EDITORONLY_DATA
+	if (PalletSensorRenderTarget) PalletSensorRenderTarget->AssetImportData = nullptr;
+	if (PalletSensorDepthRenderTarget) PalletSensorDepthRenderTarget->AssetImportData = nullptr;
+#endif
 
 	ForkBackrestCollision = CreateDefaultSubobject<UBoxComponent>(TEXT("ForkBackrestCollision"));
 	ForkBackrestCollision->SetupAttachment(ForkCarriage);
@@ -262,7 +266,23 @@ NavigationSensor->SetRelativeLocation(
 	bUseControllerRotationRoll = false;
 }
 
-void AAutomatedForklift::OnConstruction(const FTransform& Transform) { Super::OnConstruction(Transform); ApplyDimensions(); }
+void AAutomatedForklift::OnConstruction(const FTransform& Transform) {
+    Super::OnConstruction(Transform); ApplyDimensions();
+#if WITH_EDITORONLY_DATA
+	if (PalletSensorRenderTarget) PalletSensorRenderTarget->AssetImportData = nullptr;
+	if (PalletSensorDepthRenderTarget) PalletSensorDepthRenderTarget->AssetImportData = nullptr;
+#endif
+}
+void AAutomatedForklift::PostLoad()
+{
+	Super::PostLoad();
+#if WITH_EDITORONLY_DATA
+	// Generated camera targets have no imported source file. Inherited CDO import
+	// metadata is a private editor object and cannot be serialized into a level.
+	if (PalletSensorRenderTarget) PalletSensorRenderTarget->AssetImportData = nullptr;
+	if (PalletSensorDepthRenderTarget) PalletSensorDepthRenderTarget->AssetImportData = nullptr;
+#endif
+}
 void AAutomatedForklift::BeginPlay()
 {
 	Super::BeginPlay();
@@ -557,6 +577,10 @@ void AAutomatedForklift::UpdatePalletSensorSettings()
 	PalletSensorDepthCapture->FOVAngle = PalletSensorFieldOfViewDeg;
 	PalletSensorDepthCapture->CaptureSource = ESceneCaptureSource::SCS_SceneDepth;
 	PalletSensorDepthCapture->TextureTarget = PalletSensorDepthRenderTarget;
+#if WITH_EDITORONLY_DATA
+	if (PalletSensorRenderTarget) PalletSensorRenderTarget->AssetImportData = nullptr;
+	if (PalletSensorDepthRenderTarget) PalletSensorDepthRenderTarget->AssetImportData = nullptr;
+#endif
 
 	if (PalletSensorRenderTarget->SizeX != PalletSensorWidthPx || PalletSensorRenderTarget->SizeY != PalletSensorHeightPx || PalletSensorRenderTarget->GetFormat() != PF_B8G8R8A8)
 	{
@@ -3230,7 +3254,7 @@ void AAutomatedForklift::Tick(float Dt)
 	ProcessOpeningVision();
 	UpdateAutoPickup(Dt);
 	const bool bAutoMotion = IsAutoPickupMotionActive();
-	LastAppliedDriveInput = bAutoMotion ? AutoDriveInput : DriveInput;
+		LastAppliedDriveInput = bAutoMotion ? AutoDriveInput : DriveInput;
 	LastAppliedSteerInput = bAutoMotion ? AutoSteerInput : SteerInput;
 	const float Speed = LastAppliedDriveInput >= 0.f ? Motion.ForwardSpeedCmPerSec : Motion.ReverseSpeedCmPerSec;
 	TargetForwardSpeedCmPerSec = LastAppliedDriveInput * Speed;
@@ -3434,6 +3458,7 @@ void AAutomatedForklift::Tick(float Dt)
 	// The restored controller still writes the original command fields.  Prefer
 	// the dedicated automatic channels when present, otherwise consume those
 	// legacy automatic values only while the state machine owns motion.
+	if (TransportCoordinator) TransportCoordinator->ApplyChargingInterlock();
 	LastAppliedDriveInput = bAutoMotion ? (!FMath::IsNearlyZero(AutoDriveInput) ? AutoDriveInput : DriveInput) : DriveInput;
 	LastAppliedSteerInput = bAutoMotion ? (!FMath::IsNearlyZero(AutoSteerInput) ? AutoSteerInput : SteerInput) : SteerInput;
 	LastAppliedLiftInput = bAutoMotion ? (!FMath::IsNearlyZero(AutoLiftInput) ? AutoLiftInput : LiftInput) : LiftInput;

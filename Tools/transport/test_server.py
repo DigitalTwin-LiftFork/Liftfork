@@ -78,6 +78,38 @@ class TransportTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.c.sync(copy.deepcopy(self.data))
 
+    def test_charge_command_ack_and_delivery(self):
+        command = self.c.charging(dict(action='request'))
+        result = self.c.sync(copy.deepcopy(self.data))
+        self.assertEqual(result['charging_command']['id'], command['id'])
+        self.assertEqual(self.c.sync(copy.deepcopy(self.data))['charging_command']['id'], command['id'])
+        self.data['charge_ack'] = command['id']
+        self.assertIsNone(self.c.sync(copy.deepcopy(self.data))['charging_command'])
+
+    def test_pending_charge_blocks_dispatch(self):
+        self.job()
+        self.c.charging(dict(action='request'))
+        self.data.update(ready=True, loaded='P-001')
+        self.assertIsNone(self.c.sync(copy.deepcopy(self.data))['job'])
+
+    def test_low_battery_blocks_dispatch(self):
+        self.job()
+        self.data.update(ready=True, loaded='P-001', battery=dict(percent=19,low_threshold=20,state='idle'))
+        self.assertIsNone(self.c.sync(copy.deepcopy(self.data))['job'])
+
+    def test_charge_cancel_and_validation(self):
+        self.c.charging(dict(action='request'))
+        self.c.charging(dict(action='cancel'))
+        self.assertEqual(self.c.sync(copy.deepcopy(self.data))['charging_command']['action'], 'cancel')
+        with self.assertRaises(ValueError): self.c.charging(dict(action='drive'))
+        self.c.seen=time.time()-6
+        with self.assertRaises(ValueError): self.c.charging(dict(action='request'))
+
+    def test_contact_transition_states_block_dispatch(self):
+        self.job()
+        for phase in ['connecting','charging','disconnecting']:
+            self.data.update(ready=True,loaded='P-001',battery=dict(percent=80,low_threshold=20,state=phase))
+            self.assertIsNone(self.c.sync(copy.deepcopy(self.data))['job'])
     def test_restart_interrupts_active(self):
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory)/'jobs.sqlite')

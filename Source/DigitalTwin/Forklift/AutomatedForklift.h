@@ -380,6 +380,7 @@ public:
 	/** Reapplies sizes after editing Dimensions in the Details panel (safe during construction). */
 	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void BeginPlay() override;
+    virtual void PostLoad() override;
 	UTextureRenderTarget2D* GetPalletSensorRenderTarget() const { return PalletSensorRenderTarget; }
 	float GetSupportedLoadKg() const { return SupportedLoadKg; }
 	bool IsOverRatedCapacity() const { return bOverRatedCapacity; }
@@ -547,6 +548,9 @@ private:
 	float FactoryMapToWorldYaw = 0.f;
 	FVector2D FactoryMapOriginInWorld = FVector2D::ZeroVector;
 	void ScanRackRows();
+	void GoToServicePoint(const FVector& WorldGoal);
+	TOptional<FVector> FactoryServiceGoal;
+	TOptional<float> FactoryServiceHeading;
 	void ResolveWorkStations(const class UForkliftSlamComponent& Slam, const FVector2D& Start);
 	bool IsFactoryAisleClear(const FVector& Position, float Radius) const;
 	TArray<FVector2D> ExplorationVisited;

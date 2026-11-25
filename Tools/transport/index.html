@@ -6,8 +6,14 @@ body{margin:0;background:#f3f6f7;color:#172b39;font:16px "Malgun Gothic",sans-se
 </style><main>
 <h1>공장 운반 작업</h1><p id="connection">연결 확인 중</p><p id="loadStatus" role="status"></p>
 <p class="muted">입고 구역에서 팔레트를 수동으로 집으세요. 등록한 팔레트가 운반 높이에 도달하면 해당 작업을 배정합니다.</p>
-<form id="form"><label>팔레트 <select id="pallet" required></select></label><label>목적지 선반 <select id="destination" required></select></label><button id="submit">운반 등록</button></form>
+<section><h2>배터리 / 자동 충전</h2><p id="batteryStatus">Factory 배터리 상태 대기</p><progress id="batteryLevel" max="100" value="0"></progress>
+<button type="button" id="chargeGo">충전소 이동</button> <button type="button" id="chargeCancel">충전 요청 취소</button>
+<p class="muted">접점식 자동 충전 · 20% 이하 복귀 · 방향/위치 정렬 → 접점 및 BMS 승인 → 충전 → 전류 차단·접점 해제 · 기본 실제 시간 1x (전기/BMS 모델은 시뮬레이션)</p></section>
+<form id="form"><label>팔레트 <select id="pallet" required></select></label><label>목적지 선반 (A~C 원자재 / D~F 완제품) <select id="destination" required></select></label><button id="submit">운반 등록</button></form>
 <p id="message" role="status"></p>
+<h2>1층 공장 구역</h2><p class="muted">입고 → 검사 → 원자재 보관 → 생산 투입 → 완제품 보관 → 출고 · 충전·주차는 별도 구역</p>
+<p class="muted">생산·검사·충전 구역은 작업 공간 표시입니다. 현재 운반 등록 목적지는 기존 선반입니다.</p>
+<table><thead><tr><th>구역</th><th>용도</th></tr></thead><tbody id="areas"></tbody></table>
 <h2>선반 현황</h2><label>구역 <select id="zone"><option>A</option><option>B</option><option>C</option><option>D</option><option>E</option><option>F</option></select></label>
 <p class="muted">위에서부터 3층·2층·1층 · 갈색은 사용 중 · 녹색은 작업 예약</p><div class="slots" id="slots"></div>
 <h2>작업 목록</h2><table><thead><tr><th>팔레트</th><th>목적지</th><th>상태</th><th>설명</th><th></th></tr></thead><tbody id="jobs"></tbody></table>
@@ -20,6 +26,8 @@ function jobReason(j){
  if(j.status!=="queued")return j.message;
  if(!state.online)return "Factory 연결을 기다립니다";
  const s=state.snapshot||{};
+ if(!(s.pallets||[]).some(p=>p.id===j.pallet))return "현재 공장에 없는 팔레트입니다. 취소 후 현재 번호로 등록하세요.";
+ if(s.battery&&["waiting","returning","connecting","charging","disconnecting"].includes(s.battery.state))return "충전 대기 / 진행 중 · "+s.battery.message;
  if(!s.loaded)return j.pallet+"를 수동으로 집으세요. 포크에 지지된 팔레트가 없습니다.";
  if(s.loaded!==j.pallet)return "현재 적재: "+s.loaded+" · 이 작업은 "+j.pallet+" 집기를 기다립니다.";
  if(state.jobs.some(x=>["assigned","moving","unloading","withdrawing"].includes(x.status)))return "진행 중인 운반 작업 완료를 기다립니다";
@@ -28,6 +36,7 @@ function jobReason(j){
  if(!s.ready)return "운반 준비 대기: 포크 높이 15~60cm로 조절하고 기존 자동 동작을 완료하세요";
  return "운반 배정을 기다립니다";
 }
+function renderBattery(){const b=state.snapshot?.battery;$("chargeGo").disabled=$("chargeCancel").disabled=!state.online||!b;$("batteryLevel").value=b?.percent||0;$("batteryStatus").textContent=b?b.percent.toFixed(1)+"% · "+b.message+" · "+(b.power_kw||0).toFixed(1)+"kW / "+(b.current_a||0).toFixed(0)+"A · 시간 "+b.time_scale+"x":"Factory 배터리 상태 대기"}
 function cell(row,text){const td=document.createElement("td");td.textContent=text??"";row.append(td);return td}
 function options(el,values){const old=el.value;el.replaceChildren(...values.map(([value,label])=>new Option(label,value)));if(values.some(v=>v[0]===old))el.value=old}
 async function post(url,data){const r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)});const d=await r.json();if(!r.ok)throw Error(d.error);return d}
@@ -35,9 +44,11 @@ function renderSlots(){const z=$("zone").value;$("slots").replaceChildren();for(
 async function refresh(){try{const r=await fetch("/api/state");state=await r.json();$("loadStatus").textContent=state.online?("현재 적재: "+(state.snapshot.loaded||"없음")+" · "+(state.snapshot.ready?"운반 준비 완료":"수동 집기 / 운반 준비 대기")):"";$("connection").textContent=state.online?"지게차 연결됨 · "+(state.snapshot.message||"대기"):"지게차 연결 대기 · Factory 플레이를 시작하세요";$("submit").disabled=!state.online;
 options($("pallet"),(state.snapshot?.pallets||[]).map(p=>[p.id,p.id+" · "+p.location]));
 options($("destination"),state.slots.filter(s=>!s.occupied&&!s.reserved_by).map(s=>[s.id,s.id]));
-renderSlots();$("jobs").replaceChildren();for(const j of state.jobs){const tr=document.createElement("tr");cell(tr,j.pallet);cell(tr,j.destination);cell(tr,names[j.status]||j.status);cell(tr,jobReason(j));const td=cell(tr,"");if(!["completed","failed","cancelled","interrupted"].includes(j.status)){const b=document.createElement("button");b.textContent=j.cancel_requested?"취소 요청됨":"취소";b.disabled=!!j.cancel_requested;b.onclick=async()=>{try{await post("/api/jobs/"+j.id+"/cancel",{});await refresh()}catch(e){$("message").textContent=e.message}};td.append(b)}$("jobs").append(tr)}
+$("areas").replaceChildren();for(const a of state.snapshot?.areas||[]){const tr=document.createElement("tr");const label=cell(tr,a.name);label.style.borderLeft="6px solid "+a.color;cell(tr,a.purpose);$("areas").append(tr)}
+renderBattery();renderSlots();$("jobs").replaceChildren();for(const j of state.jobs){const tr=document.createElement("tr");cell(tr,j.pallet);cell(tr,j.destination);cell(tr,names[j.status]||j.status);cell(tr,jobReason(j));const td=cell(tr,"");if(!["completed","failed","cancelled","interrupted"].includes(j.status)){const b=document.createElement("button");b.textContent=j.cancel_requested?"취소 요청됨":"취소";b.disabled=!!j.cancel_requested;b.onclick=async()=>{try{await post("/api/jobs/"+j.id+"/cancel",{});await refresh()}catch(e){$("message").textContent=e.message}};td.append(b)}$("jobs").append(tr)}
 $("inventory").replaceChildren();for(const p of state.snapshot?.pallets||[]){const tr=document.createElement("tr");cell(tr,p.id);cell(tr,p.location);$("inventory").append(tr)}
 }catch(e){$("connection").textContent="서버 연결 끊김";$("submit").disabled=true}}
 $("form").onsubmit=async e=>{e.preventDefault();try{await post("/api/jobs",{pallet:$("pallet").value,destination:$("destination").value});$("message").textContent="운반 작업을 등록했습니다";await refresh()}catch(e){$("message").textContent=e.message}};
+for(const [id,action] of [["chargeGo","request"],["chargeCancel","cancel"]])$(id).onclick=async()=>{try{await post("/api/charging",{action});$("message").textContent=action==="request"?"충전소 이동을 요청했습니다":"충전 취소를 요청했습니다";await refresh()}catch(e){$("message").textContent=e.message}};
 $("zone").onchange=renderSlots;refresh();setInterval(refresh,1500);
 </script></html>
