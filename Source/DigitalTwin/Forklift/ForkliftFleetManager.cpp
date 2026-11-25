@@ -15,8 +15,8 @@ AForkliftFleetManager::AForkliftFleetManager()
 
 void AForkliftFleetManager::RegisterForklift(AAutomatedForklift* Forklift)
 {
-	if (!IsValid(Forklift) || Forklifts.Contains(Forklift)) return;
-	Forklifts.Add(Forklift);
+	if (!IsValid(Forklift) || AllForklifts.Contains(Forklift)) return;
+	AllForklifts.Add(Forklift);
 	Forklift->SetFleetIdentity(NextFleetId++, this);
 }
 
@@ -30,8 +30,12 @@ bool AForkliftFleetManager::IsSpawnAreaClear(const FVector& Location, const AAut
 	ObjectTypes.AddObjectTypesToQuery(ECC_Pawn);
 	FCollisionQueryParams Query(SCENE_QUERY_STAT(ForkliftFleetSpawn), false, IgnoreForklift);
 	TArray<FOverlapResult> Overlaps;
-	const FCollisionShape Footprint = FCollisionShape::MakeBox(FVector(190.f, 125.f, 100.f));
-	if (!GetWorld()->OverlapMultiByObjectType(Overlaps, Location, FQuat::Identity, ObjectTypes, Footprint, Query)) return true;
+	// The body/tines extend forward from the actor origin. Keep the query above
+	// the floor; an earlier 100 cm half-height intersected the floor and rejected
+	// every candidate as occupied.
+	const FVector QueryLocation = Location + FVector(0.f, 0.f, 8.f);
+	const FCollisionShape Footprint = FCollisionShape::MakeBox(FVector(275.f, 105.f, 42.f));
+	if (!GetWorld()->OverlapMultiByObjectType(Overlaps, QueryLocation, IgnoreForklift ? IgnoreForklift->GetActorQuat() : FQuat::Identity, ObjectTypes, Footprint, Query)) return true;
 	for (const FOverlapResult& Overlap : Overlaps)
 	{
 		const AActor* Other = Overlap.GetActor();
@@ -43,45 +47,75 @@ bool AForkliftFleetManager::IsSpawnAreaClear(const FVector& Location, const AAut
 bool AForkliftFleetManager::DeployFleet(AAutomatedForklift* LeadForklift)
 {
 	if (!GetWorld() || !IsValid(LeadForklift)) return false;
+	if (PatrolForklifts.Num() >= PatrolFleetSize) return true;
 	const FVector Origin = LeadForklift->GetActorLocation();
 	const FRotator Rotation = LeadForklift->GetActorRotation();
+	TArray<FVector> SpawnLocations;
 	const FVector Right = LeadForklift->GetActorRightVector();
 	const FVector Forward = LeadForklift->GetActorForwardVector();
-	const FVector Offsets[] = {
-		Right * 650.f, -Right * 650.f, Forward * 850.f, -Forward * 850.f,
-		(Right + Forward).GetSafeNormal() * 1100.f, (Right - Forward).GetSafeNormal() * 1100.f,
-		(-Right + Forward).GetSafeNormal() * 1100.f, (-Right - Forward).GetSafeNormal() * 1100.f
-	};
-
-	int32 SpawnedCount = 0;
-	for (const FVector& Offset : Offsets)
+	const float CandidateRadii[] = {700.f, 1050.f, 1450.f, 1900.f, 2400.f, 3000.f, 3700.f, 4500.f};
+	for (const float Radius : CandidateRadii)
 	{
-		if (Forklifts.Num() >= MaximumFleetSize) break;
-		const FVector Candidate = Origin + Offset;
-		if (!IsSpawnAreaClear(Candidate, LeadForklift)) continue;
+		for (int32 Direction = 0; Direction < 16 && SpawnLocations.Num() < PatrolFleetSize; ++Direction)
+		{
+			const float Angle = 2.f * UE_PI * static_cast<float>(Direction) / 16.f;
+			const FVector Offset = (Right * FMath::Cos(Angle) + Forward * FMath::Sin(Angle)) * Radius;
+			const FVector Candidate = Origin + Offset;
+			if (!IsSpawnAreaClear(Candidate, LeadForklift)) continue;
+			bool bSeparatedFromPlanned = true;
+			for (const FVector& Planned : SpawnLocations)
+			{
+				if (FVector::DistSquared2D(Candidate, Planned) < FMath::Square(650.f))
+				{
+					bSeparatedFromPlanned = false;
+					break;
+				}
+			}
+			if (bSeparatedFromPlanned) SpawnLocations.Add(Candidate);
+		}
+		if (SpawnLocations.Num() >= PatrolFleetSize) break;
+	}
+	if (SpawnLocations.Num() != PatrolFleetSize)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[FORKLIFT_FLEET] Could not find 3 clear patrol spawn locations; found %d. Player forklift was left unchanged."), SpawnLocations.Num());
+		return false;
+	}
+
+	TArray<AAutomatedForklift*> Spawned;
+	for (const FVector& Candidate : SpawnLocations)
+	{
 		FActorSpawnParameters SpawnParams;
-		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::DontSpawnIfColliding;
+		// Candidate boxes above have already passed a conservative world overlap
+		// query. Let UE resolve tiny contact-at-floor tolerances during spawn.
+		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
 		AAutomatedForklift* NewForklift = GetWorld()->SpawnActor<AAutomatedForklift>(
 			AAutomatedForklift::StaticClass(), Candidate, Rotation, SpawnParams);
-		if (!IsValid(NewForklift)) continue;
+		if (!IsValid(NewForklift))
+		{
+			for (AAutomatedForklift* Partial : Spawned) if (IsValid(Partial)) Partial->Destroy();
+			UE_LOG(LogTemp, Error, TEXT("[FORKLIFT_FLEET] A planned patrol spawn collided; removed partial deployment."));
+			return false;
+		}
 		RegisterForklift(NewForklift);
-		++SpawnedCount;
+		PatrolForklifts.Add(NewForklift);
+		Spawned.Add(NewForklift);
 	}
-	if (SpawnedCount > 0)
-	{
-		UE_LOG(LogTemp, Display, TEXT("[FORKLIFT_FLEET] Deployed %d additional forklifts; fleet size %d."), SpawnedCount, Forklifts.Num());
-	}
-	return SpawnedCount > 0;
+	UE_LOG(LogTemp, Display, TEXT("[FORKLIFT_FLEET] Deployed exactly %d separate patrol forklifts; player forklift remains untouched."), Spawned.Num());
+	return Spawned.Num() == PatrolFleetSize;
 }
 
 void AForkliftFleetManager::ToggleFleetOperation(AAutomatedForklift* RequestingForklift)
 {
 	if (!IsValid(RequestingForklift)) return;
 	RegisterForklift(RequestingForklift);
-	if (Forklifts.Num() < MaximumFleetSize) DeployFleet(RequestingForklift);
+	if (PatrolForklifts.Num() < PatrolFleetSize && !DeployFleet(RequestingForklift))
+	{
+		RequestingForklift->SetFleetOperationMessage(TEXT("순찰 지게차 3대를 배치할 공간을 찾지 못했습니다"));
+		return;
+	}
 
 	bFleetMoving = !bFleetMoving;
-	for (AAutomatedForklift* Forklift : Forklifts)
+	for (AAutomatedForklift* Forklift : PatrolForklifts)
 	{
 		if (!IsValid(Forklift)) continue;
 		if (bFleetMoving)
@@ -93,18 +127,18 @@ void AForkliftFleetManager::ToggleFleetOperation(AAutomatedForklift* RequestingF
 			Forklift->StopNavigation();
 		}
 	}
-	UE_LOG(LogTemp, Display, TEXT("[FORKLIFT_FLEET] Fleet %s; active vehicles %d."), bFleetMoving ? TEXT("started") : TEXT("stopped"), Forklifts.Num());
+	UE_LOG(LogTemp, Display, TEXT("[FORKLIFT_FLEET] Three patrol vehicles %s; player forklift unaffected."), bFleetMoving ? TEXT("started") : TEXT("stopped"));
 }
 
 void AForkliftFleetManager::UpdateDeadlockHandling(float DeltaSeconds)
 {
-	for (int32 A = 0; A < Forklifts.Num(); ++A)
+	for (int32 A = 0; A < PatrolForklifts.Num(); ++A)
 	{
-		AAutomatedForklift* First = Forklifts[A];
+		AAutomatedForklift* First = PatrolForklifts[A];
 		if (!IsValid(First) || !First->IsNavigationActive()) continue;
-		for (int32 B = A + 1; B < Forklifts.Num(); ++B)
+		for (int32 B = A + 1; B < PatrolForklifts.Num(); ++B)
 		{
-			AAutomatedForklift* Second = Forklifts[B];
+			AAutomatedForklift* Second = PatrolForklifts[B];
 			if (!IsValid(Second) || !Second->IsNavigationActive()) continue;
 			const bool bFirstYielding = First->SafetyInterlockStatus.Contains(TEXT("통행 양보 정지"));
 			const bool bSecondYielding = Second->SafetyInterlockStatus.Contains(TEXT("통행 양보 정지"));
@@ -142,7 +176,8 @@ void AForkliftFleetManager::UpdateDeadlockHandling(float DeltaSeconds)
 void AForkliftFleetManager::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
-	Forklifts.RemoveAll([](const TObjectPtr<AAutomatedForklift>& Forklift) { return !IsValid(Forklift); });
+	AllForklifts.RemoveAll([](const TObjectPtr<AAutomatedForklift>& Forklift) { return !IsValid(Forklift); });
+	PatrolForklifts.RemoveAll([](const TObjectPtr<AAutomatedForklift>& Forklift) { return !IsValid(Forklift); });
 	if (!bFleetMoving) return;
 	DeadlockCheckElapsed += DeltaSeconds;
 	if (DeadlockCheckElapsed < 1.f) return;

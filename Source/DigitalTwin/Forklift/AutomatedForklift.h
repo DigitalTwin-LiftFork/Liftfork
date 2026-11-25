@@ -490,6 +490,7 @@ public:
 	void StopNavigation();
 	/** Fleet controls: set by the manager when this vehicle joins the fleet. */
 	void SetFleetIdentity(int32 InFleetId, AForkliftFleetManager* InManager);
+	void SetFleetOperationMessage(const FString& Message) { NavigationStatus = Message; }
 	int32 GetFleetId() const { return FleetId; }
 	bool TryFleetDeadlockYield(const FString& Reason);
 	void ToggleFleetOperation();

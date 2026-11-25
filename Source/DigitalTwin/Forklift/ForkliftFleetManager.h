@@ -18,17 +18,18 @@ public:
 
 	void RegisterForklift(AAutomatedForklift* Forklift);
 	void ToggleFleetOperation(AAutomatedForklift* RequestingForklift);
-	int32 GetFleetSize() const { return Forklifts.Num(); }
+	int32 GetFleetSize() const { return PatrolForklifts.Num(); }
 
 private:
 	bool DeployFleet(AAutomatedForklift* LeadForklift);
 	bool IsSpawnAreaClear(const FVector& Location, const AAutomatedForklift* IgnoreForklift) const;
 	void UpdateDeadlockHandling(float DeltaSeconds);
 
-	UPROPERTY() TArray<TObjectPtr<AAutomatedForklift>> Forklifts;
+	UPROPERTY() TArray<TObjectPtr<AAutomatedForklift>> AllForklifts;
+	UPROPERTY() TArray<TObjectPtr<AAutomatedForklift>> PatrolForklifts;
 	TMap<uint64, float> BlockedPairSeconds;
 	float DeadlockCheckElapsed = 0.f;
 	bool bFleetMoving = false;
 	int32 NextFleetId = 0;
-	static constexpr int32 MaximumFleetSize = 3;
+	static constexpr int32 PatrolFleetSize = 3;
 };
