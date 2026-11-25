@@ -176,6 +176,7 @@ void AAutomatedForklift::GetNavigationDiagnosticLines(TArray<FString>& OutLines)
 	OutLines.Add(FString::Printf(TEXT("적재 %s | 포크 높이 %.1fcm | 리치 %.1fcm"),
 		(CarriedPallet || bIsLoaded) ? TEXT("감지") : TEXT("미감지"), LiftCm, ReachCm));
 	OutLines.Add(FString::Printf(TEXT("상태 / 정지 이유: %s"), *NavigationStatus));
+	OutLines.Add(FString::Printf(TEXT("공장 안전: %s"), *SafetyInterlockStatus));
 }
 
 bool AAutomatedForklift::TryNavigationBackOut(const FString& Reason)

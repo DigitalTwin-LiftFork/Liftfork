@@ -18,6 +18,8 @@ class UTextureRenderTarget2D;
 class UPhysicsConstraintComponent;
 class UPhysicalMaterial;
 class UForkliftNavigationSensorComponent;
+class AForkliftSafetyZone;
+class AFactoryTrafficTestCart;
 
 class APallet;
 
@@ -183,6 +185,11 @@ public:
 	UPROPERTY(VisibleAnywhere, Category="Collision safety") FString LastCollisionSeverity = TEXT("None");
 	UPROPERTY(VisibleAnywhere, Category="Collision safety") bool bImpactSafetyStopActive = false;
 	UPROPERTY(VisibleAnywhere, Category="Collision safety") bool bImpactLoadEjectTriggered = false;
+	/** Simulation traffic interlock tuning; values are not industrial safety certification data. */
+	UPROPERTY(EditAnywhere, Category="Factory safety", meta=(ClampMin="0.0", ClampMax="500.0")) float SafetyStoppingMarginCm = 120.f;
+	UPROPERTY(EditAnywhere, Category="Factory safety", meta=(ClampMin="0.0", ClampMax="100.0")) float SafetyFootprintMarginCm = 20.f;
+	UPROPERTY(VisibleAnywhere, Category="Factory safety") bool bManualEmergencyStopActive = false;
+	UPROPERTY(VisibleAnywhere, Category="Factory safety") FString SafetyInterlockStatus = TEXT("안전 감시 대기");
 	UPROPERTY(EditAnywhere, Category="Drive debug") bool bEnableDriveDebug = false;
 	UPROPERTY(EditAnywhere, Category="Drive debug", meta=(ClampMin="0.05")) float DriveDebugIntervalSeconds = 0.25f;
 	UPROPERTY(EditAnywhere, Category="Drive debug") bool bDrawDriveDebug = false;
@@ -590,6 +597,8 @@ private:
 	int32 RolloverSupportEdgeIndex = INDEX_NONE;
 	float LastSupportedLoadSlipLogTime = -BIG_NUMBER;
 	float CollisionSafetyStopRemainingSeconds = 0.f;
+	FString LastLoggedSafetyInterlockStatus;
+	UPROPERTY(Transient) TObjectPtr<AFactoryTrafficTestCart> TrafficTestCart;
 	float CollisionMeasureDeltaSeconds = 1.f / 60.f;
 	int32 LastImpactResponseFrameNumber = INDEX_NONE;
 	int32 LastLoadEjectFrameNumber = INDEX_NONE;
@@ -767,6 +776,8 @@ private:
 	void SaveRgbExposureSweepArtifact(const TArray<FColor>& Pixels, float ExposureBias, int32 CaptureId, const FString& CaptureKind) const;
 
 	void ToggleSlamMapDebug();
+	void ToggleTrafficTestCart();
+	void ToggleManualEmergencyStop();
 
 	void UpdateAutoPickup(float DeltaSeconds);
 	void SetAutoPickupState(EAutoPickupState NewState, const FString& Status);
@@ -795,6 +806,7 @@ private:
 	void ConfigureLiftHeightReference();
 	void UpdateMastVisuals(float ActualLiftCm);
 	void LogInputInvocation(const TCHAR* InputName, float Value);
+	float ApplyFactorySafetyInterlocks(float RequestedSpeedCmPerSec, float DeltaSeconds);
 	void ApplyDimensions();
 	void SpawnPallet();
 	void InteractWithPallet();

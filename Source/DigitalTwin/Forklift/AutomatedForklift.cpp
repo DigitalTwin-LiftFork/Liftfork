@@ -1,4 +1,6 @@
 #include "Forklift/AutomatedForklift.h"
+#include "Forklift/FactoryTrafficTestCart.h"
+#include "Forklift/ForkliftSafetyZone.h"
 #include "Forklift/Pallet.h"
 #include "Forklift/WoodPallet.h"
 #include "Forklift/ForkliftNavigationSensorComponent.h"
@@ -589,6 +591,8 @@ void AAutomatedForklift::SetupPlayerInputComponent(UInputComponent* Input)
 	Input->BindAction(TEXT("ForkliftSpawnPallet"), IE_Pressed, this, &AAutomatedForklift::SpawnPallet);
 	Input->BindAction(TEXT("ForkliftPalletInteract"), IE_Pressed, this, &AAutomatedForklift::InteractWithPallet);
 	Input->BindKey(EKeys::K, IE_Pressed, this, &AAutomatedForklift::ToggleCollisionDebug);
+	Input->BindKey(EKeys::T, IE_Pressed, this, &AAutomatedForklift::ToggleTrafficTestCart);
+	Input->BindKey(EKeys::X, IE_Pressed, this, &AAutomatedForklift::ToggleManualEmergencyStop);
 	Input->BindKey(EKeys::V, IE_Pressed, this, &AAutomatedForklift::TogglePalletSensorDisplay);
 	Input->BindKey(EKeys::N, IE_Pressed, this, &AAutomatedForklift::TogglePalletSensorCapture);
 	Input->BindKey(EKeys::O, IE_Pressed, this, &AAutomatedForklift::ToggleVisionDebugView);
@@ -613,6 +617,150 @@ void AAutomatedForklift::SetupPlayerInputComponent(UInputComponent* Input)
 	Input->BindKey(EKeys::M, IE_Pressed, this, &AAutomatedForklift::ToggleSlamMapDebug);
 
 
+}
+
+void AAutomatedForklift::ToggleTrafficTestCart()
+{
+	if (IsValid(TrafficTestCart))
+	{
+		TrafficTestCart->Destroy();
+		TrafficTestCart = nullptr;
+		UE_LOG(LogTemp, Log, TEXT("[FACTORY_TRAFFIC_TEST] crossing cart removed"));
+		if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 2.f, FColor::Cyan, TEXT("교차 통행 테스트 카트 제거"));
+		return;
+	}
+	if (!GetWorld()) return;
+	const FVector Forward = GetActorForwardVector();
+	const FVector Right = GetActorRightVector();
+	const float FloorZ = GetActorLocation().Z - Dimensions.BodyHeightCm * .5f;
+	const FVector SpawnLocation = GetActorLocation() + Forward * 700.f - Right * 400.f + FVector(0.f, 0.f, 100.f - Dimensions.BodyHeightCm * .5f);
+	const FRotator SpawnRotation(0.f, GetActorRotation().Yaw, 0.f);
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	TrafficTestCart = GetWorld()->SpawnActor<AFactoryTrafficTestCart>(AFactoryTrafficTestCart::StaticClass(), SpawnLocation, SpawnRotation, Params);
+	if (IsValid(TrafficTestCart))
+	{
+		SafetyInterlockStatus = TEXT("교차 통행 테스트 카트 운행 중");
+		UE_LOG(LogTemp, Log, TEXT("[FACTORY_TRAFFIC_TEST] spawned relative to forklift at floorZ=%.1f"), FloorZ);
+		if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 3.f, FColor::Cyan, TEXT("테스트 카트가 지게차 앞을 왕복합니다. W로 접근해 안전 정지를 확인하세요."));
+	}
+}
+
+void AAutomatedForklift::ToggleManualEmergencyStop()
+{
+	bManualEmergencyStopActive = !bManualEmergencyStopActive;
+	if (bManualEmergencyStopActive)
+	{
+		StopNavigation();
+		CancelAutoPickup(TEXT("비상 정지 입력(X)"), false);
+		DriveInput = SteerInput = LiftInput = ReachInput = SideShiftInput = 0.f;
+		AutoDriveInput = AutoSteerInput = AutoLiftInput = AutoReachInput = AutoSideShiftInput = 0.f;
+		SafetyInterlockStatus = TEXT("비상 정지 활성 — X를 다시 눌러 해제");
+	}
+	else
+	{
+		SafetyInterlockStatus = TEXT("비상 정지 해제 — 주행 명령 대기");
+	}
+	UE_LOG(LogTemp, Warning, TEXT("[FACTORY_SAFETY] emergency stop %s"), bManualEmergencyStopActive ? TEXT("activated") : TEXT("released"));
+	if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 3.f,
+		bManualEmergencyStopActive ? FColor::Red : FColor::Green,
+		bManualEmergencyStopActive ? TEXT("비상 정지 활성 — X로 해제") : TEXT("비상 정지 해제"));
+}
+
+float AAutomatedForklift::ApplyFactorySafetyInterlocks(float RequestedSpeedCmPerSec, float DeltaSeconds)
+{
+	if (bManualEmergencyStopActive)
+	{
+		SafetyInterlockStatus = TEXT("비상 정지 활성 — X를 다시 눌러 해제");
+	}
+	else if (!BodyCollision || !GetWorld())
+	{
+		SafetyInterlockStatus = TEXT("안전 감시 대기");
+	}
+	else
+	{
+		SafetyInterlockStatus = TEXT("안전 감시 정상");
+		const float DirectionSign = !FMath::IsNearlyZero(RequestedSpeedCmPerSec)
+			? FMath::Sign(RequestedSpeedCmPerSec) : FMath::Sign(CurrentForwardSpeedCmPerSec);
+		if (FMath::IsNearlyZero(DirectionSign))
+		{
+			SafetyInterlockStatus = TEXT("안전 감시 정상");
+		}
+		else
+		{
+			const FVector TravelDirection = GetActorForwardVector() * DirectionSign;
+			const FVector BodyExtent = BodyCollision->GetScaledBoxExtent();
+			const float Speed = FMath::Abs(CurrentForwardSpeedCmPerSec);
+			const float Brake = FMath::Max(1.f, FMath::Min(BrakeDecelerationCmPerSec2, GroundFrictionCoefficient * 980.f));
+			const float LookAheadCm = FMath::Max(180.f, FMath::Square(Speed) / (2.f * Brake) + SafetyStoppingMarginCm);
+			const FVector QueryCenter = BodyCollision->GetComponentLocation() + TravelDirection * (LookAheadCm * .5f);
+			const FVector QueryExtent(BodyExtent.X + LookAheadCm * .5f, BodyExtent.Y + SafetyFootprintMarginCm, BodyExtent.Z);
+			FQuat QueryRotation = BodyCollision->GetComponentQuat();
+			if (DirectionSign < 0.f) QueryRotation = FQuat(FVector::UpVector, PI) * QueryRotation;
+			FCollisionObjectQueryParams ObjectTypes;
+			ObjectTypes.AddObjectTypesToQuery(ECC_WorldDynamic);
+			ObjectTypes.AddObjectTypesToQuery(ECC_PhysicsBody);
+			ObjectTypes.AddObjectTypesToQuery(ECC_Pawn);
+			FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(FactoryTrafficSafetyEnvelope), false, this);
+			TArray<FOverlapResult> NearbyOverlaps;
+			GetWorld()->OverlapMultiByObjectType(NearbyOverlaps, QueryCenter, QueryRotation, ObjectTypes,
+				FCollisionShape::MakeBox(QueryExtent), QueryParams);
+			AActor* BlockingTraffic = nullptr;
+			for (const FOverlapResult& Overlap : NearbyOverlaps)
+			{
+				AActor* Other = Overlap.GetActor();
+				if (!Other || Other == this || Cast<APallet>(Other) || Cast<AWoodPallet>(Other)) continue;
+				BlockingTraffic = Other;
+				break;
+			}
+
+			if (BlockingTraffic)
+			{
+				SafetyInterlockStatus = FString::Printf(TEXT("통행 양보 정지: %s"), *GetNameSafe(BlockingTraffic));
+				RequestedSpeedCmPerSec = 0.f;
+			}
+			else
+			{
+				const FVector ProbePoint = GetActorLocation() + TravelDirection * (LookAheadCm + BodyExtent.X);
+				const float FootprintExpansion = FMath::Max(BodyExtent.X, BodyExtent.Y) + SafetyFootprintMarginCm;
+				float ZoneSpeedLimit = TNumericLimits<float>::Max();
+				FString ActiveZoneLabel;
+				for (TActorIterator<AForkliftSafetyZone> It(GetWorld()); It; ++It)
+				{
+					const AForkliftSafetyZone* Zone = *It;
+					if (!Zone) continue;
+					const bool bNearZone = Zone->ContainsPointExpanded(GetActorLocation(), FootprintExpansion) ||
+						Zone->ContainsPointExpanded(ProbePoint, FootprintExpansion);
+					if (!bNearZone) continue;
+					if (Zone->GetZoneType() == EForkliftSafetyZoneType::NoEntry)
+					{
+						SafetyInterlockStatus = FString::Printf(TEXT("진입 금지 구역 정지: %s"), *Zone->GetZoneLabel());
+						RequestedSpeedCmPerSec = 0.f;
+						break;
+					}
+					ZoneSpeedLimit = FMath::Min(ZoneSpeedLimit, Zone->GetMaximumSpeedCmPerSec());
+					ActiveZoneLabel = Zone->GetZoneLabel();
+				}
+				if (RequestedSpeedCmPerSec != 0.f && ZoneSpeedLimit < TNumericLimits<float>::Max())
+				{
+					RequestedSpeedCmPerSec = FMath::Sign(RequestedSpeedCmPerSec) * FMath::Min(FMath::Abs(RequestedSpeedCmPerSec), ZoneSpeedLimit);
+					SafetyInterlockStatus = FString::Printf(TEXT("속도 제한 구역: %s (최대 %.0f cm/s)"), *ActiveZoneLabel, ZoneSpeedLimit);
+				}
+				else if (RequestedSpeedCmPerSec == 0.f && SafetyInterlockStatus.IsEmpty())
+				{
+					SafetyInterlockStatus = TEXT("안전 감시 정상");
+				}
+			}
+		}
+	}
+
+	if (SafetyInterlockStatus != LastLoggedSafetyInterlockStatus)
+	{
+		UE_LOG(LogTemp, Display, TEXT("[FACTORY_SAFETY] %s"), *SafetyInterlockStatus);
+		LastLoggedSafetyInterlockStatus = SafetyInterlockStatus;
+	}
+	if (DeltaSeconds <= 0.f) return 0.f;
+	return RequestedSpeedCmPerSec;
 }
 #if 0 // duplicate input implementation from the pre-navigation merge branch
 void AAutomatedForklift::LogInputInvocation(const TCHAR* InputName, float Value)
@@ -3436,8 +3584,11 @@ void AAutomatedForklift::Tick(float Dt)
 	LastAppliedLiftInput = bAutoMotion ? (!FMath::IsNearlyZero(AutoLiftInput) ? AutoLiftInput : LiftInput) : LiftInput;
 	LastAppliedReachInput = bAutoMotion ? (!FMath::IsNearlyZero(AutoReachInput) ? AutoReachInput : ReachInput) : ReachInput;
 	LastAppliedSideShiftInput = bAutoMotion ? (!FMath::IsNearlyZero(AutoSideShiftInput) ? AutoSideShiftInput : SideShiftInput) : SideShiftInput;
+	if (bManualEmergencyStopActive)
+		LastAppliedDriveInput = LastAppliedSteerInput = LastAppliedLiftInput = LastAppliedReachInput = LastAppliedSideShiftInput = 0.f;
 	const float Speed = (LastAppliedDriveInput >= 0.f ? Motion.ForwardSpeedCmPerSec : Motion.ReverseSpeedCmPerSec) * CurrentDriveSpeedMultiplier;
-	const float RequestedSpeedCmPerSec = LastAppliedDriveInput * Speed;
+	float RequestedSpeedCmPerSec = LastAppliedDriveInput * Speed;
+	RequestedSpeedCmPerSec = ApplyFactorySafetyInterlocks(RequestedSpeedCmPerSec, Dt);
 	const float PreviousForwardSpeedCmPerSec = CurrentForwardSpeedCmPerSec;
 	const float GripAccelerationLimitCmPerSec2 = FMath::Max(1.f, GroundFrictionCoefficient * 980.f);
 	const bool bDirectionChange = RequestedSpeedCmPerSec * PreviousForwardSpeedCmPerSec < 0.f;
